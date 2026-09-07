@@ -7,6 +7,16 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
     NavigationCacheMode="Disabled">
+    
+    <!-- 引入底部栏主题资源 -->
+    <Page.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Resources/BottomBarThemeResources.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Page.Resources>
+    
     <Grid Background="Transparent">
         <Grid.RowDefinitions>
             <RowDefinition Height="48" />
@@ -85,7 +95,7 @@
             Height="Auto"
             MinHeight="40"
             CornerRadius="0,0,4,4"
-            Background="Transparent"
+            Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
             BorderThickness="0">
             <!-- Reactor 组件挂载点：使用 Grid 作为容器 -->

@@ -1244,6 +1244,9 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   <data name="BottomButtonBar_OpenExternalButton" xml:space="preserve">
     <value>在浏览器中打开</value>
   </data>
+  <data name="BottomButtonBar_ThemeToggleButton" xml:space="preserve">
+    <value>切换主题</value>
+  </data>
   
   <!-- 数据管理页面 -->
   <data name="DataManagement_Title" xml:space="preserve">

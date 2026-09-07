@@ -11,6 +11,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Managers
     /// <summary>
     /// 顶部栏和底部栏的主题管理器
     /// 负责根据网页颜色动态调整栏的背景色和前景色
+    /// 支持底部栏独立主题控制（不受网页主题色影响）
     /// </summary>
     public class BarThemeManager
     {
@@ -23,6 +24,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Managers
         private readonly SolidColorBrush _bottomBarHoverForegroundBrush = new();
         
         private FrameworkElement? _themeListenerElement; // 用于监听主题变化
+        private bool _bottomBarIndependentTheme = false; // ✅ 底部栏是否使用独立主题（不受网页主题色影响）
 
         public SolidColorBrush TopBarBackgroundBrush => _topBarBackgroundBrush;
         public SolidColorBrush BottomBarBackgroundBrush => _bottomBarBackgroundBrush;
@@ -106,10 +108,17 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Managers
         }
 
         /// <summary>
-        /// 应用栏的着色
+        /// 应用栏的着色（根据网页主题色动态调整）
         /// </summary>
         public void ApplyBarTint(bool isTop, Color sampledColor)
         {
+            // ✅ 如果底部栏使用独立主题，则跳过底部栏的着色
+            if (!isTop && _bottomBarIndependentTheme)
+            {
+                System.Diagnostics.Debug.WriteLine("[BarThemeManager] 底部栏使用独立主题，跳过网页主题色着色");
+                return;
+            }
+
             var tinted = Color.FromArgb(byte.MaxValue, sampledColor.R, sampledColor.G, sampledColor.B);
             SolidColorBrush background = isTop ? _topBarBackgroundBrush : _bottomBarBackgroundBrush;
             SolidColorBrush foreground = isTop ? _topBarForegroundBrush : _bottomBarForegroundBrush;
@@ -139,6 +148,20 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Managers
                 ColorService.AnimateColorChange(_bottomBarDisabledForegroundBrush, disabledColor);
             }
         }
+
+        /// <summary>
+        /// 启用底部栏独立主题模式（不受网页主题色影响，使用 BottomBarThemeResources.xaml 的主题）
+        /// </summary>
+        public void EnableBottomBarIndependentTheme(bool enable)
+        {
+            _bottomBarIndependentTheme = enable;
+            System.Diagnostics.Debug.WriteLine($"[BarThemeManager] 底部栏独立主题模式: {(enable ? "已启用" : "已禁用")}");
+        }
+
+        /// <summary>
+        /// 获取底部栏是否使用独立主题
+        /// </summary>
+        public bool IsBottomBarIndependentTheme => _bottomBarIndependentTheme;
 
         /// <summary>
         /// 应用系统强调色作为回退方案

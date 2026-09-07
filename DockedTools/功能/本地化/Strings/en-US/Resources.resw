@@ -1238,6 +1238,9 @@ Error Message: {1}</value>
   <data name="BottomButtonBar_OpenExternalButton" xml:space="preserve">
     <value>Open in browser</value>
   </data>
+  <data name="BottomButtonBar_ThemeToggleButton" xml:space="preserve">
+    <value>Toggle theme</value>
+  </data>
   
   <!-- Data Management Page -->
   <data name="DataManagement_Title" xml:space="preserve">

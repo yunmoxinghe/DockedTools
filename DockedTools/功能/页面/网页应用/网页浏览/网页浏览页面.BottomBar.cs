@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using System;
+using DockedTools.Features.Pages.WebApp.Browser.Services;
 
 namespace DockedTools.Features.Pages.WebApp.Browser
 {
@@ -11,6 +12,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
     {
         private void InitializeBottomBarReactor()
         {
+            // ✅ 注册底部栏主题服务
+            BottomBarThemeService.Register(BottomBarHost);
+
             // 创建 ReactorHostControl（WinUI ContentControl）
             _reactorHostControl = new Microsoft.UI.Reactor.Hosting.ReactorHostControl
             {
@@ -45,7 +49,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 return;
             }
 
-            const int buttonCount = 5;
+            const int buttonCount = 5;  // ✅ 恢复原来的按钮数量
             const double minButtonWidth = 40.0;
             const double maxButtonWidth = 68.0;
             const double fixedHorizontalSpacing = 4.0;  // 固定左右和按钮间距

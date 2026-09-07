@@ -47,6 +47,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         {
             System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] Unloaded 事件触发");
             
+            // ✅ 注销底部栏主题服务
+            Services.BottomBarThemeService.Unregister();
+            
             // 取消订阅更新事件
             Shared.WebAppUpdateService.UpdateCompleted -= OnWebAppUpdated;
             
