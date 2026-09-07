@@ -36,6 +36,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         {
             System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] Loaded 事件触发");
             
+            // ✅ 同步动态圆角到背景色块
+            SyncCornerRadius();
+            
             // Loaded 事件只负责初始化 WebView，不干预导航和链接管理
             // 链接管理由 INavigationAware.OnNavigatedTo 负责
             

@@ -24,6 +24,20 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
+        <!-- 顶栏背景色块 (Z轴最底层) - 支持一行代码换色 -->
+        <!-- 使用 Grid.RowSpan="2" 消除缝隙，但用 Margin 实现视觉效果 -->
+        <Border
+            x:Name="WebPageTopAppBarBackground"
+            Grid.Row="0"
+            CornerRadius="4,4,0,0"
+            Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" />
+
+        <!-- WebView 背景色块 (Z轴最底层) -->
+        <Border
+            x:Name="WebPageWebViewBackground"
+            Grid.Row="1"
+            Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" />
+
         <Border
             x:Name="TopBarTintHost"
             Grid.Row="0"
