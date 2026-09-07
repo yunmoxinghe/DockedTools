@@ -101,8 +101,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 System.Diagnostics.Debug.WriteLine("[WebBrowserPage] 页面之前被清理过，重置状态以允许恢复");
                 _isDisposed = false;
                 _isWebViewReady = false;
-                _hasReceivedFirstTint = false;
-                _hasAppliedThemeColor = false;
                 
                 // 重新订阅事件
                 Loaded += WebBrowserPage_Loaded;
@@ -115,36 +113,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 {
                     _pendingNavigationUri = uri;
                     System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 恢复待导航 URI: {uri}");
-                }
-            }
-            else
-            {
-                // ✅ 优化：切换到已开启的标签时，刷新上下颜色
-                // 确保颜色与当前网页状态一致（处理网页动态改变主题的情况）
-                if (WebView?.CoreWebView2 != null && _isWebViewReady)
-                {
-                    System.Diagnostics.Debug.WriteLine("[WebBrowserPage] 标签切换：刷新网页主题色");
-                    
-                    AsyncSafety.TryEnqueue(
-                        DispatcherQueue,
-                        async () =>
-                        {
-                            // 重置状态标志，允许重新提取颜色
-                            _hasAppliedThemeColor = false;
-                            
-                            // 重新提取主题色
-                            await TryApplyThemeColorAsync();
-                            
-                            // 如果没有 theme-color，触发采样取色
-                            if (!_hasAppliedThemeColor)
-                            {
-                                System.Diagnostics.Debug.WriteLine("[WebBrowserPage] 标签切换：没有 theme-color，触发采样取色");
-                                await Task.Delay(50); // 短暂延迟，确保 UI 已切换
-                                await TriggerTintSamplingAsync();
-                            }
-                        },
-                        "WebBrowserPage",
-                        "RefreshThemeColorOnTabSwitch");
                 }
             }
             
@@ -194,9 +162,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 {
                     WebView.CoreWebView2.Resume();
                     System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] WebView 已恢复");
-                    
-                    // ✅ 修复：WebView 恢复后重新注入取色脚本
-                    _ = ReInjectTintScriptAsync();
                 }
                 catch (Exception ex)
                 {
@@ -234,9 +199,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             else
             {
                 System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] WebView 状态正常，当前 URL: {WebView.Source}");
-                
-                // ✅ 修复：页面恢复时重新取色
-                _ = RefreshPageTintAsync();
             }
         }
 

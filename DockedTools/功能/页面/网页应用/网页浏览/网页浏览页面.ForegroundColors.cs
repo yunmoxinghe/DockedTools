@@ -91,59 +91,8 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             TopAppBarService.SetForeground(_topBarForegroundBrush);
             System.Diagnostics.Debug.WriteLine("[WebBrowserPage] TopAppBar 前景色已更新");
             
-            // ✅ 核心修复：系统主题切换后，WebView2 内部的网页会自动响应（CSS prefers-color-scheme），
-            // 但不会触发 NavigationCompleted 事件，所以我们需要手动触发完整的取色逻辑
-            
-            if (WebView?.CoreWebView2 != null && _isWebViewReady)
-            {
-                System.Diagnostics.Debug.WriteLine("[WebBrowserPage] WebView 已就绪，强制重新提取网页主题色");
-                
-                // ✅ 重置取色状态，让取色逻辑重新执行
-                _hasReceivedFirstTint = false;
-                _hasAppliedThemeColor = false;
-                
-                // ⭐ 任务 6.4：使用 AsyncSafety 包装 DispatcherQueue.TryEnqueue 中的 async lambda
-                AsyncSafety.TryEnqueue(
-                    DispatcherQueue,
-                    async () =>
-                    {
-                        System.Diagnostics.Debug.WriteLine("[WebBrowserPage] 等待 500ms 让 WebView2 完成主题切换...");
-                        
-                        // 等待网页重新渲染（prefers-color-scheme CSS 生效）
-                        await Task.Delay(500);
-                        
-                        System.Diagnostics.Debug.WriteLine("[WebBrowserPage] 开始执行主题切换后的取色");
-                        System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 取色前背景色: Top={_topBarBackgroundBrush.Color}, Bottom={_bottomBarBackgroundBrush.Color}");
-                        
-                        // ✅ 步骤1：尝试 meta theme-color
-                        await TryApplyThemeColorAsync();
-                        
-                        // ✅ 步骤2：尝试 JavaScript 取色（如果步骤1失败）
-                        if (!_hasAppliedThemeColor)
-                        {
-                            System.Diagnostics.Debug.WriteLine("[WebBrowserPage] theme-color meta 未找到，使用脚本取色");
-                            await TriggerTintSamplingAsync();
-                        }
-                        
-                        // ✅ 步骤3：如果都失败，回退到系统主题色
-                        if (!_hasAppliedThemeColor)
-                        {
-                            System.Diagnostics.Debug.WriteLine("[WebBrowserPage] 脚本取色失败，回退到系统主题色");
-                            ApplySystemThemeColors();
-                        }
-                        
-                        System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 取色后背景色: Top={_topBarBackgroundBrush.Color}, Bottom={_bottomBarBackgroundBrush.Color}");
-                    },
-                    "WebBrowserPage",
-                    "ThemeChanged"
-                );
-            }
-            else
-            {
-                // WebView 未就绪，直接使用系统主题色
-                System.Diagnostics.Debug.WriteLine("[WebBrowserPage] WebView 未就绪，应用系统主题色");
-                ApplySystemThemeColors();
-            }
+            // 应用系统主题的默认颜色
+            ApplySystemThemeColors();
         }
 
         /// <summary>

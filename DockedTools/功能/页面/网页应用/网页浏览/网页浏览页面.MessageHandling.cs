@@ -34,66 +34,8 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 return;
             }
 
-            try
-            {
-                using JsonDocument doc = JsonDocument.Parse(json);
-                JsonElement root = doc.RootElement;
-                if (!root.TryGetProperty("type", out JsonElement typeEl))
-                {
-                    return;
-                }
-
-                string messageType = typeEl.GetString() ?? string.Empty;
-
-                // 处理 theme-color 消息（优先级最高）
-                if (string.Equals(messageType, ThemeColorMessageType, StringComparison.Ordinal))
-                {
-                    if (root.TryGetProperty("color", out JsonElement colorEl) &&
-                        TryParseCssColor(colorEl.GetString(), out var themeColor))
-                    {
-                        _hasAppliedThemeColor = true;
-                        ApplyBarTint(isTop: true, themeColor);
-                        ApplyBarTint(isTop: false, themeColor);
-                    }
-                    return;
-                }
-
-                // 处理采样颜色消息
-                if (string.Equals(messageType, TintMessageType, StringComparison.Ordinal))
-                {
-                    // 如果已经应用了 theme-color，跳过采样颜色
-                    if (_hasAppliedThemeColor)
-                    {
-                        return;
-                    }
-
-                    bool isTransparent = root.TryGetProperty("isTransparent", out JsonElement transparentEl) && 
-                                        transparentEl.GetBoolean();
-
-                    // 如果页面完全透明，尝试截图采样
-                    if (isTransparent)
-                    {
-                        await TryScreenshotSamplingAsync();
-                        return;
-                    }
-
-                    if (root.TryGetProperty("top", out JsonElement topEl) &&
-                        TryParseCssColor(topEl.GetString(), out var topColor))
-                    {
-                        ApplyBarTint(isTop: true, topColor);
-                    }
-
-                    if (root.TryGetProperty("bottom", out JsonElement bottomEl) &&
-                        TryParseCssColor(bottomEl.GetString(), out var bottomColor))
-                    {
-                        ApplyBarTint(isTop: false, bottomColor);
-                    }
-                }
-            }
-            catch
-            {
-                // Ignore malformed messages.
-            }
+            // 消息处理逻辑已移除（取色功能已删除）
+            await Task.CompletedTask;
         }
 
         // ⚠️ CoreWebView2_DocumentTitleChanged已移至 网页浏览页面.Events.cs

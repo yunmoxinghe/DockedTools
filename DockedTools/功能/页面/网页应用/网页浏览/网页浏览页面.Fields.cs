@@ -43,8 +43,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         private readonly SolidColorBrush _bottomBarDisabledForegroundBrush = new();
         private readonly SolidColorBrush _bottomBarHoverForegroundBrush = new();
         private bool _isDisposed;
-        private bool _hasReceivedFirstTint;
-        private bool _hasAppliedThemeColor;
         private string? _instanceId;
         
         // Reactor 底部按钮栏

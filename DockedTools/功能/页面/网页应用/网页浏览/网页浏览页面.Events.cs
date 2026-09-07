@@ -143,11 +143,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
         private void CoreWebView2_NavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
         {
-            // ✅ 修复：不在导航开始时重置取色状态
-            // 改为在导航完成后再重置，避免脚本注入前状态被清空
-            // _hasReceivedFirstTint = false;
-            // _hasAppliedThemeColor = false;
-            
             // 显示加载条
             DispatcherQueue.TryEnqueue(() =>
             {
@@ -181,31 +176,8 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // ⭐ 任务 3.4：导航成功后重置无响应计数器
             _unresponsiveCount = 0;
             
-            // ✅ 修复：在导航完成时重置取色状态
-            // 确保新页面能重新取色
-            _hasReceivedFirstTint = false;
-            _hasAppliedThemeColor = false;
-            System.Diagnostics.Debug.WriteLine("[CoreWebView2_NavigationCompleted] 取色状态已重置");
-            
             // 平滑隐藏加载条：先停止动画，等待当前周期完成，再隐藏
             await HideLoadingProgressBarSmoothlyAsync();
-            
-            // ✅ 修复：等待页面渲染完成后再取色
-            // 延迟 300ms 确保 DOM 完全加载和渲染（原来 200ms 不够）
-            await Task.Delay(300);
-            
-            // 分层取色策略：优先使用 theme-color
-            await TryApplyThemeColorAsync();
-            
-            // ✅ 修复：如果没有 theme-color，主动触发一次采样取色
-            if (!_hasAppliedThemeColor)
-            {
-                System.Diagnostics.Debug.WriteLine("[CoreWebView2_NavigationCompleted] 没有 theme-color，触发采样取色");
-                
-                // 再等待 100ms，确保脚本的 load 事件已触发
-                await Task.Delay(100);
-                await TriggerTintSamplingAsync();
-            }
         }
 
         private void CoreWebView2_HistoryChanged(object? sender, object e)

@@ -21,9 +21,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Managers
         private readonly SolidColorBrush _topBarSecondaryForegroundBrush = new();
         private readonly SolidColorBrush _bottomBarDisabledForegroundBrush = new();
         private readonly SolidColorBrush _bottomBarHoverForegroundBrush = new();
-
-        private bool _hasReceivedFirstTint;
-        private bool _hasAppliedThemeColor;
         
         private FrameworkElement? _themeListenerElement; // 用于监听主题变化
 
@@ -34,23 +31,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Managers
         public SolidColorBrush TopBarSecondaryForegroundBrush => _topBarSecondaryForegroundBrush;
         public SolidColorBrush BottomBarDisabledForegroundBrush => _bottomBarDisabledForegroundBrush;
         public SolidColorBrush BottomBarHoverForegroundBrush => _bottomBarHoverForegroundBrush;
-
-        /// <summary>
-        /// 初始化前景色为主题默认文本颜色
-        /// </summary>
-        /// <param name="listenerElement">用于监听主题变化的 UI 元素（可选）</param>
-        public void InitializeForegroundColors(FrameworkElement? listenerElement = null)
-        {
-            UpdateForegroundColorsFromTheme();
-            
-            // 订阅主题变化事件
-            if (listenerElement != null)
-            {
-                _themeListenerElement = listenerElement;
-                _themeListenerElement.ActualThemeChanged += OnThemeChanged;
-                System.Diagnostics.Debug.WriteLine("[BarThemeManager] 已订阅系统主题变化事件");
-            }
-        }
 
         /// <summary>
         /// 从当前主题资源更新前景色
@@ -109,11 +89,8 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Managers
             // 重新从主题资源获取颜色
             UpdateForegroundColorsFromTheme();
             
-            // 如果当前没有应用网页主题色，也需要更新系统强调色
-            if (!_hasAppliedThemeColor)
-            {
-                ApplySystemAccentColor();
-            }
+            // 应用系统强调色
+            ApplySystemAccentColor();
         }
 
         /// <summary>
@@ -129,81 +106,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Managers
         }
 
         /// <summary>
-        /// 重置取色状态（在导航开始时调用）
-        /// </summary>
-        public void ResetTintState()
-        {
-            _hasReceivedFirstTint = false;
-            _hasAppliedThemeColor = false;
-        }
-
-        /// <summary>
-        /// 标记已应用主题色
-        /// </summary>
-        public void MarkThemeColorApplied()
-        {
-            _hasAppliedThemeColor = true;
-        }
-
-        /// <summary>
-        /// 是否已应用主题色
-        /// </summary>
-        public bool HasAppliedThemeColor => _hasAppliedThemeColor;
-
-        /// <summary>
-        /// 处理来自 WebView 的取色消息
-        /// </summary>
-        public bool TryHandleTintMessage(string json)
-        {
-            try
-            {
-                using JsonDocument doc = JsonDocument.Parse(json);
-                JsonElement root = doc.RootElement;
-                
-                if (!root.TryGetProperty("type", out JsonElement typeEl))
-                {
-                    return false;
-                }
-
-                string messageType = typeEl.GetString() ?? string.Empty;
-
-                // 如果已经应用了 theme-color，跳过采样颜色
-                if (messageType == "DockedTools_tint" && _hasAppliedThemeColor)
-                {
-                    return false;
-                }
-
-                // 检查是否透明
-                bool isTransparent = root.TryGetProperty("isTransparent", out JsonElement transparentEl) && 
-                                    transparentEl.GetBoolean();
-
-                if (isTransparent)
-                {
-                    return false; // 需要截图采样
-                }
-
-                // 应用顶部和底部颜色
-                if (root.TryGetProperty("top", out JsonElement topEl) &&
-                    ColorService.TryParseCssColor(topEl.GetString(), out var topColor))
-                {
-                    ApplyBarTint(isTop: true, topColor);
-                }
-
-                if (root.TryGetProperty("bottom", out JsonElement bottomEl) &&
-                    ColorService.TryParseCssColor(bottomEl.GetString(), out var bottomColor))
-                {
-                    ApplyBarTint(isTop: false, bottomColor);
-                }
-
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        /// <summary>
         /// 应用栏的着色
         /// </summary>
         public void ApplyBarTint(bool isTop, Color sampledColor)
@@ -211,23 +113,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Managers
             var tinted = Color.FromArgb(byte.MaxValue, sampledColor.R, sampledColor.G, sampledColor.B);
             SolidColorBrush background = isTop ? _topBarBackgroundBrush : _bottomBarBackgroundBrush;
             SolidColorBrush foreground = isTop ? _topBarForegroundBrush : _bottomBarForegroundBrush;
-
-            // 防闪烁逻辑
-            if (!_hasReceivedFirstTint)
-            {
-                bool isCurrentlyTransparent = background.Color.A == 0 || 
-                    (background.Color.R == 0 && background.Color.G == 0 && background.Color.B == 0);
-                
-                bool isPureWhite = sampledColor.R == 255 && sampledColor.G == 255 && sampledColor.B == 255;
-                
-                if (isCurrentlyTransparent && isPureWhite)
-                {
-                    System.Diagnostics.Debug.WriteLine("[BarThemeManager] 首次加载忽略纯白色");
-                    return;
-                }
-                
-                _hasReceivedFirstTint = true;
-            }
 
             // 使用动画平滑过渡
             ColorService.AnimateColorChange(background, tinted);

@@ -1,3 +1,4 @@
+using DockedTools.Features.UnifiedCalls.TopAppBar;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media.Imaging;
@@ -296,6 +297,16 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     SetWebViewFocus();
                 });
             }
+        }
+
+        /// <summary>
+        /// 恢复共享顶部栏背景（页面离开时调用）
+        /// </summary>
+        private static void RestoreSharedTopAppBarBackground()
+        {
+            TopAppBarService.ResetBackground();
+            TopAppBarService.ResetForeground();
+            TopAppBarService.ResetChromeVisibility();
         }
     }
 }

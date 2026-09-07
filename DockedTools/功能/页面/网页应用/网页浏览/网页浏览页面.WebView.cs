@@ -75,16 +75,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 // 根据设置配置右键菜单
                 UpdateContextMenuConfiguration(useWinUIContextMenu);
                 
-                // 重新注入脚本
-                _ = Task.Run(async () => 
-                {
-                    await Task.Delay(100);
-                    await DispatcherQueue.EnqueueAsync(async () => 
-                    {
-                        await EnsureTintScriptInstalledAsync();
-                    });
-                });
-                
                 _isWebViewReady = true;
                 System.Diagnostics.Debug.WriteLine($"[EnsureWebViewInitializedAsync] ✅ WebView 重新配置完成");
                 return;
@@ -172,16 +162,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     
                     // 根据设置配置右键菜单
                     UpdateContextMenuConfiguration(useWinUIContextMenu);
-                    
-                    // ✅ 延迟注入脚本，不阻塞首次导航
-                    _ = Task.Run(async () => 
-                    {
-                        await Task.Delay(100); // 让首次导航先开始
-                        await DispatcherQueue.EnqueueAsync(async () => 
-                        {
-                            await EnsureTintScriptInstalledAsync();
-                        });
-                    });
                     
                     // 只有在 CoreWebView2 成功初始化后才设置为 ready
                     _isWebViewReady = true;
@@ -594,73 +574,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[RecreateWebView] ❌ 重新创建 WebView 失败: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// ✅ Bug修复：WebView恢复后重新注入取色脚本
-        /// </summary>
-        private async Task ReInjectTintScriptAsync()
-        {
-            if (WebView?.CoreWebView2 == null)
-            {
-                System.Diagnostics.Debug.WriteLine("[ReInjectTintScriptAsync] WebView 未初始化");
-                return;
-            }
-
-            try
-            {
-                System.Diagnostics.Debug.WriteLine("[ReInjectTintScriptAsync] 开始重新注入取色脚本");
-                
-                // 延迟一小段时间确保 WebView 完全恢复
-                await Task.Delay(100);
-                
-                // 重新注入取色脚本
-                await WebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(Services.WebViewTintScript.GetTintScript());
-                
-                System.Diagnostics.Debug.WriteLine("[ReInjectTintScriptAsync] 取色脚本重新注入成功");
-                
-                // 重新触发一次取色
-                await RefreshPageTintAsync();
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[ReInjectTintScriptAsync] 重新注入脚本失败: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// ✅ Bug修复：页面恢复时刷新取色
-        /// </summary>
-        private async Task RefreshPageTintAsync()
-        {
-            if (WebView?.CoreWebView2 == null)
-            {
-                System.Diagnostics.Debug.WriteLine("[RefreshPageTintAsync] WebView 未初始化");
-                return;
-            }
-
-            try
-            {
-                System.Diagnostics.Debug.WriteLine("[RefreshPageTintAsync] 开始刷新页面取色");
-                
-                // 重置取色状态以允许重新取色
-                _hasReceivedFirstTint = false;
-                _hasAppliedThemeColor = false;
-                
-                // 延迟确保页面已完全加载
-                await Task.Delay(200);
-                
-                // 重新执行取色策略
-                await TryApplyThemeColorAsync();
-                
-                System.Diagnostics.Debug.WriteLine("[RefreshPageTintAsync] 页面取色刷新完成");
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[RefreshPageTintAsync] 刷新取色失败: {ex.Message}");
-                // 失败时使用系统强调色作为后备
-                ApplySystemAccentColor();
             }
         }
     }

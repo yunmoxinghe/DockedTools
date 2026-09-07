@@ -6,8 +6,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
     /// </summary>
     public sealed partial class WebBrowserPage
     {
-        private const string TintMessageType = "DockedTools_tint";
-        private const string ThemeColorMessageType = "DockedTools_theme_color";
         private const double LuminanceThreshold = 0.179; // WCAG 标准阈值（归一化后）
         private const double MinOpacity = 0.01;
         private const double PercentageMax = 100.0;
