@@ -332,7 +332,7 @@ namespace DockedTools
         }
 
         /// <summary>
-        /// 刷新窗口 Chrome 状态 - 更新图标和边距
+        /// 刷新窗口 Chrome 状态 - 更新图标、圆角和边距
         /// 
         /// 【调用时机】
         /// - AppWindow.Changed 事件触发时（OS 窗口状态变化）
@@ -340,11 +340,13 @@ namespace DockedTools
         /// 
         /// 【副作用】
         /// - 调用 Linker 方法更新 NavBar 图标
+        /// - 调用 Linker 方法更新内容区圆角（最大化状态变化时）
         /// - 调用 Linker 方法更新内容区边距
         /// </summary>
         private void RefreshWindowChromeState()
         {
             UpdateWindowStateIcon();
+            UpdateContentCornerRadius();
             UpdateContentTopMargin();
         }
 
@@ -357,14 +359,14 @@ namespace DockedTools
         /// 
         /// 【副作用】
         /// - 调用 Linker 方法更新 NavBar 图标（固定/取消固定）
-        /// - 调用 Linker 方法更新内容区圆角（固定模式下无圆角）
+        /// - 调用 Linker 方法更新内容区圆角（固定/最大化模式下 8px 圆角，窗口化模式下 4px 圆角）
         /// - 调用 Linker 方法更新内容区边距（固定/最大化模式下无边距）
         /// </summary>
         private void RefreshViewModelDrivenState()
         {
             bool isPinned = _viewModel.CurrentState == WindowState.Pinned;
             UpdateDockToggleIcon(isPinned);
-            UpdateContentCornerRadius(isPinned);
+            UpdateContentCornerRadius();
             UpdateContentTopMargin();
         }
 
@@ -414,11 +416,12 @@ namespace DockedTools
 
         /// <summary>
         /// 更新内容区圆角
-        /// 固定模式下无圆角（与屏幕边缘对齐），其他模式有圆角
+        /// 固定模式或最大化模式下 8px 圆角，窗口化模式下 4px 圆角
         /// </summary>
-        private void UpdateContentCornerRadius(bool isPinned)
+        private void UpdateContentCornerRadius()
         {
-            _linker?.UpdateContentCornerRadius(isPinned);
+            bool isPinnedOrMaximized = _viewModel.CurrentState == WindowState.Pinned || IsWindowMaximized();
+            _linker?.UpdateContentCornerRadius(isPinnedOrMaximized);
         }
 
         /// <summary>
