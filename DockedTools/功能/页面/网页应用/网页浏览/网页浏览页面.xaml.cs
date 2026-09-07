@@ -61,7 +61,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             InitializeTopBar();
             InitializeBottomBarReactor(); // ✅ 初始化 Reactor 底部按钮栏
 
-            TopBarTintHost.Background = _topBarBackgroundBrush;
             // ⚠️ 不设置 BottomBarHost.Background，让 XAML 的 ThemeResource 生效
 
             BottomBarHost.SizeChanged += (s, e) => UpdateBottomBarLayout();

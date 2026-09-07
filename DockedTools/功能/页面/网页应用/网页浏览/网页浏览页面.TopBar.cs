@@ -95,7 +95,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 顶部栏内容已设置，IsVisible = true");
             System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] TopAppBarService.IsVisible = {TopAppBarService.IsVisible}");
             
-            // 网页主题色只绘制在本页的 TopBarTintHost，统一顶栏隐藏背景/模糊/分隔线以透出本页色块。
             TopAppBarService.SetChromeVisible(false);
             
             // 恢复标题和图标（如果已有数据）

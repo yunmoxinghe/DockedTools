@@ -38,11 +38,6 @@
             Grid.Row="1"
             Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" />
 
-        <Border
-            x:Name="TopBarTintHost"
-            Grid.Row="0"
-            Background="Transparent" />
-
         <ProgressBar
             x:Name="LoadingProgressBar"
             Grid.Row="0"
