@@ -1,3 +1,4 @@
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media.Animation;
 using System;
@@ -6,11 +7,16 @@ using System.Diagnostics.CodeAnalysis;
 namespace DockedTools.Features.UnifiedCalls.ContentArea
 {
     /// <summary>
-    /// ContentArea 全局服务，提供统一的导航入口
+    /// ContentArea 全局服务，提供统一的导航入口和状态管理
     /// </summary>
     public static class ContentAreaService
     {
         private static MainWindowContent.ContentArea.ContentArea? _instance;
+
+        /// <summary>
+        /// 圆角变化事件
+        /// </summary>
+        public static event EventHandler<CornerRadius>? CornerRadiusChanged;
 
         /// <summary>
         /// 注册 ContentArea 实例（由 Linker 调用）
@@ -27,7 +33,17 @@ namespace DockedTools.Features.UnifiedCalls.ContentArea
         public static void Unregister()
         {
             _instance = null;
+            CornerRadiusChanged = null;
             System.Diagnostics.Debug.WriteLine("[ContentAreaService] ContentArea 已取消注册");
+        }
+        
+        /// <summary>
+        /// 通知圆角已变化（由 ContentArea 内部调用）
+        /// </summary>
+        internal static void NotifyCornerRadiusChanged(CornerRadius cornerRadius)
+        {
+            System.Diagnostics.Debug.WriteLine($"[ContentAreaService] 圆角变化通知: {cornerRadius}");
+            CornerRadiusChanged?.Invoke(null, cornerRadius);
         }
 
         /// <summary>
@@ -84,5 +100,22 @@ namespace DockedTools.Features.UnifiedCalls.ContentArea
         /// 当前显示的页面参数
         /// </summary>
         public static object? CurrentPageParameter => _instance?.CurrentPageParameter;
+        
+        /// <summary>
+        /// 获取当前内容区的圆角
+        /// </summary>
+        public static CornerRadius CurrentCornerRadius
+        {
+            get
+            {
+                if (_instance == null)
+                {
+                    return new CornerRadius(0);
+                }
+                
+                // 从 ContentBorder 读取当前圆角
+                return _instance.GetCurrentCornerRadius();
+            }
+        }
     }
 }

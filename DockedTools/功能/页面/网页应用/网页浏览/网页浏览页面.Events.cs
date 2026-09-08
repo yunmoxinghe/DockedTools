@@ -39,16 +39,31 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // ✅ 同步动态圆角到背景色块
             SyncCornerRadius();
             
+            // ✅ 订阅内容区圆角变化事件
+            UnifiedCalls.ContentArea.ContentAreaService.CornerRadiusChanged += OnContentAreaCornerRadiusChanged;
+            
             // Loaded 事件只负责初始化 WebView，不干预导航和链接管理
             // 链接管理由 INavigationAware.OnNavigatedTo 负责
             
             await EnsureWebViewInitializedAsync();
             TryNavigatePendingUri();
         }
+        
+        /// <summary>
+        /// 内容区圆角变化时重新同步
+        /// </summary>
+        private void OnContentAreaCornerRadiusChanged(object? sender, CornerRadius cornerRadius)
+        {
+            System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 收到圆角变化通知: {cornerRadius}");
+            SyncCornerRadius();
+        }
 
         private void WebBrowserPage_Unloaded(object sender, RoutedEventArgs e)
         {
             System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] Unloaded 事件触发");
+            
+            // ✅ 取消订阅内容区圆角变化事件
+            UnifiedCalls.ContentArea.ContentAreaService.CornerRadiusChanged -= OnContentAreaCornerRadiusChanged;
             
             // ✅ 注销底部栏主题服务
             Services.BottomBarThemeService.Unregister();

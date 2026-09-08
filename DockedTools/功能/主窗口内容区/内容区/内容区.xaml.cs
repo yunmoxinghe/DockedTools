@@ -470,6 +470,17 @@ namespace DockedTools.Features.MainWindowContent.ContentArea
             MicaBaseBackdropLayer.CornerRadius = new CornerRadius(_currentCornerRadius);
             MicaAltBackdropLayer.CornerRadius = new CornerRadius(_currentCornerRadius);
             AcrylicBackdropLayer.CornerRadius = new CornerRadius(_currentCornerRadius);
+            
+            // ✅ 通知圆角变化事件
+            UnifiedCalls.ContentArea.ContentAreaService.NotifyCornerRadiusChanged(ContentBorder.CornerRadius);
+        }
+        
+        /// <summary>
+        /// 获取当前圆角
+        /// </summary>
+        public CornerRadius GetCurrentCornerRadius()
+        {
+            return ContentBorder.CornerRadius;
         }
 
         public void Navigate(

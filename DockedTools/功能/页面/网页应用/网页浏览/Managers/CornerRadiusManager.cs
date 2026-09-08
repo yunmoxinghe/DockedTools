@@ -28,7 +28,14 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Managers
         /// </summary>
         public static void SyncDynamicCorners(FrameworkElement element, Border topBarHost, Border bottomBarHost)
         {
-            var cornerRadius = FindParentCornerRadius(element);
+            // ✅ 直接从 ContentAreaService 获取当前圆角
+            var cornerRadius = DockedTools.Features.UnifiedCalls.ContentArea.ContentAreaService.CurrentCornerRadius;
+            
+            // 如果获取失败，fallback 到查找父容器
+            if (cornerRadius == new CornerRadius(0))
+            {
+                cornerRadius = FindParentCornerRadius(element);
+            }
             
             // 确保最小圆角
             double topLeft = Math.Max(MinCornerRadius, cornerRadius.TopLeft);
@@ -49,7 +56,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Managers
         /// <summary>
         /// 从父级容器查找圆角
         /// </summary>
-        private static CornerRadius FindParentCornerRadius(FrameworkElement element)
+        public static CornerRadius FindParentCornerRadius(FrameworkElement element)
         {
             DependencyObject? parent = element.Parent;
             CornerRadius cornerRadius = new CornerRadius(0);
