@@ -1,9 +1,8 @@
 # 禁止做
 - 独自编译（因为win app run增量编译速度更快，有效提升开发效率）
 - 禁止编造信息、API、版本、链接和来源。
-- 禁止使用组合的bash
-cd "C:/Users/gold/WorkBuddy/Worktrees/DockedTools/main-ffb0958c/DockedTools" && winapp run "DockedTools.csproj" -c Debug --arch x64 --detach -v 2>&1 | tail -25
-执行失败 (退出码: 1)复合命令行
+- 禁止使用组合的命令行
+- 禁止生成与编辑md文件
 - 禁止未经确认大规模修改架构。
 - 禁止修改无关内容。
 - 禁止使用过时技术信息回答。
