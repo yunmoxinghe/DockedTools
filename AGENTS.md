@@ -7,6 +7,7 @@
 - 禁止使用git
 
 # 可以做
+- 学习D:\fluentapps\repos\DockedTools\winapp.agent.md
 - 可以联网搜索最新技术资料。
 - 可以分析代码、修复问题、提供方案。
 - 可以参考官方文档和 GitHub 信息。
