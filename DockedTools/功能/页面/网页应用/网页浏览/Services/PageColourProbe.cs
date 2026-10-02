@@ -13,8 +13,12 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
     {
         public AdaptiveColour Colour { get; set; } = AdaptiveColour.Transparent;
 
-        /// <summary>元素自身不透明度（字符串原值解析后的数值）</summary>
-        public double Opacity { get; set; } = 1d;
+        /// <summary>
+        /// 元素自身不透明度。
+        /// null 表示页面给的值不是数字 —— ATBC 的 parsePageColour 遇到 NaN 会
+        /// continue 跳过该元素，这里同理，不能默认成 1 让它参与合成。
+        /// </summary>
+        public double? Opacity { get; set; }
 
         /// <summary>元素 filter（ATBC 保留该字段用于扩展）</summary>
         public string? Filter { get; set; }
@@ -68,6 +72,25 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
     {
         private const string QueryToken = "__ATBC_QUERY__";
 
+        /// <summary>脚本里读的运行时取色选择器变量名（托管侧可随时改写）</summary>
+        private const string RuntimeQueryVariable = "__dockedToolsColourQuery";
+
+        /// <summary>
+        /// 脚本里读的运行时「动态刷新」开关变量名。
+        /// 脚本一旦注入就撤不掉，只能靠变量控制。
+        /// 注意它在 dispatch（每次回传前）里生效，不是在 start（文档创建时）里 ——
+        /// 后者会导致「关掉再打开」必须导航一次才能恢复。
+        /// </summary>
+        private const string RuntimeDynamicVariable = "__dockedToolsColourDynamic";
+
+        /// <summary>
+        /// 脚本里读的运行时「挂起」开关变量名。
+        /// 对齐 ATBC 的 SETUP_SCRIPT / mode:"suspend"：命中 COLOUR 规则时页面外观完全不参与，
+        /// 上游会调 disableDynamic() 把监听撤掉。这里同理 —— 不止是不回传，而是真的撤监听，
+        /// 否则从普通站点导航到规则站点后，上一页留下的脚本仍会持续回传并覆盖规则指定的颜色。
+        /// </summary>
+        private const string RuntimeSuspendedVariable = "__dockedToolsColourSuspended";
+
         /// <summary>常驻脚本回传消息的标识</summary>
         public const string MessageHeader = "DockedTools_adaptive_colour";
 
@@ -108,13 +131,45 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
         public static string BuildMonitorScript(string? query)
             => InjectQuery(MonitorScript, query);
 
-        private static string InjectQuery(string script, string? query)
-        {
-            string injected = query is null
-                ? "null"
-                : "'" + query.Replace("\\", "\\\\").Replace("'", "\\'").Replace("\r", " ").Replace("\n", " ") + "'";
+        /// <summary>
+        /// 构建「把运行时参数推给当前文档」的脚本（取色选择器 + 动态刷新开关 + 挂起开关）。
+        /// 内核没有移除已注入脚本的 API，改这几项时对已加载的页面只能改运行时变量，
+        /// 新文档则由注入时带的默认值 + 每次导航后的推送兜底。
+        /// </summary>
+        public static string BuildRuntimeOptionsScript(string? query, bool dynamic, bool suspended)
+            => "window." + RuntimeQueryVariable + " = " + QueryLiteral(query) + ";"
+                + "window." + RuntimeDynamicVariable + " = " + (dynamic ? "true" : "false") + ";"
+                + "window." + RuntimeSuspendedVariable + " = " + (suspended ? "true" : "false") + ";"
+                // 挂起要立刻撤掉已有监听（对齐 ATBC 的 disableDynamic），
+                // 只置标志位的话已经排程的定时器还会再回传一次。
+                + (suspended ? SuspendCall + ";" : string.Empty);
 
-            return script.Replace(QueryToken, injected);
+        /// <summary>
+        /// 构建「挂起当前文档里的常驻脚本」的脚本。
+        /// 脚本在新文档里会重新执行并重新注册监听，所以挂起只对当前文档生效 —— 这正是上游的语义。
+        /// </summary>
+        public static string BuildSuspendScript()
+            => SuspendCall + ";"
+                + "window." + RuntimeSuspendedVariable + " = true;";
+
+        private const string SuspendCall =
+            "if (window.__dockedToolsColourSuspend) { try { window.__dockedToolsColourSuspend(); } catch (e) { } }";
+
+        private static string InjectQuery(string script, string? query)
+            => script.Replace(QueryToken, QueryLiteral(query));
+
+        private static string QueryLiteral(string? query)
+        {
+            if (query is null)
+            {
+                return "null";
+            }
+
+            return "'" + query
+                .Replace("\\", "\\\\")
+                .Replace("'", "\\'")
+                .Replace("\r", " ")
+                .Replace("\n", " ") + "'";
         }
 
         /// <summary>解析一次性探测的返回值（ExecuteScriptAsync 结果外层还套了一层引号）</summary>
@@ -230,7 +285,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
             }
 
             string? opacityText = ReadString(item, "opacity");
-            double opacity = 1d;
+            double? opacity = null;
+
+            // ATBC 的 parseFloat 拿到 NaN 就跳过该元素，所以解析失败要保持 null 而不是兜 1
             if (opacityText is not null &&
                 double.TryParse(opacityText, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out double parsedOpacity))
@@ -256,13 +313,21 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
         /// 逐段对齐 ATBC atbc.content.ts 的 getColourData / getPageColourData / getElementColour。
         /// </summary>
         private const string ColourHelpers = @"
+    // canvas 复用：颜色归一化在常驻模式下每 250ms 可能跑几十次，
+    // 每次都 createElement('canvas') 会白扔一个 DOM 节点 + 一次 2D 上下文初始化。
+    var __atbcCanvas = null;
+    var __atbcCanvasContext = null;
+
     var __atbcNormalise = function (value) {
         if (!value) { return null; }
         try {
-            var canvas = document.createElement('canvas');
-            canvas.width = 1;
-            canvas.height = 1;
-            var context = canvas.getContext('2d');
+            if (!__atbcCanvasContext) {
+                __atbcCanvas = document.createElement('canvas');
+                __atbcCanvas.width = 1;
+                __atbcCanvas.height = 1;
+                __atbcCanvasContext = __atbcCanvas.getContext('2d');
+            }
+            var context = __atbcCanvasContext;
             if (!context) { return null; }
             var sentinel = '#123456';
             context.fillStyle = sentinel;
@@ -339,6 +404,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
         private const string ProbeScript = @"
 (function () {
     var query = __ATBC_QUERY__;
+    // 全屏（视频播放等）时取到的是视频画面而不是页面外观。
+    // 不能返回 null —— 托管侧会把它当成「探测失败」去复位栏色，
+    // 而常驻脚本遇到全屏是「保持不动」，两边语义必须一致。
+    // 用 special 标记把「拿不到真实外观」这件事传给托管侧，让它也选择不动。
+    if (document.fullscreenElement) {
+        return JSON.stringify({ page: [], theme: { light: null, dark: null }, query: null, special: 'fullscreen' });
+    }
 " + ColourHelpers + @"
     return JSON.stringify(__atbcColourData(query));
 })();
@@ -346,27 +418,77 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
 
         private const string MonitorScript = @"
 (function () {
-    if (window.__dockedToolsColourMonitor) { return; }
-    window.__dockedToolsColourMonitor = true;
+    // 脚本会被注入到主文档和所有 iframe（内核没有只注入主文档的开关），
+    // 但页面外观只该由主文档决定 —— iframe 里既不该取色也不该注册监听。
+    if (window.top !== window) { return; }
 
-    var query = __ATBC_QUERY__;
-    var throttleIntervalMs = 250;
+    // 内核没有「移除已注入脚本」的 API，脚本只能叠加、不能替换。
+    // 改设置（例如换取色选择器）重新注入时，如果这里靠一个布尔守卫直接 return，
+    // 生效的就还是旧脚本，新设置永远不生效 —— 所以改成「接管」：
+    // 先执行上一个脚本留下的清理函数，把它注册的监听 / MutationObserver 全部撤掉。
+    if (window.__dockedToolsColourCleanup) {
+        try { window.__dockedToolsColourCleanup(); } catch (e) { }
+    }
+
+    var cleanups = [];
     var dispatchTimeout = null;
+    var fallbackTimeout = null;
+
+    // 取色选择器可以在运行时改（托管侧用 ExecuteScript 直接改这个变量），
+    // 当前页面立刻生效，不必等下一次导航；新文档则用注入时的值。
+    var currentQuery = function () {
+        return typeof window.__dockedToolsColourQuery !== 'undefined'
+            ? window.__dockedToolsColourQuery
+            : __ATBC_QUERY__;
+    };
+
+    var cleanup = function () {
+        cleanups.forEach(function (fn) { try { fn(); } catch (e) { } });
+        cleanups.length = 0;
+        if (dispatchTimeout) { clearTimeout(dispatchTimeout); dispatchTimeout = null; }
+        if (fallbackTimeout) { clearTimeout(fallbackTimeout); fallbackTimeout = null; }
+    };
+    window.__dockedToolsColourCleanup = cleanup;
+
+    // ATBC 的 SETUP_SCRIPT 挂起模式（suspend）：命中 COLOUR 规则时页面外观完全不参与取色。
+    // 撤掉当前文档的全部监听与待发定时器；脚本在新文档里会重新执行并重新注册，
+    // 所以这只影响当前文档，正好是上游想要的粒度。
+    window.__dockedToolsColourSuspend = function () {
+        window.__dockedToolsColourSuspended = true;
+        cleanup();
+    };
+
+    var throttleIntervalMs = 250;
     var lastSentAt = 0;
+    var lastPayload = null;
 " + ColourHelpers + @"
     var dispatch = function () {
+        // 动态刷新（ATBC: dynamic）在 dispatch 里查，不在 start() 里查：
+        // start() 只在文档创建时跑一次，在那里判断的话，开关关掉再打开就再也装不回监听了
+        // （内核没有「让脚本在当前文档重跑一遍」的入口，只有导航到新文档才会重新执行），
+        // 结果就是「关掉再打开 → 必须导航一次才恢复」。
+        // 放到 dispatch 里就是纯运行时开关：监听照装，发不发由变量说了算，
+        // 关→开、开→关两个方向都能立刻生效。
+        if (window.__dockedToolsColourDynamic === false) { return; }
+        if (window.__dockedToolsColourSuspended === true) { return; }
         if (document.visibilityState !== 'visible') { return; }
+        // 全屏（视频播放等）时取到的是视频画面而不是页面外观，保持当前栏色不动。
+        if (document.fullscreenElement) { return; }
         lastSentAt = Date.now();
         try {
-            window.chrome.webview.postMessage(JSON.stringify({
-                header: '" + MessageHeader + @"',
-                colour: __atbcColourData(query)
-            }));
+            // 去重：scroll / resize / click 会反复触发，但页面颜色往往没变。
+            // 颜色没变就不跨进程发消息，也免掉托管侧一轮 Evaluate + XAML 失效。
+            var colourJson = JSON.stringify(__atbcColourData(currentQuery()));
+            if (colourJson === lastPayload) { return; }
+            lastPayload = colourJson;
+            window.chrome.webview.postMessage('{""header"":""" + MessageHeader + @""",""colour"":' + colourJson + '}');
         } catch (e) { }
     };
 
     var sendColour = function () {
         if (dispatchTimeout) { clearTimeout(dispatchTimeout); dispatchTimeout = null; }
+        // 页面不可见时不排程：反正 dispatch 也会因为 visibilityState 直接返回
+        if (document.visibilityState !== 'visible') { return; }
         var remaining = throttleIntervalMs + lastSentAt - Date.now();
         if (remaining <= 0) {
             dispatch();
@@ -383,6 +505,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
     };
 
     var start = function () {
+        // 挂起中（命中 COLOUR 规则）：连监听都不装，页面外观完全不参与
+        if (window.__dockedToolsColourSuspended === true) { return; }
+
         var darkReaderObserver = new MutationObserver(sendColour);
         var metaThemeColourObserver = new MutationObserver(sendColour);
         var metaTagObserver = new MutationObserver(function (mutationList) {
@@ -405,29 +530,54 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
             if (touched) { sendColour(); }
         });
 
-        ['click', 'resize', 'scroll', 'visibilitychange'].forEach(function (event) {
-            document.addEventListener(event, sendColour);
+        // passive：这几个监听不会 preventDefault，声明成 passive 让滚动不必等我们的回调
+        ['click', 'resize', 'scroll'].forEach(function (event) {
+            document.addEventListener(event, sendColour, { passive: true });
+            cleanups.push(function () { document.removeEventListener(event, sendColour); });
         });
+        document.addEventListener('visibilitychange', sendColour);
+        cleanups.push(function () { document.removeEventListener('visibilitychange', sendColour); });
         ['transitionend', 'transitioncancel', 'animationend', 'animationcancel'].forEach(function (event) {
-            document.addEventListener(event, sendColourRequiresFocus);
+            document.addEventListener(event, sendColourRequiresFocus, { passive: true });
+            cleanups.push(function () { document.removeEventListener(event, sendColourRequiresFocus); });
         });
 
         darkReaderObserver.observe(document.documentElement, {
             attributes: true,
             attributeFilter: ['data-darkreader-mode']
         });
+        cleanups.push(function () { darkReaderObserver.disconnect(); });
         document.querySelectorAll('meta[name=theme-color]').forEach(function (metaTag) {
             metaThemeColourObserver.observe(metaTag, { attributes: true });
         });
+        cleanups.push(function () { metaThemeColourObserver.disconnect(); });
         if (document.head) { metaTagObserver.observe(document.head, { childList: true }); }
+        cleanups.push(function () { metaTagObserver.disconnect(); });
         styleTagObserver.observe(document.documentElement, { childList: true });
         if (document.head) { styleTagObserver.observe(document.head, { childList: true }); }
+        cleanups.push(function () { styleTagObserver.disconnect(); });
 
-        sendColour();
+        // 首屏：DOMContentLoaded 时页面常常还只有浏览器的默认白底（CSS / 图片 / 字体没到位），
+        // 这时取色会让栏色先刷成白的、等真实外观出来再跳一次 —— 就是首屏白闪。
+        // 推到 load 之后再发第一次；load 之后的迟到渲染由下面那个兜底采样兜住。
+        if (document.readyState === 'complete') {
+            sendColour();
+        } else {
+            window.addEventListener('load', sendColour, { once: true });
+            cleanups.push(function () { window.removeEventListener('load', sendColour); });
+            // SPA 常在 load 之后才渲染出真实外观（数据回来了才上色），补一次迟到但准的采样。
+            // 颜色没变的话 dispatch 里的去重会把它吃掉，不会多刷一次。
+            fallbackTimeout = setTimeout(function () {
+                fallbackTimeout = null;
+                sendColour();
+            }, 1000);
+        }
     };
 
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', start, { once: true });
+        var onDomReady = function () { start(); };
+        document.addEventListener('DOMContentLoaded', onDomReady, { once: true });
+        cleanups.push(function () { document.removeEventListener('DOMContentLoaded', onDomReady); });
     } else {
         start();
     }

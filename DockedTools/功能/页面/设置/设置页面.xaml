@@ -351,6 +351,19 @@
                         </controls:SettingsCard.ActionIcon>
                     </controls:SettingsCard>
 
+                    <!-- 自适应栏色 -->
+                    <controls:SettingsCard
+                        x:Uid="SettingsPage_AdaptiveColourHeader"
+                        IsClickEnabled="True"
+                        Click="OnAdaptiveColourCardClick">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE790;"/>
+                        </controls:SettingsCard.HeaderIcon>
+                        <controls:SettingsCard.ActionIcon>
+                            <FontIcon Glyph="&#xE76C;"/>
+                        </controls:SettingsCard.ActionIcon>
+                    </controls:SettingsCard>
+
                     <!-- 高级设置 -->
                     <TextBlock 
                         x:Uid="SettingsPage_AdvancedSection"

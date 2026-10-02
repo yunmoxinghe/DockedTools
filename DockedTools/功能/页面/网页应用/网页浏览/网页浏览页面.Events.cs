@@ -65,8 +65,8 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // ✅ 取消订阅内容区圆角变化事件
             UnifiedCalls.ContentArea.ContentAreaService.CornerRadiusChanged -= OnContentAreaCornerRadiusChanged;
             
-            // ✅ 注销底部栏主题服务
-            Services.BottomBarThemeService.Unregister();
+            // ✅ 注销底部栏主题服务（带上自己的宿主：不是宿主就别把别人的注销掉）
+            Services.BottomBarThemeService.Unregister(BottomBarHost);
             
             // ✅ 复位自适应栏色（恢复系统默认栏色）
             ResetAdaptiveBarColour();
@@ -203,13 +203,30 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // 平滑隐藏加载条：先停止动画，等待当前周期完成，再隐藏
             await HideLoadingProgressBarSmoothlyAsync();
 
-            // 页面就绪后按网页外观刷新顶栏/底栏颜色（ATBC 移植）
-            ScheduleAdaptiveBarColourUpdate();
+            // 页面就绪后按网页外观刷新顶栏/底栏颜色（ATBC 移植）。
+            //
+            // 导航失败（「无法访问此页面」等 Chromium 内部错误页）时：
+            // AddScriptToExecuteOnDocumentCreated 注入的常驻脚本对这些内部文档不生效，
+            // 所以必须走一次性探测（ExecuteScript 在错误页上仍然可用）；
+            // 如果连探测都取不到，RunOneShotProbe 里会回落系统默认栏色，
+            // 不留着上一个网页的颜色和顶栏亮/暗。
+            if (!e.IsSuccess)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[WebBrowserPage] 导航失败({e.WebErrorStatus})，取色改用一次性探测");
+            }
+
+            ScheduleAdaptiveBarColourUpdate(probeOnly: !e.IsSuccess);
         }
 
         private void CoreWebView2_HistoryChanged(object? sender, object e)
         {
             UpdateNavigationButtonStates();
+
+            // SPA 用 history.pushState 换路由时不会触发 NavigationCompleted，
+            // 不在这里接的话，在 SPA 里点链接翻页栏色就一直停在进站那一次。
+            // 方法内部按 URL 去重，前进/后退（会同时触发 NavigationCompleted）只跑一次。
+            ScheduleAdaptiveBarColourUpdateForUrlChange();
         }
 
         private void CoreWebView2_DocumentTitleChanged(object? sender, object e)

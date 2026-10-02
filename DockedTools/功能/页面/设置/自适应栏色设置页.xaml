@@ -1,0 +1,374 @@
+<Page
+    x:Class="DockedTools.Features.Pages.Settings.AdaptiveColourPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:CommunityToolkit.WinUI.Controls"
+    xmlns:services="using:DockedTools.Features.Pages.WebApp.Browser.Services"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    UseLayoutRounding="True">
+
+    <Grid x:Name="RootGrid" Padding="0" UseLayoutRounding="True">
+        <ScrollViewer
+            x:Name="PageScrollViewer"
+            HorizontalScrollBarVisibility="Disabled"
+            HorizontalScrollMode="Disabled"
+            HorizontalContentAlignment="Stretch"
+            VerticalScrollBarVisibility="Auto">
+            <StackPanel
+                x:Name="PageContentPanel"
+                Margin="0"
+                UseLayoutRounding="True"
+                Spacing="0">
+
+                <Border Height="40" />
+
+                <TextBlock
+                    x:Name="PageTitleBlock"
+                    x:Uid="AdaptiveColourPage_Title"
+                    FontSize="32"
+                    FontWeight="SemiBold"/>
+
+                <Border Height="8" />
+
+                <TextBlock
+                    x:Uid="AdaptiveColourPage_Subtitle"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    TextWrapping="Wrap"/>
+
+                <Border Height="24" />
+
+                <TextBlock
+                    x:Uid="AdaptiveColourPage_BasicSection"
+                    Style="{StaticResource BodyStrongTextBlockStyle}"
+                    Margin="1,0,0,4"/>
+
+                <StackPanel Spacing="4">
+                    <StackPanel.ChildrenTransitions>
+                        <EntranceThemeTransition FromVerticalOffset="50" />
+                        <RepositionThemeTransition IsStaggeringEnabled="False" />
+                    </StackPanel.ChildrenTransitions>
+
+                    <controls:SettingsCard x:Uid="AdaptiveColourPage_EnabledHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE790;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <ToggleSwitch
+                            x:Name="EnabledToggle"
+                            Toggled="OnEnabledToggled"/>
+                    </controls:SettingsCard>
+
+                    <controls:SettingsCard x:Uid="AdaptiveColourPage_DynamicHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE72C;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <ToggleSwitch
+                            x:Name="DynamicToggle"
+                            Toggled="OnDynamicToggled"/>
+                    </controls:SettingsCard>
+
+                    <controls:SettingsCard x:Uid="AdaptiveColourPage_SchemeHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE793;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <ComboBox
+                            x:Name="SchemeComboBox"
+                            HorizontalAlignment="Left"
+                            SelectionChanged="OnSchemeChanged">
+                            <ComboBoxItem x:Uid="AdaptiveColourPage_SchemeSystem" Tag="0"/>
+                            <ComboBoxItem x:Uid="AdaptiveColourPage_SchemeLight" Tag="1"/>
+                            <ComboBoxItem x:Uid="AdaptiveColourPage_SchemeDark" Tag="2"/>
+                        </ComboBox>
+                    </controls:SettingsCard>
+
+                    <controls:SettingsCard x:Uid="AdaptiveColourPage_NoThemeColourHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE8A5;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <ToggleSwitch
+                            x:Name="NoThemeColourToggle"
+                            Toggled="OnNoThemeColourToggled"/>
+                    </controls:SettingsCard>
+
+                    <controls:SettingsCard x:Uid="AdaptiveColourPage_AllowDarkLightHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE708;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <ToggleSwitch
+                            x:Name="AllowDarkLightToggle"
+                            Toggled="OnAllowDarkLightToggled"/>
+                    </controls:SettingsCard>
+
+                </StackPanel>
+
+                <Border Height="12" />
+
+                <TextBlock
+                    x:Uid="AdaptiveColourPage_BrightnessSection"
+                    Style="{StaticResource BodyStrongTextBlockStyle}"
+                    Margin="1,0,0,4"/>
+
+                <StackPanel Spacing="4">
+                    <StackPanel.ChildrenTransitions>
+                        <EntranceThemeTransition FromVerticalOffset="50" />
+                        <RepositionThemeTransition IsStaggeringEnabled="False" />
+                    </StackPanel.ChildrenTransitions>
+
+                    <controls:SettingsCard x:Uid="AdaptiveColourPage_TabBarHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE706;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <NumberBox
+                            x:Name="TabBarBox"
+                            Minimum="-100"
+                            Maximum="100"
+                            SmallChange="1"
+                            LargeChange="5"
+                            SpinButtonPlacementMode="Inline"
+                            HorizontalAlignment="Left"
+                            ValueChanged="OnTabBarChanged"/>
+                    </controls:SettingsCard>
+
+                    <controls:SettingsCard x:Uid="AdaptiveColourPage_PopupHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE790;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <NumberBox
+                            x:Name="PopupBox"
+                            Minimum="-100"
+                            Maximum="100"
+                            SmallChange="1"
+                            LargeChange="5"
+                            SpinButtonPlacementMode="Inline"
+                            HorizontalAlignment="Left"
+                            ValueChanged="OnPopupChanged"/>
+                    </controls:SettingsCard>
+
+                    <controls:SettingsCard x:Uid="AdaptiveColourPage_TabSelectedHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE706;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <NumberBox
+                            x:Name="TabSelectedBox"
+                            Minimum="-100"
+                            Maximum="100"
+                            SmallChange="1"
+                            LargeChange="5"
+                            SpinButtonPlacementMode="Inline"
+                            HorizontalAlignment="Left"
+                            ValueChanged="OnTabSelectedChanged"/>
+                    </controls:SettingsCard>
+
+                </StackPanel>
+
+                <Border Height="12" />
+
+                <TextBlock
+                    x:Uid="AdaptiveColourPage_AdvancedSection"
+                    Style="{StaticResource BodyStrongTextBlockStyle}"
+                    Margin="1,0,0,4"/>
+
+                <StackPanel Spacing="4">
+                    <StackPanel.ChildrenTransitions>
+                        <EntranceThemeTransition FromVerticalOffset="50" />
+                        <RepositionThemeTransition IsStaggeringEnabled="False" />
+                    </StackPanel.ChildrenTransitions>
+
+                    <controls:SettingsCard x:Uid="AdaptiveColourPage_MinContrastLightHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE793;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <NumberBox
+                            x:Name="MinContrastLightBox"
+                            Minimum="1"
+                            Maximum="21"
+                            SmallChange="0.5"
+                            LargeChange="1"
+                            SpinButtonPlacementMode="Inline"
+                            HorizontalAlignment="Left"
+                            ValueChanged="OnMinContrastLightChanged"/>
+                    </controls:SettingsCard>
+
+                    <controls:SettingsCard x:Uid="AdaptiveColourPage_MinContrastDarkHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE708;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <NumberBox
+                            x:Name="MinContrastDarkBox"
+                            Minimum="1"
+                            Maximum="21"
+                            SmallChange="0.5"
+                            LargeChange="1"
+                            SpinButtonPlacementMode="Inline"
+                            HorizontalAlignment="Left"
+                            ValueChanged="OnMinContrastDarkChanged"/>
+                    </controls:SettingsCard>
+
+                    <controls:SettingsCard x:Uid="AdaptiveColourPage_FallbackLightHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE790;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <TextBox
+                            x:Name="FallbackLightTextBox"
+                            Width="140"
+                            HorizontalAlignment="Left"
+                            LostFocus="OnFallbackLightLostFocus"/>
+                    </controls:SettingsCard>
+
+                    <controls:SettingsCard x:Uid="AdaptiveColourPage_FallbackDarkHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE790;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <TextBox
+                            x:Name="FallbackDarkTextBox"
+                            Width="140"
+                            HorizontalAlignment="Left"
+                            LostFocus="OnFallbackDarkLostFocus"/>
+                    </controls:SettingsCard>
+
+                </StackPanel>
+
+                <Border Height="12" />
+
+                <TextBlock
+                    x:Uid="AdaptiveColourPage_RuleSection"
+                    Style="{StaticResource BodyStrongTextBlockStyle}"
+                    Margin="1,0,0,4"/>
+
+                <StackPanel Spacing="4">
+                    <StackPanel.ChildrenTransitions>
+                        <EntranceThemeTransition FromVerticalOffset="50" />
+                        <RepositionThemeTransition IsStaggeringEnabled="False" />
+                    </StackPanel.ChildrenTransitions>
+
+                    <controls:SettingsCard x:Uid="AdaptiveColourPage_QueryHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE8A7;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <TextBox
+                            x:Name="QueryTextBox"
+                            Width="220"
+                            HorizontalAlignment="Left"
+                            LostFocus="OnQueryLostFocus"/>
+                    </controls:SettingsCard>
+
+                </StackPanel>
+
+                <Border Height="12" />
+
+                <TextBlock
+                    x:Uid="AdaptiveColourPage_SiteRuleSection"
+                    Style="{StaticResource BodyStrongTextBlockStyle}"
+                    Margin="1,0,0,4"/>
+
+                <StackPanel Spacing="4">
+                    <StackPanel.ChildrenTransitions>
+                        <EntranceThemeTransition FromVerticalOffset="50" />
+                        <RepositionThemeTransition IsStaggeringEnabled="False" />
+                    </StackPanel.ChildrenTransitions>
+
+                    <controls:SettingsCard x:Uid="AdaptiveColourPage_SiteRuleHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE8A7;" />
+                        </controls:SettingsCard.HeaderIcon>
+
+                        <StackPanel Spacing="8">
+
+                            <ItemsControl x:Name="RuleItemsControl">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate x:DataType="services:AdaptiveColourRule">
+                                        <Grid ColumnSpacing="8" Padding="0,2">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+
+                                            <StackPanel VerticalAlignment="Center">
+                                                <TextBlock
+                                                    Text="{x:Bind Host}"
+                                                    TextTrimming="CharacterEllipsis"/>
+                                                <TextBlock
+                                                    Text="{x:Bind Summary}"
+                                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                    Style="{StaticResource CaptionTextBlockStyle}"/>
+                                            </StackPanel>
+
+                                            <Button
+                                                Grid.Column="1"
+                                                Tag="{x:Bind}"
+                                                Click="OnDeleteRuleClick"
+                                                VerticalAlignment="Center"
+                                                Padding="6">
+                                                <FontIcon Glyph="&#xE74D;" FontSize="14" />
+                                            </Button>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <TextBlock
+                                x:Name="RuleEmptyHint"
+                                x:Uid="AdaptiveColourPage_RuleEmptyHint"
+                                Visibility="Collapsed"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Style="{StaticResource CaptionTextBlockStyle}"/>
+
+                            <Grid ColumnSpacing="6" RowSpacing="6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <TextBox
+                                    x:Name="RuleHostTextBox"
+                                    x:Uid="AdaptiveColourPage_RuleHostBox"
+                                    Grid.Column="0"/>
+
+                                <ComboBox
+                                    x:Name="RuleTypeComboBox"
+                                    Grid.Column="1"
+                                    SelectedIndex="0"
+                                    MinWidth="150">
+                                    <ComboBoxItem x:Uid="AdaptiveColourPage_RuleTypeColour" Tag="0" />
+                                    <ComboBoxItem x:Uid="AdaptiveColourPage_RuleTypeTheme" Tag="1" />
+                                    <ComboBoxItem x:Uid="AdaptiveColourPage_RuleTypeQuery" Tag="2" />
+                                </ComboBox>
+
+                                <TextBox
+                                    x:Name="RuleValueTextBox"
+                                    x:Uid="AdaptiveColourPage_RuleValueBox"
+                                    Grid.Column="2"/>
+
+                                <ComboBox
+                                    x:Name="RuleSchemeComboBox"
+                                    Grid.Column="3"
+                                    SelectedIndex="0"
+                                    MinWidth="110">
+                                    <ComboBoxItem x:Uid="AdaptiveColourPage_RuleSchemeBoth" Tag="0" />
+                                    <ComboBoxItem x:Uid="AdaptiveColourPage_RuleSchemeLight" Tag="1" />
+                                    <ComboBoxItem x:Uid="AdaptiveColourPage_RuleSchemeDark" Tag="2" />
+                                </ComboBox>
+
+                                <Button
+                                    x:Name="RuleAddButton"
+                                    x:Uid="AdaptiveColourPage_RuleAddButton"
+                                    Grid.Column="4"
+                                    Click="OnAddRuleClick"
+                                    Style="{StaticResource AccentButtonStyle}"/>
+                            </Grid>
+
+                        </StackPanel>
+                    </controls:SettingsCard>
+
+                </StackPanel>
+
+                <Border Height="40" />
+
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Page>

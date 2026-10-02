@@ -104,6 +104,15 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
         public AdaptiveColour Brightness(double percentage)
         {
             double cent = percentage / 100d;
+
+            // ATBC 的 brightness：cent 为 NaN 时所有比较分支都落空，最终 else 返回原色。
+            // 这里不照着"落到黑"走 —— 一旦校正量算成 NaN（配置极端值），
+            // 把整个栏子刷成纯黑比保留原色难看得多。
+            if (double.IsNaN(cent))
+            {
+                return this;
+            }
+
             if (cent > 1d)
             {
                 return new AdaptiveColour(ChannelMax, ChannelMax, ChannelMax, A);

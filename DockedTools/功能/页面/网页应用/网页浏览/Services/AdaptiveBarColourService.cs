@@ -97,6 +97,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
     /// </summary>
     public static class AdaptiveBarColourService
     {
+        /// <summary>会以纯文本渲染的扩展名（ATBC: plainTextExtension）</summary>
+        private static readonly string[] PlainTextExtensions =
+        {
+            ".css", ".ftl", ".js", ".locale", ".mjs", ".txt"
+        };
+
+        /// <summary>图片类扩展名（ATBC 的 getSourcePageMeta 只列了 png / jpg，这里按 WebView 常见格式补齐）</summary>
         private static readonly string[] ImageExtensions =
         {
             ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif", ".ico"
@@ -113,13 +120,34 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
             CoreWebView2 coreWebView,
             AdaptiveScheme scheme,
             AdaptiveBarColourOptions? options = null,
-            string? url = null)
+            string? url = null,
+            AdaptiveColourRule? rule = null)
         {
             options ??= new AdaptiveBarColourOptions();
 
-            AdaptiveTabColourData? data = await PageColourProbe.ProbeAsync(coreWebView, options.Query);
+            string? query = ResolveQuery(options, rule);
+            AdaptiveTabColourData? data = await PageColourProbe.ProbeAsync(coreWebView, query);
 
-            return Evaluate(data, scheme, options, url);
+            return Evaluate(data, scheme, options, url, rule);
+        }
+
+        /// <summary>
+        /// 本次取色用哪个 CSS 选择器：站点规则的 QUERY_SELECTOR 优先于全局选择器。
+        /// 对应 ATBC：query = rule?.type === "QUERY_SELECTOR" ? rule.value : undefined
+        /// </summary>
+        public static string? ResolveQuery(AdaptiveBarColourOptions options, AdaptiveColourRule? rule)
+        {
+            if (rule is { Type: AdaptiveRuleType.QuerySelector } && !string.IsNullOrWhiteSpace(rule.Value))
+            {
+                return rule.Value;
+            }
+
+            // 上游只有 QUERY_SELECTOR 规则会给脚本派选择器
+            // （background: rule?.type === "QUERY_SELECTOR" ? rule.value : undefined）。
+            // THEME_COLOUR / COLOUR 规则下决策链根本不看 query，
+            // 让脚本去 querySelector 一次纯属白跑 —— 直接不派。
+            // 没规则命中时才用设置里的全局选择器（这一项是我们比上游多的）。
+            return rule is null ? options.Query : null;
         }
 
         /// <summary>
@@ -132,83 +160,142 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
             AdaptiveTabColourData? data,
             AdaptiveScheme scheme,
             AdaptiveBarColourOptions? options = null,
-            string? url = null)
+            string? url = null,
+            AdaptiveColourRule? rule = null)
         {
             options ??= new AdaptiveBarColourOptions();
+
+            // ATBC：COLOUR 规则直接定色，连 content script 都要挂起（"SETUP_SCRIPT", mode: "suspend"），
+            // 页面外观完全不参与 —— 这里同理，压根不看 data。
+            if (rule is { Type: AdaptiveRuleType.Colour } &&
+                AdaptiveColour.TryParse(rule.Value, out AdaptiveColour specified))
+            {
+                return Build(specified, scheme, options, "COLOUR_SPECIFIED");
+            }
 
             Windows.UI.Color fallback = scheme == AdaptiveScheme.Light
                 ? options.FallbackLight
                 : options.FallbackDark;
 
-            AdaptiveColour chosen;
-            string reason;
-
             if (data is null)
             {
-                chosen = AdaptiveColour.FromColor(fallback);
-                reason = "FALLBACK_COLOUR";
+                return Build(AdaptiveColour.FromColor(fallback), scheme, options, "FALLBACK_COLOUR");
             }
-            else
+
+            AdaptiveColour pageColour = ParsePageColour(data.Page, fallback);
+            string special = ResolveSpecial(data, url);
+
+            string? themeText = scheme == AdaptiveScheme.Light ? data.Theme.Light : data.Theme.Dark;
+            AdaptiveColour themeColour = AdaptiveColour.Transparent;
+            bool hasThemeColour = false;
+
+            if (!string.IsNullOrWhiteSpace(themeText) &&
+                AdaptiveColour.TryParse(themeText, out AdaptiveColour parsedTheme) &&
+                parsedTheme.IsOpaque)
             {
-                AdaptiveColour pageColour = ParsePageColour(data.Page, fallback);
-                string special = ResolveSpecial(data, url);
-
-                string? themeText = scheme == AdaptiveScheme.Light ? data.Theme.Light : data.Theme.Dark;
-                AdaptiveColour themeColour = AdaptiveColour.Transparent;
-                bool hasThemeColour = false;
-
-                if (!string.IsNullOrWhiteSpace(themeText) &&
-                    AdaptiveColour.TryParse(themeText, out AdaptiveColour parsedTheme) &&
-                    parsedTheme.IsOpaque)
-                {
-                    hasThemeColour = true;
-                    themeColour = parsedTheme;
-                }
-
-                // ATBC: QUERY_SELECTOR 规则 —— 显式指定选择器时优先级最高
-                AdaptiveColour? queryColour = null;
-                if (data.Query is { } queryElement)
-                {
-                    AdaptiveColour candidate = queryElement.Colour.Opacity(queryElement.Opacity);
-                    if (candidate.IsOpaque)
-                    {
-                        queryColour = candidate;
-                    }
-                }
-
-                if (queryColour is { } query)
-                {
-                    chosen = query;
-                    reason = "QS_USED";
-                }
-                else if (special == "image")
-                {
-                    chosen = AdaptiveColour.FromColor(options.ImageViewer);
-                    reason = "IMAGE_VIEWER";
-                }
-                else if (special == "svg")
-                {
-                    chosen = AdaptiveColour.FromColor(options.Svg);
-                    reason = "IMAGE_VIEWER";
-                }
-                else if (special == "plaintext")
-                {
-                    chosen = AdaptiveColour.FromColor(
-                        scheme == AdaptiveScheme.Light ? options.PlainTextLight : options.PlainTextDark);
-                    reason = "TEXT_VIEWER";
-                }
-                else if (hasThemeColour && !options.NoThemeColour)
-                {
-                    chosen = themeColour;
-                    reason = "THEME_USED";
-                }
-                else
-                {
-                    chosen = pageColour;
-                    reason = hasThemeColour ? "THEME_IGNORED" : "COLOUR_PICKED";
-                }
+                hasThemeColour = true;
+                themeColour = parsedTheme;
             }
 
+            // 对齐上游 parseQueryColour：只取 colour、不乘元素 opacity（只有 page 分支才乘）。
+            // 乘了的话，命中元素只要不是完全不透明就会判定成 QS_FAILED，
+            // 用户专门指定的选择器等于白写 —— 那比半透明带来的轻微偏色糟糕得多。
+            AdaptiveColour? queryColour = data.Query is { } queryElement && queryElement.Colour.IsOpaque
+                ? queryElement.Colour
+                : null;
+
+            // ATBC 的 getFallbackColour()：按 special 分派，只有 none 才落到页面色。
+            // 判定顺序对齐上游 —— 先问 theme-color 在不在，special 只在回落里起作用。
+            // 反过来的话（special 抢在前面），一个声明了品牌色的图片页会用错色。
+            (AdaptiveColour fallbackColour, string fallbackReason) =
+                ResolveFallback(special, scheme, options, pageColour);
+
+            // 上游 parseTabColourData 是按 rule.type 分派的三段 switch，query 与 theme 互不串台：
+            // THEME_COLOUR 分支压根不看 query，QUERY_SELECTOR 分支压根不看 theme-color。
+            // 早先这里把 query 判定放在 switch 之前，THEME_COLOUR 规则会被 query 抢掉 ——
+            // 站点规则等于失效，所以按上游结构重排。
+            if (rule is { Type: AdaptiveRuleType.ThemeColour })
+            {
+                //   theme 存在 + value=true  → 用它（全局忽略时 reason 记 THEME_UNIGNORED）
+                //   theme 存在 + value=false → 回落，THEME_IGNORED
+                //   theme 缺失 + value=true  → 回落，THEME_MISSING（写了规则但页面没声明）
+                //   theme 缺失 + value=false → 回落，COLOUR_PICKED
+                bool useThemeColour = AdaptiveColourRuleTable.ParseThemeColourValue(rule.Value);
+
+                if (useThemeColour && hasThemeColour)
+                {
+                    return Build(themeColour, scheme, options,
+                        options.NoThemeColour ? "THEME_UNIGNORED" : "THEME_USED");
+                }
+
+                return Build(fallbackColour, scheme, options,
+                    useThemeColour ? "THEME_MISSING"
+                        : hasThemeColour ? "THEME_IGNORED" : "COLOUR_PICKED");
+            }
+
+            if (rule is { Type: AdaptiveRuleType.QuerySelector })
+            {
+                return queryColour is { } queried
+                    ? Build(queried, scheme, options, "QS_USED")
+                    : Build(fallbackColour, scheme, options, "QS_FAILED");
+            }
+
+            if (hasThemeColour)
+            {
+                return options.NoThemeColour
+                    // 全局忽略 theme-color：拿页面外观色，此时全局选择器补位（我们比上游多的一项，
+                    // 上游没有全局选择器概念，只有规则级 QUERY_SELECTOR）
+                    ? queryColour is { } globalQuery
+                        ? Build(globalQuery, scheme, options, "QS_USED")
+                        : Build(fallbackColour, scheme, options, "THEME_IGNORED")
+                    : Build(themeColour, scheme, options, "THEME_USED");
+            }
+
+            return queryColour is { } fallbackQuery
+                ? Build(fallbackQuery, scheme, options, "QS_USED")
+                : Build(fallbackColour, scheme, options, fallbackReason);
+        }
+
+        /// <summary>
+        /// ATBC 的 getFallbackColour()：按 special 分派，默认回页面色。
+        /// https://github.com/atbc-org/Adaptive-Tab-Bar-Colour/blob/main/src/entrypoints/background.ts
+        /// </summary>
+        private static (AdaptiveColour Colour, string Reason) ResolveFallback(
+            string special,
+            AdaptiveScheme scheme,
+            AdaptiveBarColourOptions options,
+            AdaptiveColour pageColour)
+        {
+            if (special == "image")
+            {
+                return (AdaptiveColour.FromColor(options.ImageViewer), "IMAGE_VIEWER");
+            }
+
+            // svg 上游单独给了色值，但 reason 与 image 同归 IMAGE_VIEWER
+            if (special == "svg")
+            {
+                return (AdaptiveColour.FromColor(options.Svg), "IMAGE_VIEWER");
+            }
+
+            if (special == "plaintext")
+            {
+                return (AdaptiveColour.FromColor(
+                        scheme == AdaptiveScheme.Light ? options.PlainTextLight : options.PlainTextDark),
+                    "TEXT_VIEWER");
+            }
+
+            return (pageColour, "COLOUR_PICKED");
+        }
+
+        /// <summary>
+        /// 对比度校正 + 亮度偏移，产出最终结果（对应 ATBC 的 setFrameColour + applyTheme）
+        /// </summary>
+        private static AdaptiveBarColourResult Build(
+            AdaptiveColour chosen,
+            AdaptiveScheme scheme,
+            AdaptiveBarColourOptions options,
+            string reason)
+        {
             AdaptiveContrastResult correction = chosen.ContrastCorrection(
                 scheme,
                 options.AllowDarkLight,
@@ -243,7 +330,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
 
             foreach (AdaptiveElementColour element in page)
             {
-                result = result.Mix(element.Colour.Opacity(element.Opacity));
+                // ATBC: if (isNaN(opacity)) continue; —— 拿不到有效不透明度的元素不参与合成
+                if (element.Opacity is not { } opacity)
+                {
+                    continue;
+                }
+
+                result = result.Mix(element.Colour.Opacity(opacity));
                 if (result.IsOpaque)
                 {
                     return result;
@@ -272,6 +365,15 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
 
             int queryIndex = url.IndexOf('?');
             string path = queryIndex >= 0 ? url.Substring(0, queryIndex) : url;
+
+            // 判定顺序对齐上游 getSourcePageMeta：纯文本扩展名在图片之前
+            foreach (string extension in PlainTextExtensions)
+            {
+                if (path.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
+                {
+                    return "plaintext";
+                }
+            }
 
             foreach (string extension in ImageExtensions)
             {

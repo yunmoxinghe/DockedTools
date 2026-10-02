@@ -93,6 +93,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             
             // 应用系统主题的默认颜色
             ApplySystemThemeColors();
+
+            // 网页自适应栏色按新方案重算（复用已有取色数据，不重新探测页面）
+            // 放在最后：它会覆盖上面的默认色，保证网页页仍以网页外观为准
+            ReapplyAdaptiveBarColourForThemeChange();
         }
 
         /// <summary>
