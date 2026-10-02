@@ -384,21 +384,25 @@ public static partial class TrayContextMenuService
 
         try
         {
-            // 尝试在主 UI 线程上执行优雅退出
-            var dispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
-            
-            // 如果当前不在 UI 线程，尝试获取主 UI 线程的 DispatcherQueue
-            if (dispatcherQueue == null)
-            {
-                // 尝试通过 App 实例获取
-                var app = Microsoft.UI.Xaml.Application.Current as App;
-                if (app?.MainWindow != null)
-                {
-                    var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(app.MainWindow);
-                    // 通过窗口句柄获取 DispatcherQueue（需要在主线程上）
-                    System.Diagnostics.Debug.WriteLine("[TrayContextMenu] Attempting to get DispatcherQueue from main window");
-                }
-            }
+            // 本方法跑在 ThreadPool 线程上（OnSmartExit 用 QueueUserWorkItem 投递），
+            // 而 DispatcherQueue.GetForCurrentThread() 只认创建它的那个 UI 线程，
+            // 在后台线程上恒返回 null —— 所以优雅退出分支以前永远进不去，每次都退化成
+            // ForceExit + Exit(1)。
+            //
+            // 正确做法是从 UI 对象上取：DependencyObject.DispatcherQueue（Window 继承自它）
+            // 是只读属性，WinUI 3 元数据写明它 "can access the DependencyObject on the UI
+            // thread even if the code is initiated by a non-UI thread"，可跨线程读取。
+            // 仍保留 GetForCurrentThread() 优先，兼顾本就在 UI 线程上调用的情况。
+            // 优先级：主线程缓存队列 > 当前线程队列 > 主窗口队列
+            //
+            // 为什么必须先用 App.UIDispatcherQueue：退出菜单项是在托盘的独立 UI 线程上
+            // 点出来的，那里 GetForCurrentThread() 拿到的是托盘线程的队列（切过去执行
+            // 退出逻辑会在错误的线程上碰主窗口），而 Application.Current 在第二个 XAML
+            // 线程上也未必指向主线程的 App 实例 —— 两个兜底都不可靠，只能靠主线程缓存。
+            var app = Microsoft.UI.Xaml.Application.Current as App;
+            var dispatcherQueue = DockedTools.App.UIDispatcherQueue
+                                  ?? Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread()
+                                  ?? app?.MainWindow?.DispatcherQueue;
 
             if (dispatcherQueue != null)
             {
@@ -470,8 +474,10 @@ public static partial class TrayContextMenuService
             
             System.Diagnostics.Debug.WriteLine("[TrayContextMenu] Force exiting application...");
             
-            // 强制退出进程（退出码 1 表示异常退出）
-            Environment.Exit(1);
+            // 强制退出进程。
+            // 退出码用 0：这是用户主动选择的退出，只是没走成优雅路径而已；
+            // 用 1 会让 VS / 调试器显示"程序已退出，返回值 1"，看着像崩了，实际不是。
+            Environment.Exit(0);
         }
         catch (Exception ex)
         {

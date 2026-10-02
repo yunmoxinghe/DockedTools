@@ -7,7 +7,7 @@ namespace DockedTools.功能.统一调用;
 
 /// <summary>
 /// 应用重启服务
-/// WinUI 3 无包应用的正确重启实现
+/// 打包（MSIX）与免打包两种形态下都能正确重开的实现
 /// </summary>
 public static class AppRestartService
 {
@@ -27,13 +27,6 @@ public static class AppRestartService
     {
         try
         {
-            var exePath = Process.GetCurrentProcess().MainModule?.FileName;
-            
-            if (string.IsNullOrEmpty(exePath))
-            {
-                throw new InvalidOperationException("无法获取当前程序路径");
-            }
-
             // 确保包含 --restart 标记（用于绕过单实例检测）
             var argsList = args.ToList();
             if (!argsList.Any(a => a.Contains("--restart")))
@@ -41,14 +34,16 @@ public static class AppRestartService
                 argsList.Insert(0, "--restart");
             }
 
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = exePath,
-                UseShellExecute = true,
-                Arguments = string.Join(" ", argsList)
-            };
+            // ⚠️ 必须走包唤起（MSIX）而不是直接 Process.Start(exe)：
+            // 直接跑 exe 会让新实例缺了正确的 AppUserModelID 与完整 Launch 激活，
+            // 跟开始菜单/搜索里的那个应用对不上号。非打包运行时会自动降级到跑 exe。
+            var launch = DockedTools.Features.AppEntry.PackagedActivationService
+                .Launch(string.Join(" ", argsList));
 
-            Process.Start(startInfo);
+            if (!launch.Success)
+            {
+                throw new InvalidOperationException($"无法启动新的应用实例：{launch.Detail}");
+            }
             
             // 给新进程一点时间启动，然后再退出旧实例
             // 这样新进程有足够时间获取 Mutex 并初始化资源
@@ -70,50 +65,6 @@ public static class AppRestartService
         catch (Exception ex)
         {
             Debug.WriteLine($"重启失败: {ex.Message}");
-            throw;
-        }
-    }
-
-    /// <summary>
-    /// 以管理员权限重启
-    /// </summary>
-    public static async void RestartAsAdmin()
-    {
-        try
-        {
-            var exePath = Process.GetCurrentProcess().MainModule?.FileName;
-            
-            if (string.IsNullOrEmpty(exePath))
-            {
-                throw new InvalidOperationException("无法获取当前程序路径");
-            }
-
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = exePath,
-                UseShellExecute = true,
-                Verb = "runas", // 请求管理员权限
-                Arguments = "--restart" // 确保包含重启标记
-};
-
-            Process.Start(startInfo);
-            
-            // 给新进程一点时间启动，然后再退出旧实例
-            await System.Threading.Tasks.Task.Delay(500);
-            
-            // ⚠️ 重要：触发应用的正常退出流程确保托盘图标等资源被正确清理
-            if (Application.Current is DockedTools.App app)
-            {
-                app.ExitApplicationPublic();
-            }
-            else
-            {
-                Application.Current.Exit();
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"以管理员权限重启失败: {ex.Message}");
             throw;
         }
     }
@@ -144,12 +95,13 @@ public static class AppRestartService
 
     /// <summary>
     /// 检查是否从重启启动
+    ///
+    /// 走 LaunchArguments 而不是只看命令行：Shell 唤起时参数可能只躺在激活载荷里。
     /// </summary>
     /// <returns>如果是重启启动返回 true</returns>
     public static bool IsRestartedLaunch()
     {
-        var args = Environment.GetCommandLineArgs();
-        return args.Any(arg => arg.Contains("--restart"));
+        return DockedTools.Features.AppEntry.LaunchArguments.Contains("--restart");
     }
 
     /// <summary>
@@ -158,8 +110,8 @@ public static class AppRestartService
     /// <returns>重启来源标识，如 "update", "crash", "settings" 等</returns>
     public static string? GetRestartSource()
     {
-        var args = Environment.GetCommandLineArgs();
-        var restartArg = args.FirstOrDefault(arg => arg.StartsWith("--restart-from="));
+        var restartArg = DockedTools.Features.AppEntry.LaunchArguments.All
+            .FirstOrDefault(arg => arg.StartsWith("--restart-from="));
         
         if (restartArg != null)
         {

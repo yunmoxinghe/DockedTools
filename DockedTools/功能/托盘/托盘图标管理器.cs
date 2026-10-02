@@ -30,7 +30,7 @@ namespace DockedTools.Features.Tray
         // 托盘图标的唯一标识符
         private const uint TrayIconId = 123;
 
-        // 托盘悬停提示的基础文本（不带任何调试后缀）
+        // 托盘悬停提示的基础文本（构建时可能会追加 worktree 身份后缀）
         private const string TrayTooltipBase = "DockedTools";
 
         // 系统托盘图标对象，可为空
@@ -51,6 +51,15 @@ namespace DockedTools.Features.Tray
         private bool _initialized;
         // 标记是否已释放资源，防止重复释放
         private bool _isDisposed;
+        // 托盘独立 UI 线程宿主（为 null 表示当前跑在主线程降级模式下）
+        private TrayUIThreadHost? _trayHost;
+        // 主 UI 线程的 DispatcherQueue，用于把菜单点击切回主线程
+        private readonly Microsoft.UI.Dispatching.DispatcherQueue? _mainDispatcher;
+
+        /// <summary>
+        /// 托盘是否运行在独立 UI 线程上（false 表示已降级到主线程，卡死时会跟着一起死）
+        /// </summary>
+        public bool IsRunningOnIndependentThread => _trayHost != null;
 
         /// <summary>
         /// 构造函数
@@ -67,8 +76,41 @@ namespace DockedTools.Features.Tray
             // 保存窗口工厂方法
             _windowFactory = windowFactory;
 
+            // 缓存主线程 DispatcherQueue：托盘线程的菜单点击要切回这里操作主窗口
+            _mainDispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+
             // 创建全局快捷键管理器，使用 lambda 避免方法引用绑定实例
-            _hotkeyManager = new GlobalHotkeyManager(() => ShowMainWindow());
+            // 热键回调不一定落在主线程，所以统一走 RunOnMainThread
+            _hotkeyManager = new GlobalHotkeyManager(() => RunOnMainThread(ShowMainWindow));
+        }
+
+        /// <summary>
+        /// 把动作切回主 UI 线程执行
+        ///
+        /// 托盘图标与菜单跑在独立 UI 线程上，它们的事件回调也在那个线程触发，
+        /// 但创建 / 显示 / 关闭主窗口只能在主线程做。
+        /// 注意这里是投递而非等待：主线程卡死时调用方不会被拖住，托盘依然可点。
+        /// </summary>
+        private void RunOnMainThread(Action action)
+        {
+            var dispatcher = _mainDispatcher;
+            if (dispatcher == null || dispatcher.HasThreadAccess)
+            {
+                action();
+                return;
+            }
+
+            dispatcher.TryEnqueue(() =>
+            {
+                try
+                {
+                    action();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[TrayIconManager] ERROR running action on main thread: {ex.Message}");
+                }
+            });
         }
 
         /// <summary>
@@ -94,21 +136,27 @@ namespace DockedTools.Features.Tray
                 throw new FileNotFoundException("Tray icon not found", iconPath);
             }
 
-            // 构建托盘悬停提示（多 worktree 并行调试时会带上身份后缀）
+            // 🎯 托盘宿主窗口 + 图标 + 菜单整体搬到独立 UI 线程：
+            // 主窗口卡死时主线程消息泵停摆，托盘消息送不进来，菜单就跟着一起死。
+            // 搬到独立线程后，主线程卡死时托盘仍然能收消息、能弹菜单、能点退出。
             var tooltip = BuildTrayTooltip();
             System.Diagnostics.Debug.WriteLine($"[TrayIconManager] Tray tooltip: {tooltip}");
 
-            // 创建系统托盘图标对象，参数：图标ID、图标路径、鼠标悬停提示文本
-            _trayIcon = new SystemTrayIcon(TrayIconId, iconPath, tooltip);
-
-            // 订阅托盘图标的左键点击事件
-            _trayIcon.LeftClick += TrayIcon_LeftClick;
-            // 订阅托盘图标的右键点击事件
-            _trayIcon.RightClick += TrayIcon_RightClick;
-            // 设置托盘图标为可见状态
-            _trayIcon.IsVisible = true;
-
-            System.Diagnostics.Debug.WriteLine("[TrayIconManager] Tray icon initialized successfully.");
+            try
+            {
+                _trayHost = new TrayUIThreadHost();
+                _trayHost.Start(() => InitializeTrayOnOwnThread(iconPath, tooltip));
+                System.Diagnostics.Debug.WriteLine("[TrayIconManager] Tray icon initialized on independent UI thread.");
+            }
+            catch (Exception ex)
+            {
+                // 独立线程方案在这个环境不可用（XAML 多线程初始化失败）时退回主线程。
+                // 宁可保留"卡死时一起死"的旧行为，也不能让应用没有托盘图标。
+                System.Diagnostics.Debug.WriteLine($"[TrayIconManager] WARNING: independent tray thread unavailable ({ex.Message}), falling back to main thread");
+                _trayHost?.Dispose();
+                _trayHost = null;
+                InitializeTrayOnMainThread(iconPath, tooltip);
+            }
 
             // 订阅托盘评价按钮设置变化事件
             DockedTools.Features.Pages.Lab.LabPage.HideTrayRateButtonSettingsChanged += OnHideTrayRateButtonSettingsChanged;
@@ -144,14 +192,47 @@ namespace DockedTools.Features.Tray
         }
 
         /// <summary>
-        /// 托盘图标左键点击事件处理函数
+        /// 在托盘独立 UI 线程上完成托盘图标与菜单的创建
+        /// （由 TrayUIThreadHost 在该线程上回调，不能从其它线程调用）
         /// </summary>
-        /// <param name="sender">托盘图标对象</param>
-        /// <param name="args">事件参数</param>
+        private void InitializeTrayOnOwnThread(string iconPath, string tooltip)
+        {
+            _trayIcon = new SystemTrayIcon(TrayIconId, iconPath, tooltip);
+            _trayIcon.LeftClick += TrayIcon_LeftClick;
+            _trayIcon.RightClick += TrayIcon_RightClick;
+            _trayIcon.IsVisible = true;
+
+            // 菜单也必须在这个线程上创建：XAML 对象有线程亲和性，
+            // 把主线程造出来的 MenuFlyout 拿到这里 ShowAt 会直接崩。
+            // 三个回调都会回到托盘线程，所以统一包一层切回主线程。
+            _mouseMenu = TrayContextMenuService.CreateMouseTrayMenu(
+                onOpenWindow: () => RunOnMainThread(ShowMainWindow),
+                onCloseWindow: () => RunOnMainThread(CloseMainWindow),
+                onExit: () => RunOnMainThread(ExitApplication));
+
+            _touchMenu = TrayContextMenuService.CreateTouchTrayMenu(
+                onOpenWindow: () => RunOnMainThread(ShowMainWindow),
+                onCloseWindow: () => RunOnMainThread(CloseMainWindow),
+                onExit: () => RunOnMainThread(ExitApplication));
+        }
+
+        /// <summary>
+        /// 降级路径：在主线程上创建托盘图标（独立线程不可用时的兜底）
+        /// </summary>
+        private void InitializeTrayOnMainThread(string iconPath, string tooltip)
+        {
+            _trayIcon = new SystemTrayIcon(TrayIconId, iconPath, tooltip);
+            _trayIcon.LeftClick += TrayIcon_LeftClick;
+            _trayIcon.RightClick += TrayIcon_RightClick;
+            _trayIcon.IsVisible = true;
+
+            System.Diagnostics.Debug.WriteLine("[TrayIconManager] Tray icon initialized on main thread (fallback).");
+        }
+
         private void TrayIcon_LeftClick(SystemTrayIcon sender, SystemTrayIconEventArgs args)
         {
-            // 显示主窗口
-            ShowMainWindow();
+            // 事件在托盘线程上触发，显示主窗口必须切回主线程
+            RunOnMainThread(ShowMainWindow);
         }
 
         /// <summary>
@@ -211,29 +292,25 @@ namespace DockedTools.Features.Tray
         /// </summary>
         public void RefreshTrayMenu()
         {
-            // 确保在 UI 线程上执行（线程安全）
-            var dispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
-            if (dispatcherQueue != null)
+            void ClearMenuCache()
             {
-                dispatcherQueue.TryEnqueue(() =>
-                {
-                    // 清理鼠标菜单
-                    _mouseMenu?.Items.Clear();
-                    _mouseMenu = null;
-                    
-                    // 清理触摸菜单
-                    _touchMenu?.Items.Clear();
-                    _touchMenu = null;
-                });
+                // 清理鼠标菜单
+                _mouseMenu?.Items.Clear();
+                _mouseMenu = null;
+
+                // 清理触摸菜单
+                _touchMenu?.Items.Clear();
+                _touchMenu = null;
+            }
+
+            if (_trayHost != null)
+            {
+                // 菜单是托盘线程上的 XAML 对象，清理和重建都必须回到那个线程
+                _trayHost.TryEnqueue(ClearMenuCache);
             }
             else
             {
-                // 如果不在 UI 线程，直接清理（降级处理）
-                _mouseMenu?.Items.Clear();
-                _mouseMenu = null;
-                
-                _touchMenu?.Items.Clear();
-                _touchMenu = null;
+                RunOnMainThread(ClearMenuCache);
             }
         }
 
@@ -511,30 +588,61 @@ namespace DockedTools.Features.Tray
                 // 释放快捷键管理器资源
                 _hotkeyManager?.Dispose();
 
-                // 清理菜单缓存
-                _mouseMenu?.Items.Clear();
-                _mouseMenu = null;
-                
-                _touchMenu?.Items.Clear();
-                _touchMenu = null;
+                // 注意：菜单缓存不在这里清。
+                // 独立线程模式下菜单属于托盘线程，跨线程清 XAML 集合会崩，
+                // 统一交给下面的托盘线程清理分支处理。
 
                 // 注意：不重置 _initialized，防止对象复活导致状态不一致
                 // 如果需要复活功能，应该提供专门的 ReInitialize() 方法
             }
 
             // 释放非托管资源（托盘图标涉及系统资源）
-            if (_trayIcon != null)
+            var icon = _trayIcon;
+            _trayIcon = null;
+
+            if (icon != null)
             {
                 // 取消订阅左键点击事件
-                _trayIcon.LeftClick -= TrayIcon_LeftClick;
+                icon.LeftClick -= TrayIcon_LeftClick;
                 // 取消订阅右键点击事件
-                _trayIcon.RightClick -= TrayIcon_RightClick;
-                // 隐藏托盘图标
-                _trayIcon.IsVisible = false;
-                // 释放托盘图标资源
-                _trayIcon.Dispose();
-                // 清空托盘图标引用
-                _trayIcon = null;
+                icon.RightClick -= TrayIcon_RightClick;
+
+                if (_trayHost != null)
+                {
+                    // 宿主窗口和菜单都是托盘线程的资源，销毁要回到那个线程。
+                    // TryEnqueue 是 FIFO，这条排在下面的退出指令之前，能保证先跑到。
+                    _trayHost.TryEnqueue(() =>
+                    {
+                        _mouseMenu?.Items.Clear();
+                        _mouseMenu = null;
+
+                        _touchMenu?.Items.Clear();
+                        _touchMenu = null;
+
+                        icon.IsVisible = false;
+                        icon.Dispose();
+                    });
+                }
+                else
+                {
+                    // 主线程模式下菜单本来就属于这个线程，直接清
+                    _mouseMenu?.Items.Clear();
+                    _mouseMenu = null;
+
+                    _touchMenu?.Items.Clear();
+                    _touchMenu = null;
+
+                    // 隐藏托盘图标
+                    icon.IsVisible = false;
+                    // 释放托盘图标资源
+                    icon.Dispose();
+                }
+            }
+
+            if (_trayHost != null)
+            {
+                _trayHost.Shutdown();
+                _trayHost = null;
             }
 
             System.Diagnostics.Debug.WriteLine("[TrayIconManager] Resources disposed successfully.");
