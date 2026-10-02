@@ -82,7 +82,7 @@
         </desktop:Extension>
         <com:Extension Category="windows.comServer">
           <com:ComServer>
-            <com:ExeServer Executable="$targetnametoken$.exe" DisplayName="边栏助手" Arguments="----AppNotificationActivated:">
+            <com:ExeServer Executable="DockedTools.exe" DisplayName="边栏助手" Arguments="----AppNotificationActivated:">
               <com:Class Id="7413497E-3991-4463-BB6A-39AD3B1E3357" />
             </com:ExeServer>
           </com:ComServer>

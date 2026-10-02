@@ -76,13 +76,17 @@
              desktop 那条声明「点击通知时激活这个 CLSID」；
              com 那条把该 CLSID 真的注册成一个 COM 服务器，并指回本 exe。
              ⚠️ Arguments 必须是【四个】短横 —— WindowsAppSDK 靠这个前缀
-             把命令行负载识别成 AppNotification，写成两个会静默退化成普通启动。 -->
+             把命令行负载识别成 AppNotification，写成两个会静默退化成普通启动。
+             ⚠️ Executable 这里写死 DockedTools.exe，不能抄上面 Application 的
+             $targetnametoken$.exe —— 构建只替换 Application/@Executable 这一处，
+             写在这里会原样带进最终的 AppxManifest.xml，COM 激活时找不到文件。
+             （worktree 隔离改的是包身份不是 exe 名，写死不受影响。） -->
         <desktop:Extension Category="windows.toastNotificationActivation">
           <desktop:ToastNotificationActivation ToastActivatorCLSID="7413497E-3991-4463-BB6A-39AD3B1E3357" />
         </desktop:Extension>
         <com:Extension Category="windows.comServer">
           <com:ComServer>
-            <com:ExeServer Executable="$targetnametoken$.exe" DisplayName="边栏助手 (Debug)" Arguments="----AppNotificationActivated:">
+            <com:ExeServer Executable="DockedTools.exe" DisplayName="边栏助手 (Debug)" Arguments="----AppNotificationActivated:">
               <com:Class Id="7413497E-3991-4463-BB6A-39AD3B1E3357" />
             </com:ExeServer>
           </com:ComServer>
