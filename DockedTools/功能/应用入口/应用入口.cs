@@ -88,6 +88,15 @@ namespace DockedTools
         private Window? _keepAliveWindow;
         private TrayIconManager? _trayIconManager;
         private SingleInstanceCommunication? _singleInstanceCommunication;
+        private UIThreadWatchdog? _uiThreadWatchdog;
+
+        // OnLaunched 重入守卫。
+        // 托盘的独立 UI 线程会调用 WindowsXamlManager.InitializeForCurrentThread()，
+        // 而这一步会再次触发 Application.OnLaunched（XAML 把新线程当成一次新的激活）。
+        // 不拦住的话，OnLaunched 会在托盘线程上整套重跑一遍：再建主窗口、再开单实例
+        // 通信、再起桥接服务，状态直接错乱。
+        // 主线程一定是先进入 OnLaunched 的（托盘线程由它启动），所以守卫放在开头即可。
+        private int _onLaunchedInvoked;
         
         // Launch handlers
         private NormalLaunchHandler? _normalLaunchHandler;
@@ -118,6 +127,16 @@ namespace DockedTools
         public Window? MainWindow => _window;
 
         /// <summary>
+        /// 主 UI 线程的 DispatcherQueue（在 OnLaunched 里、主线程上捕获一次）
+        ///
+        /// 为什么需要它：托盘图标和菜单现在跑在独立的 UI 线程上，
+        /// DispatcherQueue.GetForCurrentThread() 在那个线程上拿到的是"托盘线程"的队列，
+        /// 而 Application.Current 在第二个 XAML 线程上也未必是主线程的那个实例 —— 
+        /// 两者都拿不到主线程。需要在主线程显式缓存一份，供跨线程代码切回来用。
+        /// </summary>
+        public static Microsoft.UI.Dispatching.DispatcherQueue? UIDispatcherQueue { get; private set; }
+
+        /// <summary>
         /// 获取应用是否正在退出的状态
         /// </summary>
         public bool IsApplicationExiting => _isExiting;
@@ -129,8 +148,8 @@ namespace DockedTools
         public App()
         {
             // ⭐ 检查是否是重启请求（必须在单实例检测之前）
-            var args = Environment.GetCommandLineArgs();
-            bool isRestart = args.Length > 1 && args[1].Contains("--restart");
+            // 合并了命令行 + 激活载荷两条来源：走包唤起时参数不一定在 args[1]。
+            bool isRestart = Features.AppEntry.LaunchArguments.Contains("--restart");
             
             // ⭐ 方案一：使用 Mutex 提前检测单实例，避免不必要的初始化
             // 这是最早的检测点，在 InitializeComponent() 之前执行
@@ -206,12 +225,23 @@ namespace DockedTools
         protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
         {
             System.Diagnostics.Debug.WriteLine("[App] OnLaunched called");
-            
+
+            // ⚠️ 重入守卫：托盘独立 UI 线程初始化 XAML 时会再次触发本方法，
+            // 必须直接返回，否则整套启动流程会在那个线程上重跑一遍。
+            if (Interlocked.Exchange(ref _onLaunchedInvoked, 1) == 1)
+            {
+                System.Diagnostics.Debug.WriteLine("[App] OnLaunched re-entry detected (secondary XAML thread), skipping");
+                return;
+            }
+
             try
             {
                 // ⭐ 方案一：Mutex 已在构造函数中完成单实例检测
                 // 如果代码执行到这里，说明当前是主实例
                 System.Diagnostics.Debug.WriteLine("[App] Main instance confirmed, initializing application");
+
+                // 在主线程上捕获 DispatcherQueue 供跨线程代码（托盘线程、后台线程）切回来用
+                UIDispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
 
                 // 启动单实例通信监听器（监听其他实例的唤醒请求）
                 _singleInstanceCommunication = new SingleInstanceCommunication(OnShowWindowRequested);
@@ -241,8 +271,7 @@ namespace DockedTools
                 System.Diagnostics.Debug.WriteLine($"[App] IsAutoLaunch: {isAutoLaunch}");
                 
                 // Check if this is a tray-only restart
-                var cmdArgs = Environment.GetCommandLineArgs();
-                bool isTrayOnlyRestart = cmdArgs.Length > 1 && Array.Exists(cmdArgs, arg => arg.Contains("--tray-only"));
+                bool isTrayOnlyRestart = Features.AppEntry.LaunchArguments.Contains("--tray-only");
                 System.Diagnostics.Debug.WriteLine($"[App] IsTrayOnlyRestart: {isTrayOnlyRestart}");
                 
                 if (isAutoLaunch)
@@ -277,6 +306,35 @@ namespace DockedTools
                 catch (Exception ex)
                 {
                     LogService.Error("应用入口", "注入桥接界面刷新委托失败", ex);
+                }
+
+                // 启动 UI 线程看门狗。
+                // 主线程一旦被长时间阻塞（消息泵停摆），窗口、托盘菜单、对话框会集体失联，
+                // 届时只能靠这个后台线程发现卡死，并静默重启到托盘。
+                try
+                {
+                    // 探测目标优先选常驻的 keep-alive 窗口：主窗口会被关掉重建，
+                    // 句柄会失效，而 keep-alive 窗口一直在主线程上。
+                    var watchdogTarget = _keepAliveWindow ?? _window;
+                    var watchdogHwnd = watchdogTarget != null
+                        ? WinRT.Interop.WindowNative.GetWindowHandle(watchdogTarget)
+                        : IntPtr.Zero;
+
+                    if (watchdogHwnd != IntPtr.Zero)
+                    {
+                        _uiThreadWatchdog = new UIThreadWatchdog(watchdogHwnd);
+                        _uiThreadWatchdog.Start();
+                        System.Diagnostics.Debug.WriteLine("[App] UI thread watchdog started");
+                    }
+                    else
+                    {
+                        System.Diagnostics.Debug.WriteLine("[App] WARNING: no window handle to watch, watchdog not started");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // 看门狗起不来不能拖垮启动流程
+                    LogService.Error("应用入口", "启动 UI 线程看门狗失败", ex);
                 }
 
                 // 启动浏览器扩展桥接服务（本机回环 WebSocket，供浏览器扩展连接）
@@ -390,6 +448,14 @@ namespace DockedTools
         {
             _trayIconManager?.Dispose();
             _singleInstanceCommunication?.Dispose();
+
+            // 同步路径只发取消信号，不等循环退出（这里不能阻塞）
+            if (_uiThreadWatchdog != null)
+            {
+                _uiThreadWatchdog.Stop();
+                _uiThreadWatchdog.Dispose();
+                _uiThreadWatchdog = null;
+            }
         }
 
         private async void ExitApplication()
@@ -418,7 +484,16 @@ namespace DockedTools
                 // 清理托盘图标
                 _trayIconManager?.Dispose();
                 _trayIconManager = null;
-                
+
+                // 停掉 UI 线程看门狗。
+                // 退出流程本身会阻塞主线程，不停的话它会把"正在退出"误判成卡死。
+                if (_uiThreadWatchdog != null)
+                {
+                    await _uiThreadWatchdog.StopAsync();
+                    _uiThreadWatchdog.Dispose();
+                    _uiThreadWatchdog = null;
+                }
+
                 // 异步停止单实例通信
                 if (_singleInstanceCommunication != null)
                 {

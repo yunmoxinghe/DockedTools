@@ -5,6 +5,7 @@ using DockedTools.Features.Pages.Settings;
 using DockedTools.Features.UnifiedCalls.TopAppBar;
 using DockedTools.Features.Localization;
 using DockedTools.Features.UnifiedCalls.InAppDialog;
+using DockedTools.Features.MainWindow.Entry;
 using DockedTools.功能.WebView备份.Components;
 using Microsoft.UI.Reactor.Hosting;
 using Microsoft.UI.Xaml;
@@ -269,6 +270,46 @@ namespace DockedTools.Features.Pages.Lab
         {
             // 点击卡片时切换 ToggleSwitch 状态
             WinUIContextMenuToggle.IsOn = !WinUIContextMenuToggle.IsOn;
+        }
+
+        /// <summary>
+        /// Toast 通知测试：发送单条通知
+        /// </summary>
+        private void OnSendToastClick(object sender, RoutedEventArgs e)
+        {
+            SendTestToast($"单条 · {DateTime.Now:HH:mm:ss}");
+        }
+
+        /// <summary>
+        /// Toast 通知测试：连发 3 条，验证排队/覆盖行为
+        /// </summary>
+        private void OnSendToastBurstClick(object sender, RoutedEventArgs e)
+        {
+            for (int i = 1; i <= 3; i++)
+            {
+                SendTestToast($"连发 {i}/3 · {DateTime.Now:HH:mm:ss}");
+            }
+        }
+
+        /// <summary>
+        /// 走 DebugNotificationHelper（AppNotificationManager）发一条系统通知，并把结果写回卡片
+        /// </summary>
+        /// <remarks>
+        /// Show() 没有返回值，所以这里只能确认「调用成功」；
+        /// 真正弹没弹出来取决于系统通知开关 / 专注助手，卡片文字里已提示。
+        /// </remarks>
+        private void SendTestToast(string message)
+        {
+            try
+            {
+                DebugNotificationHelper.Initialize();
+                DebugNotificationHelper.SendNotification("🧪 Toast 测试", message);
+                ToastStatusText.Text = $"✅ 已调用发送：{message}\n没弹出来就是被系统通知开关或专注助手拦了。";
+            }
+            catch (Exception ex)
+            {
+                ToastStatusText.Text = $"❌ 发送异常：{ex.Message}";
+            }
         }
 
         /// <summary>
