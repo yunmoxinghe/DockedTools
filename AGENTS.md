@@ -6,7 +6,7 @@
 - 禁止未经确认大规模修改架构。
 - 禁止修改无关内容。
 - 禁止使用过时技术信息回答。
-- 禁止使用git
+- 禁止直接在主分支操作git，除非我要求进行
 
 # 可以做
 - 学习D:\fluentapps\repos\DockedTools\winapp.agent.md

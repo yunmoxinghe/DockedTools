@@ -36,6 +36,11 @@ xaml_list.txt
 # 本地临时包清单覆盖（多 worktree 并存调试用，切勿提交）
 Package.Local.appxmanifest
 
+# 构建期自动生成的 worktree 身份文件（见 DockedTools.csproj 的 _WriteWorktreeIdentity）
+# 每次构建按当前仓库目录名覆盖，各 worktree 内容必然不同，提交只会造成无意义冲突。
+# csproj 已对它做「先移除默认 glob、再无条件 Compile Include」，文件缺失也能正常构建。
+DockedTools/功能/应用入口/WorktreeIdentity.g.cs
+
 # Package association
 Package.StoreAssociation.xml
 

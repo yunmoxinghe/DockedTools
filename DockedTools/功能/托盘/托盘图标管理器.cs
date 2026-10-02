@@ -30,6 +30,9 @@ namespace DockedTools.Features.Tray
         // 托盘图标的唯一标识符
         private const uint TrayIconId = 123;
 
+        // 托盘悬停提示的基础文本（不带任何调试后缀）
+        private const string TrayTooltipBase = "DockedTools";
+
         // 系统托盘图标对象，可为空
         private SystemTrayIcon? _trayIcon;
         // 主窗口引用，可为空
@@ -91,8 +94,12 @@ namespace DockedTools.Features.Tray
                 throw new FileNotFoundException("Tray icon not found", iconPath);
             }
 
+            // 构建托盘悬停提示（多 worktree 并行调试时会带上身份后缀）
+            var tooltip = BuildTrayTooltip();
+            System.Diagnostics.Debug.WriteLine($"[TrayIconManager] Tray tooltip: {tooltip}");
+
             // 创建系统托盘图标对象，参数：图标ID、图标路径、鼠标悬停提示文本
-            _trayIcon = new SystemTrayIcon(TrayIconId, iconPath, "DockedTools");
+            _trayIcon = new SystemTrayIcon(TrayIconId, iconPath, tooltip);
 
             // 订阅托盘图标的左键点击事件
             _trayIcon.LeftClick += TrayIcon_LeftClick;
@@ -118,6 +125,22 @@ namespace DockedTools.Features.Tray
                 System.Diagnostics.Debug.WriteLine($"[TrayIconManager] Failed to initialize global hotkey: {ex.Message}");
                 // TODO: 未来可以在这里显示通知给用户
             }
+        }
+
+        /// <summary>
+        /// 构建托盘悬停提示文本
+        /// 多 worktree 并行调试时（Debug 配置 + 仓库目录名含 hash）会追加身份后缀，
+        /// 例如 "DockedTools [Debug.WT3C53]"，便于在多个托盘图标之间区分实例。
+        /// Release 或单 worktree 下 WorktreeIdentity.Suffix 为空，文本保持 "DockedTools"。
+        /// </summary>
+        /// <returns>托盘悬停提示文本</returns>
+        private static string BuildTrayTooltip()
+        {
+            // 后缀由构建时生成（功能/应用入口/WorktreeIdentity.g.cs），Debug 下形如 ".WT3C53"
+            var suffix = global::WorktreeIdentity.Suffix;
+            return string.IsNullOrEmpty(suffix)
+                ? TrayTooltipBase
+                : $"{TrayTooltipBase} [Debug{suffix}]";
         }
 
         /// <summary>

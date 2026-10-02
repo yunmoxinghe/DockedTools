@@ -52,6 +52,9 @@ public static partial class TrayContextMenuService
 
         // 绑定事件处理器
         BindMenuEvents(flyout, "Mouse", onOpenWindow, onCloseWindow, onExit);
+
+        // 多 worktree 并行调试时追加实例标识
+        AppendWorktreeTag(flyout);
         
         // 🔑 关键：通过 Padding 来控制紧凑间距（不裁剪内容）
         flyout.Opening += (s, e) =>
@@ -96,6 +99,9 @@ public static partial class TrayContextMenuService
 
         // 绑定事件处理器
         BindMenuEvents(flyout, "Touch", onOpenWindow, onCloseWindow, onExit);
+
+        // 多 worktree 并行调试时追加实例标识
+        AppendWorktreeTag(flyout);
         
         // 🔑 关键：通过 Padding 来控制触摸间距（不裁剪内容）
         flyout.Opening += (s, e) =>
@@ -267,6 +273,34 @@ public static partial class TrayContextMenuService
         };
         exitItem.Click += (s, e) => OnSmartExit(onExit);
         flyout.Items.Add(exitItem);
+
+        // 多 worktree 并行调试时追加实例标识
+        AppendWorktreeTag(flyout);
+    }
+
+    /// <summary>
+    /// 在菜单末尾追加当前实例的 worktree 标识
+    /// 仅在多 worktree 并行调试（WorktreeIdentity.Suffix 非空，形如 ".WT3C53"）时追加，
+    /// Release 或单 worktree 下不添加任何菜单项，菜单外观与改动前完全一致。
+    /// </summary>
+    /// <param name="flyout">目标菜单</param>
+    private static void AppendWorktreeTag(MenuFlyout flyout)
+    {
+        var suffix = global::WorktreeIdentity.Suffix;
+        if (string.IsNullOrEmpty(suffix))
+        {
+            return;
+        }
+
+        // 分隔线 + 只读标识项（禁用态，仅作展示，点击无副作用）
+        flyout.Items.Add(new MenuFlyoutSeparator());
+        flyout.Items.Add(new MenuFlyoutItem
+        {
+            Text = $"实例 Debug{suffix}",
+            IsEnabled = false
+        });
+
+        System.Diagnostics.Debug.WriteLine($"[TrayMenu] Appended worktree tag: Debug{suffix}");
     }
 
     /// <summary>

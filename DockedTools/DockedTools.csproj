@@ -162,6 +162,15 @@
     <_WtIdentityFile>$(MSBuildProjectDirectory)\功能\应用入口\WorktreeIdentity.g.cs</_WtIdentityFile>
   </PropertyGroup>
 
+  <!-- 该文件已加入 .gitignore，clone 后本地并不存在。默认 Compile glob 只在评估阶段枚举
+       一次磁盘，届时文件还没被 _WriteWorktreeIdentity 写出，就会被漏掉、导致 CS0246。
+       这里先按字面路径把它从默认 glob 里摘掉（文件不存在时 Remove 是空操作，无害），
+       再无条件显式 Include：显式项不校验文件是否存在，等 BeforeBuild 写出后照常参与编译。 -->
+  <ItemGroup>
+    <Compile Remove="功能\应用入口\WorktreeIdentity.g.cs" />
+    <Compile Include="功能\应用入口\WorktreeIdentity.g.cs" />
+  </ItemGroup>
+
   <!-- 始终写出身份文件：Debug 带后缀，其余写空串，保证 Release 行为不变 -->
   <Target Name="_WriteWorktreeIdentity" BeforeTargets="BeforeBuild">
     <WriteLinesToFile
