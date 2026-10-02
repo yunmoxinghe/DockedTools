@@ -68,6 +68,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // ✅ 注销底部栏主题服务
             Services.BottomBarThemeService.Unregister();
             
+            // ✅ 复位自适应栏色（恢复系统默认栏色）
+            ResetAdaptiveBarColour();
+            
             // 取消订阅更新事件
             Shared.WebAppUpdateService.UpdateCompleted -= OnWebAppUpdated;
             
@@ -199,6 +202,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             
             // 平滑隐藏加载条：先停止动画，等待当前周期完成，再隐藏
             await HideLoadingProgressBarSmoothlyAsync();
+
+            // 页面就绪后按网页外观刷新顶栏/底栏颜色（ATBC 移植）
+            ScheduleAdaptiveBarColourUpdate();
         }
 
         private void CoreWebView2_HistoryChanged(object? sender, object e)

@@ -22,7 +22,11 @@
     <AppxManifest Remove="Package.appxmanifest" />
     
     <!-- 条件化包含对应配置的 manifest -->
-    <AppxManifest Include="Package.Debug.appxmanifest" Condition="'$(Configuration)'=='Debug'">
+    <!-- 本地临时覆盖清单（不提交）：存在时 Debug 构建优先用它，用于多 worktree 并存安装 -->
+    <AppxManifest Include="Package.Local.appxmanifest" Condition="'$(Configuration)'=='Debug' and Exists('$(MSBuildProjectDirectory)\Package.Local.appxmanifest')">
+      <SubType>Designer</SubType>
+    </AppxManifest>
+    <AppxManifest Include="Package.Debug.appxmanifest" Condition="'$(Configuration)'=='Debug' and !Exists('$(MSBuildProjectDirectory)\Package.Local.appxmanifest')">
       <SubType>Designer</SubType>
     </AppxManifest>
     <AppxManifest Include="Package.Release.appxmanifest" Condition="'$(Configuration)'=='Release'">

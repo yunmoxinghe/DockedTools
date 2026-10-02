@@ -6,15 +6,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Constants
     public static class WebBrowserConstants
     {
         /// <summary>
-        /// 消息类型
-        /// </summary>
-        public static class MessageTypes
-        {
-            public const string Tint = "DockedTools_tint";
-            public const string ThemeColor = "DockedTools_theme_color";
-        }
-
-        /// <summary>
         /// WebView2 浏览器参数
         /// </summary>
         public static class BrowserArguments
@@ -29,25 +20,5 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Constants
             };
         }
 
-        /// <summary>
-        /// 采样配置
-        /// </summary>
-        public static class Sampling
-        {
-            /// <summary>
-            /// 截图采样的顶部行数
-            /// </summary>
-            public const int TopSampleRows = 10;
-
-            /// <summary>
-            /// 截图采样的底部行数
-            /// </summary>
-            public const int BottomSampleRows = 10;
-
-            /// <summary>
-            /// 采样区域的最小透明度阈值
-            /// </summary>
-            public const byte MinAlphaThreshold = 10;
-        }
     }
 }

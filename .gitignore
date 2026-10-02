@@ -33,6 +33,9 @@ BundleArtifacts/
 xaml_compiler_*.txt
 xaml_list.txt
 
+# 本地临时包清单覆盖（多 worktree 并存调试用，切勿提交）
+Package.Local.appxmanifest
+
 # Package association
 Package.StoreAssociation.xml
 
