@@ -15,23 +15,49 @@ public static class BottomBarThemeService
     private static Border? _bottomBarHost;
     private static SolidColorBrush? _customBackgroundBrush;
 
+    /// <summary>底栏 XAML 上原本挂的 ThemeResource 画刷资源键，复位时按它取回默认值</summary>
+    private static string _defaultBackgroundResourceKey = "ApplicationPageBackgroundThemeBrush";
+
     /// <summary>
     /// 注册底部栏容器实例（由网页浏览页面在初始化时调用）
     /// </summary>
-    public static void Register(Border bottomBarHost)
+    /// <param name="bottomBarHost">底栏容器</param>
+    /// <param name="defaultBackgroundResourceKey">
+    /// XAML 上 Background 用的 ThemeResource 资源键。复位时必须按它把默认画刷取回来，
+    /// 不能靠 ClearValue —— ThemeResource 同样是本地值，清掉就直接变透明回不来了。
+    /// </param>
+    public static void Register(
+        Border bottomBarHost,
+        string defaultBackgroundResourceKey = "ApplicationPageBackgroundThemeBrush")
     {
         _bottomBarHost = bottomBarHost;
+        _defaultBackgroundResourceKey = defaultBackgroundResourceKey;
         System.Diagnostics.Debug.WriteLine("[BottomBarThemeService] 底部栏容器已注册");
     }
 
     /// <summary>
     /// 注销底部栏容器（页面卸载时清理）
+    ///
+    /// ⭐ 顺序要点：**先复位，再断引用**。
+    /// 服务内所有写入都以 _bottomBarHost 非空为前提，一旦先置空，之后的复位全部落到
+    /// 「未注册」分支静默 return —— 复位沦为彻头彻尾的空操作，日志却照样报「已复位」。
+    /// 若这个 Border 被下一张网页复用（页面缓存 / WebView 换实例但 Page 未重建），
+    /// 上一张网页的 RequestedTheme 与自适应背景色就会原封不动地残留下来。
+    ///
+    /// 这里自带一次复位，因此调用方即便忘了先 Reset 也不会留脏；重复调用安全。
     /// </summary>
     public static void Unregister()
     {
+        // ⚠️ 用 && 短路：置空后就不要再碰 SetBottomBar，免得刷出「未注册」警告
+        bool restored = _bottomBarHost is not null && SetBottomBar(ElementTheme.Default, null);
+
         _bottomBarHost = null;
         _customBackgroundBrush = null;
-        System.Diagnostics.Debug.WriteLine("[BottomBarThemeService] 底部栏容器已注销");
+
+        System.Diagnostics.Debug.WriteLine(
+            restored
+                ? "[BottomBarThemeService] 底部栏容器已注销（已复位为系统默认）"
+                : "[BottomBarThemeService] 底部栏容器已注销");
     }
 
     #region 一行调用 API
@@ -102,9 +128,9 @@ public static class BottomBarThemeService
         }
         else
         {
-            // 跟随系统（恢复 ThemeResource 绑定）
+            // 跟随系统（取回 XAML 原本挂的 ThemeResource 画刷，见 ApplyDefaultBackground 说明）
             _customBackgroundBrush = null;
-            _bottomBarHost.ClearValue(Border.BackgroundProperty);
+            ApplyDefaultBackground();
             System.Diagnostics.Debug.WriteLine($"[BottomBarThemeService] ✅ 底部栏已设置: 主题={theme}, 背景=跟随系统");
         }
 
@@ -166,7 +192,7 @@ public static class BottomBarThemeService
         else
         {
             _customBackgroundBrush = null;
-            _bottomBarHost.ClearValue(Border.BackgroundProperty);
+            ApplyDefaultBackground();
             System.Diagnostics.Debug.WriteLine("[BottomBarThemeService] ✅ 底部栏背景已恢复跟随系统");
         }
 
@@ -191,6 +217,39 @@ public static class BottomBarThemeService
         
         SetTheme(newTheme);
         System.Diagnostics.Debug.WriteLine($"[BottomBarThemeService] 🔄 主题已切换: {currentTheme} → {newTheme}");
+    }
+
+    #endregion
+
+    #region 内部实现
+
+    /// <summary>
+    /// 把底栏背景还原成 XAML 上挂的 ThemeResource 画刷。
+    ///
+    /// ⚠️ 这里**不能**用 ClearValue 代替：
+    /// <c>Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"</c> 在 XAML 里
+    /// 同样是以本地值形式落到 Background 上的，ClearValue 会把它连同 theme-resource 引用
+    /// 一起擦掉，结果是「恢复跟随系统」实际变成了「全透明」，且之后切主题再也不会跟着变。
+    /// 必须显式按资源键取一次当前主题下的画刷重新赋值，才等价于复位。
+    /// 顶栏那套逻辑（ResetAdaptiveBarColour）早就这么处理了，这里补齐同一条规则。
+    /// </summary>
+    private static void ApplyDefaultBackground()
+    {
+        if (_bottomBarHost is null)
+        {
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(_defaultBackgroundResourceKey)
+            && Application.Current.Resources.TryGetValue(_defaultBackgroundResourceKey, out object? resource)
+            && resource is Brush defaultBrush)
+        {
+            _bottomBarHost.Background = defaultBrush;
+            return;
+        }
+
+        // 资源取不到才退化到 ClearValue，总好过留着上一张网页的自适应色
+        _bottomBarHost.ClearValue(Border.BackgroundProperty);
     }
 
     #endregion
@@ -238,8 +297,12 @@ public static class BottomBarThemeService
     /// </summary>
     public static void Reset()
     {
-        SetBottomBar(ElementTheme.Default, null);
-        System.Diagnostics.Debug.WriteLine("[BottomBarThemeService] 🔄 底部栏已重置为完全跟随系统");
+        // 连跟着 Reset() 的日志也如实反映有没有真改动，避免自欺欺人的「已重置」
+        bool changed = SetBottomBar(ElementTheme.Default, null);
+        System.Diagnostics.Debug.WriteLine(
+            changed
+                ? "[BottomBarThemeService] 🔄 底部栏已重置为完全跟随系统"
+                : "[BottomBarThemeService] 底部栏本就处于跟随系统状态，无需重置");
     }
 
     /// <summary>

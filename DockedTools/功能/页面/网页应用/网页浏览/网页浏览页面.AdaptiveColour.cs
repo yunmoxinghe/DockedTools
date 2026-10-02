@@ -270,9 +270,12 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 WebPageTopAppBarBackground.ClearValue(Border.BackgroundProperty);
             }
 
-            Services.BottomBarThemeService.SetBottomBar(ElementTheme.Default, null);
+            // ⚠️ 必须在 BottomBarThemeService.Unregister() 之前调用，理由同上：
+            // 服务一旦先注销，宿主引用置空，这里就变成一次什么都没做的「假复位」。
+            bool bottomBarRestored = Services.BottomBarThemeService.SetBottomBar(ElementTheme.Default, null);
 
-            System.Diagnostics.Debug.WriteLine("[WebBrowserPage] 自适应栏色已复位");
+            System.Diagnostics.Debug.WriteLine(
+                $"[WebBrowserPage] 自适应栏色已复位（底栏{(bottomBarRestored ? "已还原" : "本就为默认值")}）");
         }
     }
 }

@@ -18,7 +18,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             _lastAppliedButtonWidth = double.NaN;
 
             // ✅ 注册底部栏主题服务
-            BottomBarThemeService.Register(BottomBarHost);
+            //   第二个参数是 XAML 上 BottomBarHost.Background 用的 ThemeResource 键，
+            //   复位（网页色还原、Unregister 前）时按它把默认画刷取回来 —— ClearValue 回不去 ThemeResource。
+            BottomBarThemeService.Register(BottomBarHost, "ApplicationPageBackgroundThemeBrush");
 
             // 创建 ReactorHostControl（WinUI ContentControl）
             _reactorHostControl = new Microsoft.UI.Reactor.Hosting.ReactorHostControl
