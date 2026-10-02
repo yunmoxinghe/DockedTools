@@ -46,6 +46,16 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
 
         /// <summary>特殊页面类型：none / image / plaintext / svg</summary>
         public string Special { get; set; } = "none";
+
+        /// <summary>
+        /// 这份数据采样时页面的 <c>location.href</c>（不含 hash）。
+        /// <b>跨页面串色的闸门就在这里</b>：常驻脚本的回传是异步的，
+        /// 切换 / 导航之后，旧文档的回传有可能慢半拍到达 —— 若不加甄别直接上色，
+        /// 就会出现「页 A 的颜色刷到了页 B 的顶栏/底栏上」。
+        /// 托管侧用它和 <c>CoreWebView2.Source</c> 比对，对不上就丢弃。
+        /// null 表示拿不到（老版本脚本 / 一次性探测），此时不做这道校验。
+        /// </summary>
+        public string? Url { get; set; }
     }
 
     /// <summary>
@@ -66,7 +76,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
     /// 3. 特殊页面判定去掉 Firefox 专属资源（chrome://、resource://），改用 SVG / 纯文本文档判定；
     /// 4. 常驻脚本在 readyState='loading' 时挂到 DOMContentLoaded 再启动
     ///    （AddScriptToExecuteOnDocumentCreated 注入时 document.head/body 还不存在）；
-    /// 5. 刻意不监听上游的 transition{end,cancel} / animation{end,cancel} ——
+    /// 5. 回传数据多带一个 <c>url</c>（采样时刻的 location.href）—— 上游不需要，因为 Firefox
+    ///    天然按 tab 隔离；这里同一个 WebView 会在一次次导航里跨越多个文档，而回传是异步的，
+    ///    没有它就只能靠时序猜这份颜色属于哪一个文档（详见 AdaptiveTabColourData.Url）；
+    /// 6. 刻意不监听上游的 transition{end,cancel} / animation{end,cancel} ——
     ///    带 CSS 动画的页面每播完一段就重跑一整条取色流水线（取色 → SetBottomBar →
     ///    RequestedTheme → 整棵子树 ThemeResource 重求值 → VisualState → 布局），
     ///    而且动画刚结束时采样到的往往是过渡态中间色，本身就不可用。
@@ -278,7 +291,62 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
                 data.Special = special.GetString() ?? "none";
             }
 
+            data.Url = StripFragment(ReadString(root, "url"));
+
             return data;
+        }
+
+        /// <summary>
+        /// 掐掉 URL 的 hash 段（含 '#' 本身）。
+        /// SPA 里 <c>#/route</c> 是常见的路由形式，CoreWebView2.Source 与 location.href
+        /// 双方都保留 hash，理论上对得上；但同一文档内点锚点链接时它俩的更新时机并不一致，
+        /// 比 hash 没有意义、只会制造误判 —— 颜色本来也不跟着锚点变。
+        /// </summary>
+        private static string? StripFragment(string? url)
+        {
+            if (url is null)
+            {
+                return null;
+            }
+
+            int hash = url.IndexOf('#');
+            string trimmed = hash >= 0 ? url.Substring(0, hash) : url;
+
+            return trimmed.Length == 0 ? null : trimmed;
+        }
+
+        /// <summary>
+        /// 两条 URL 是否指向同一份文档（忽略 hash 与末尾斜杠差异、大小写不敏感）。
+        /// 用宽松比对是因为服务器重定向会让 Source 与 href 在表现形式上略有出入
+        /// （多了斜杠、query 顺序不同则另说），硬比对会把正常的导航一次扣损失掉。
+        /// </summary>
+        public static bool SameLocation(string? a, string? b)
+        {
+            if (a is null || b is null)
+            {
+                // 拿不到就别拦 —— 老脚本 / 一次性探测本来就没有 url 字段
+                return true;
+            }
+
+            return string.Equals(
+                Normalise(a),
+                Normalise(b),
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string Normalise(string url)
+        {
+            int hash = url.IndexOf('#');
+            string value = hash >= 0 ? url.Substring(0, hash) : url;
+
+            // 只拔掉一根末尾斜杠：http://x.com vs http://x.com/ 同文档；
+            // 多根不处理 —— 那是不同路径语义。
+            if (value.Length > 1 && value.EndsWith("/", StringComparison.Ordinal))
+            {
+                value = value.Substring(0, value.Length - 1);
+            }
+
+            return value;
         }
 
         private static AdaptiveElementColour? ReadElementColour(JsonElement item)
@@ -401,7 +469,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
             page: page,
             theme: __atbcThemeColour(),
             query: __atbcQueryColour(query),
-            special: page.length > 0 ? 'none' : __atbcSpecial()
+            special: page.length > 0 ? 'none' : __atbcSpecial(),
+            // 带上当前 href：托管侧靠它识别「这份颜色属于哪个文档」。
+            // 少了它，常驻脚本的迟到回传就没法和新文档的回传区分，会互相覆盖。
+            url: location.href
         };
     };
 ";

@@ -41,6 +41,18 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         /// </summary>
         private const int AdaptiveBarColourLateDelayMs = 750;
 
+        /// <summary>
+        /// 顶部色块 / 底栏背景换色的过渡时长（毫秒）。
+        ///
+        /// <para>取色是 250ms trailing 节流驱动的，一次滚动可能连着来十几个色值；
+        /// 没有过渡就是一串硬跳，从一个亮站点切到暗站点尤其刺眼。</para>
+        ///
+        /// <para>300ms 略长于节流窗口：新色还没算完、上一个动画也没跑完就会被下一个接管，
+        /// 视觉上是连续的一段滚色而不是一串首尾相接的短动画。
+        /// 代价是颜色落后页面最多 ~0.5s，比跳变可接受得多。</para>
+        /// </summary>
+        private const int AdaptiveTransitionMs = Services.BottomBarThemeService.DefaultColourTransitionMs;
+
         /// <summary>顶部色块的默认背景资源键（XAML 里也是这个值）</summary>
         private const string TopBarBackgroundResourceKey = "ApplicationPageBackgroundThemeBrush";
 
@@ -390,11 +402,22 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 return;
             }
 
+            // 一次性探测同样要过这道闸门（此处会在 UI 线程上比一次最终结果）。
+            // 与常驻脚本同源的问题：RestartOneShotProbeAsync 只取消 CTS，
+            // 但 ExecuteScriptAsync 已经发出去的那一轮不会因为取消而消失，
+            // 它的结果仍会在 ProbeOnceAsync 里走到这里。
+            CoreWebView2 core = WebView.CoreWebView2!;
+
+            if (!PageColourProbe.SameLocation(data.Url, core.Source))
+            {
+                return;
+            }
+
             var result = AdaptiveBarColourService.Evaluate(
                 data,
                 ResolveAdaptiveScheme(),
                 AdaptiveOptions,
-                WebView.CoreWebView2.Source,
+                core.Source,
                 _adaptiveRule);
 
             DispatcherQueue.TryEnqueue(() => ApplyAdaptiveBarColour(result, data));
@@ -420,8 +443,30 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 return;
             }
 
+            // ⭐ 串色闸门：这份颜色可能属于上一个文档。
+            // 常驻脚本是异步的 —— 250ms 节流窗口里的回传完全可能迟到。
+            // 典型场景：页面在滚动（正在回传暗色），此时点了链接导航到新站，
+            // 老文档的最后一发回传踩在新文档的第一次采样之前到达，
+            // 于是「老页面的深色」被刷到了「新页面的栏子」上，而且因为去重还会粘住。
+            // 老版本脚本不带 url 字段时 SameLocation 一律放行 —— 拿不到就别拦，
+            // 误扣整张本质正常的回传会让自适应彻底不生效，比偶尔串色更难排查。
+            string? currentUrl = WebView?.CoreWebView2?.Source;
+            if (!PageColourProbe.SameLocation(data.Url, currentUrl))
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    "[WebBrowserPage] 丢弃过期文档的取色回传（URL 不匹配）");
+                return;
+            }
+
             DispatcherQueue.TryEnqueue(() =>
             {
+                // Enqueue 之后才上 UI 线程，这里再看一次 Source：
+                // 排队的这一小段时间里又可能已经导航走了，写晚了同样是串色。
+                if (!PageColourProbe.SameLocation(data.Url, WebView?.CoreWebView2?.Source))
+                {
+                    return;
+                }
+
                 var scheme = ResolveAdaptiveScheme();
 
                 var result = AdaptiveBarColourService.Evaluate(
@@ -511,9 +556,19 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
             var theme = result.Scheme == AdaptiveScheme.Dark ? ElementTheme.Dark : ElementTheme.Light;
 
-            // 只改本页面的顶部色块，顶栏控件本身的背景一律不动
-            _adaptiveTopBarBrush.Color = result.Frame;
-            WebPageTopAppBarBackground.Background = _adaptiveTopBarBrush;
+            // 只改本页面的顶部色块，顶栏控件本身的背景一律不动。
+            // 色块是 Border，XAML 的 BackgroundTransition 不支持 Border（只支持
+            // Grid / StackPanel / ContentPresenter），所以这里自己驱动常驻画刷做淡入。
+            // transitionMs=0 的场景（复位后的首次上色）退化为立即赋值。
+            if (ReferenceEquals(WebPageTopAppBarBackground.Background, _adaptiveTopBarBrush))
+            {
+                BrushColourTransition.AnimateTo(_adaptiveTopBarBrush, result.Frame, AdaptiveTransitionMs);
+            }
+            else
+            {
+                BrushColourTransition.SnapTo(_adaptiveTopBarBrush, result.Frame);
+                WebPageTopAppBarBackground.Background = _adaptiveTopBarBrush;
+            }
 
             // 顶栏文字/图标：按取到的亮暗切顶栏局部主题，前景色由主题资源自动跟上。
             // 沉浸式下顶栏没有自己的底衬（SetChromeVisible(false)），背景就是上面那个色块，
@@ -525,7 +580,8 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
             if (IsBottomBarHostOwner())
             {
-                Services.BottomBarThemeService.SetBottomBar(theme, result.Frame);
+                Services.BottomBarThemeService.SetBottomBar(
+                    BottomBarHost, theme, result.Frame, AdaptiveTransitionMs);
             }
 
             System.Diagnostics.Debug.WriteLine(
@@ -560,7 +616,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // 之后再导航会重新注入（脚本内部有 __dockedToolsColourMonitor 去重）。
             _adaptiveMonitorInstalled = false;
 
-            // 开关可能是页面开着的时候被关掉的，画刷上还留着网页色 ——
+            // 开关可能是页面开着的时候被关掉的，画刷上还留着网页色，动画也可能还在滚 ——
+            // 先停掉动画，否则正在跑的 Storyboard 会在赋值之后继续插值，把复位色又拽回网页色。
+            BrushColourTransition.Stop(_adaptiveTopBarBrush);
+
             // 所以不按当前开关状态提前返回，一律走完整复位（幂等，重复调用无副作用）。
             // 覆盖 Background 会切断 XAML 的 ThemeResource 绑定，而 ClearValue 同样回不到
             // ThemeResource（它也是本地值），所以显式取一次当前主题下的默认画刷重新赋值。
@@ -581,7 +640,8 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
             if (IsBottomBarHostOwner())
             {
-                Services.BottomBarThemeService.SetBottomBar(ElementTheme.Default, null);
+                // 复位是粗粒度状态变更，带 300ms 尾巴会迟到地盖住新页面的第一帧 —— 过渡时长传 0
+                Services.BottomBarThemeService.SetBottomBar(BottomBarHost, ElementTheme.Default, null, 0);
             }
 
             System.Diagnostics.Debug.WriteLine("[WebBrowserPage] 自适应栏色已复位");
@@ -591,12 +651,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             => a.A == b.A && a.R == b.R && a.G == b.G && a.B == b.B;
 
         /// <summary>
-        /// BottomBarThemeService 是静态单例，一次只认一个底部栏宿主。
-        /// 页面被缓存 / 重建时可能有多个实例并存，写之前先确认宿主是本页的，
-        /// 否则会把别的页面的底部栏改成本页的网页色。
+        /// BottomBarThemeService 现在按宿主实例分账（见该服务的类注释），
+        /// 这里就退化成一句「我自己注册过没有」：注册过就只写自己那份，天然碰不到别人。
+        /// 以前这里是 <c>ReferenceEquals(RegisteredHost, BottomBarHost)</c> ——
+        /// 多页并存时注册权可能被后构造的页面抢走，本页的自适应色反而被自己挡在外面。
         /// </summary>
         private bool IsBottomBarHostOwner()
-            => ReferenceEquals(Services.BottomBarThemeService.RegisteredHost, BottomBarHost);
+            => Services.BottomBarThemeService.IsHostRegistered(BottomBarHost);
 
         /// <summary>
         /// 订阅设置页改动（先减后加，重复调用安全 —— 页面可能被 LRU 缓存后重新进入）。

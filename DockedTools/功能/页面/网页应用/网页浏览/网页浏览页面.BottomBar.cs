@@ -88,8 +88,14 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             //    窗口状态动画 / 重测量过程中宿主宽度会短暂缩到很小，此时 clamp 会把按钮压到
             //    minButtonWidth；而最后一帧无论停在哪个瞬时值都会成为最终外观。
             //    既然连最小宽度的按钮都装不下，说明这就是中间态 —— 保持上一次的计算结果不动。
+            //
+            //    ⚠️ 这里的坑在于「不动」是建立在「已经算过一次」之上的：
+            //    于是**窄窗口（<268px）永远走不到下面的赋值**，按钮宽度一直停在构造时的 48px
+            //    并横向溢出容器 —— 越窄越错，且看不出是这里的阈值而不是 Reactor 的问题。
+            //    所以只有「已经算过一次」才谈得上「保持上一次不动」；一次都没算过时退化为
+            //    按最小宽度做一次尽力布局，宁可挤也不让它停在凭空写的初始值上。
             double minRequiredWidth = totalSpacing + minButtonWidth * buttonCount;
-            if (availableWidth < minRequiredWidth)
+            if (availableWidth < minRequiredWidth && !double.IsNaN(_lastAppliedButtonWidth))
             {
                 return;
             }
