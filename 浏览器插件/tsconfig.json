@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    // 扩展要能直接被 Chrome 加载，所以编译成**普通脚本**而不是 ES module：
+    // popup.html 用 <script src> 依次加载，service worker 用 importScripts。
+    // 因此 module 必须是 none，跨文件复用走 namespace（见 src/lib/bridge.ts）。
+    "target": "ES2020",
+    "module": "none",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "types": ["chrome"],
+
+    "rootDir": "src",
+    // 这里是**中间产物**目录，不是可加载的扩展目录。
+    // build.mjs 会从这里把 js 搬到 dist/chrome、dist/firefox，并各写一份自己的 manifest。
+    "outDir": "dist/_build",
+    "sourceMap": true
+  },
+  "include": ["src/**/*.ts"]
+}

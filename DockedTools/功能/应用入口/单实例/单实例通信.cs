@@ -11,12 +11,14 @@ namespace DockedTools.Features.AppEntry.SingleInstance
     public class SingleInstanceCommunication : IDisposable
     {
         // ⭐ MSIX 沙箱兼容：添加 Local\ 前缀，避免跨会话冲突
+        // ⭐ 后缀与包身份同源（WorktreeIdentity.g.cs），否则多 worktree 的 Debug 实例
+        //   会抢同一对事件名，互相把对方的窗口喊出来。
 #if DEBUG
-        private const string ShowWindowEventName = @"Local\DockedAI_ShowWindow_Event_DEBUG";
-        private const string CancelEventName = @"Local\DockedAI_Cancel_Event_DEBUG";
+        private const string ShowWindowEventName = @"Local\DockedAI_ShowWindow_Event_DEBUG" + global::WorktreeIdentity.Suffix;
+        private const string CancelEventName = @"Local\DockedAI_Cancel_Event_DEBUG" + global::WorktreeIdentity.Suffix;
 #else
-        private const string ShowWindowEventName = @"Local\DockedAI_ShowWindow_Event";
-        private const string CancelEventName = @"Local\DockedAI_Cancel_Event";
+        private const string ShowWindowEventName = @"Local\DockedAI_ShowWindow_Event" + global::WorktreeIdentity.Suffix;
+        private const string CancelEventName = @"Local\DockedAI_Cancel_Event" + global::WorktreeIdentity.Suffix;
 #endif
         
         private EventWaitHandle? _showWindowEvent;

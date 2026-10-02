@@ -585,38 +585,40 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
                     LogDebug("检测到按钮配置变化");
                 }
 
-                // 读取现有数据
-                var shortcuts = await WebAppShortcutStore.LoadAsync();
-                var updatedShortcuts = shortcuts.ToList();
-
-                LogDebug($"OnSaveClick: Loaded {updatedShortcuts.Count} shortcuts");
-
-                // 查找并更新
-                var index = updatedShortcuts.FindIndex(s => s.Id == _appId);
-                if (index >= 0)
+                // 保存。走 UpdateAsync 一次持锁完成「读 → 改这一条 → 写」：
+                // 用户在这个页面上磨蹭的这段时间里，桥接可能已经加了新条目，
+                // 裸 Load→Save 会把那些条目一起冲掉。
+                LogDebug("OnSaveClick: Saving shortcuts");
+                await WebAppShortcutStore.UpdateAsync(shortcuts =>
                 {
+                    var updatedShortcuts = shortcuts.ToList();
+
+                    LogDebug($"OnSaveClick: Loaded {updatedShortcuts.Count} shortcuts");
+
+                    // 查找并更新
+                    var index = updatedShortcuts.FindIndex(s => s.Id == _appId);
+                    if (index < 0)
+                    {
+                        LogDebug("OnSaveClick: App not found in list!");
+                        return null;
+                    }
+
                     LogDebug($"OnSaveClick: Found app at index {index}, updating");
-                    
+
                     // 获取当前按钮配置
                     var leftButtonConfig = GetCurrentLeftButtonConfig();
                     var rightButtonConfig = GetCurrentRightButtonConfig();
-                    
+
                     updatedShortcuts[index] = new WebAppShortcut(
-                        _appId, 
-                        name, 
-                        uri.AbsoluteUri, 
+                        _appId,
+                        name,
+                        uri.AbsoluteUri,
                         _currentIconBytes,
                         leftButtonConfig,
                         rightButtonConfig);
-                }
-                else
-                {
-                    LogDebug("OnSaveClick: App not found in list!");
-                }
 
-                // 保存
-                LogDebug("OnSaveClick: Saving shortcuts");
-                await WebAppShortcutStore.SaveAsync(updatedShortcuts);
+                    return updatedShortcuts;
+                });
 
                 // ⭐ 使用新的更新服务（细粒度通知）
                 if (updateType != WebAppUpdateType.None)

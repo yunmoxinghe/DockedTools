@@ -505,11 +505,39 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
             }
         }
 
+        /// <summary>
+        /// 把界面上的快捷方式落盘。
+        ///
+        /// ⚠️ 这里**不能**拿 _webShortcuts 整份覆盖磁盘。
+        /// 桥接（浏览器扩展）是后台通道，它新增的条目直接落在磁盘上，
+        /// 而界面这边要等下一次刷新才会同步进 _webShortcuts。
+        /// 在这个窗口里只要触发一次 Persist，整份覆盖就会把那些条目一起抹掉，
+        /// 而且是静默的——界面上本来就没显示，用户根本不知道少了东西。
+        ///
+        /// 所以改成 UpdateAsync 做合并：「界面副本为准 + 保留磁盘上界面不认识的条目」。
+        /// 取舍：极端情况下（磁盘上已删、界面还没同步）可能让一条已被删的条目「复活」，
+        /// 但丢数据和多一条之间，多一条的代价明显更小，用户再删一次就行。
+        /// </summary>
         private async Task PersistShortcutsAsync()
         {
             try
             {
-                await WebAppShortcutStore.SaveAsync(_webShortcuts.Values);
+                await WebAppShortcutStore.UpdateAsync(disk =>
+                {
+                    var uiIds = new HashSet<string>(_webShortcuts.Keys);
+                    var merged = new List<WebAppShortcut>(_webShortcuts.Values);
+
+                    foreach (WebAppShortcut diskItem in disk)
+                    {
+                        if (!uiIds.Contains(diskItem.Id))
+                        {
+                            // 界面不知道这条 —— 桥接或其他后台通道刚写进去的，留着
+                            merged.Add(diskItem);
+                        }
+                    }
+
+                    return merged;
+                });
             }
             catch (Exception ex)
             {

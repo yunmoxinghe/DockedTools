@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    性能基准工程：真桥接 + 真 Store 全真源码端到端压测。
+
+    和另外两个测试工程的区别：
+      测试/桥接后端/ → 测逻辑正确性，Store 用内存替身
+      测试/存储并发/ → 只测 Store 的并发与落盘
+      本工程          → 真桥接（Kestrel + WebSocket）+ 真 Store，只测快慢
+
+    为什么要全真源码：性能数字只有在「跑的是真正要发布的那份代码」时才可信。
+    用替身测出来的 QPS 是替身的 QPS，不是产品的 QPS。
+
+    跑法见同目录 README.md。
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>DockedTools.Benchmarks</RootNamespace>
+    <AssemblyName>BridgeBenchmarks</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Configuration Condition="'$(Configuration)'==''">Release</Configuration>
+    <Optimize>true</Optimize>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="Shims.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="..\..\DockedTools\功能\浏览器扩展\*.cs" />
+    <Compile Include="..\..\DockedTools\功能\页面\网页应用\共享\网页应用快捷方式存储.cs" />
+    <Compile Include="..\..\DockedTools\功能\页面\网页应用\共享\网页应用快捷方式.cs" />
+    <Compile Include="..\..\DockedTools\功能\页面\网页应用\共享\键盘映射按钮配置.cs" />
+  </ItemGroup>
+
+</Project>

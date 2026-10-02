@@ -184,7 +184,13 @@ namespace DockedTools.Features.Pages.WebApp.EdgeSync
                 System.Diagnostics.Debug.WriteLine($"[EdgeBookmarkSync] Existing shortcuts: {existingShortcuts.Count}");
                 
                 var existingUrls = new HashSet<string>(existingShortcuts.Select(s => s.Url), StringComparer.OrdinalIgnoreCase);
-                var allShortcuts = existingShortcuts.ToList();
+
+                // 只收集「准备新增」的条目，不拼全量列表。
+                // 中间要去读 Edge 的 favicon 数据库，这一步可能跑好几秒；
+                // 如果先把全量列表拼好、读完图标再整份覆盖写回去，
+                // 这几秒里桥接（浏览器扩展）新增的条目就会被整体覆盖掉。
+                // 所以真正的合并推迟到落盘那一刻，对着最新的快照做增量合并。
+                var newShortcuts = new List<WebAppShortcut>();
 
                 // 读取 Favicons（在后台线程执行，避免阻塞 UI）
                 System.Diagnostics.Debug.WriteLine("[EdgeBookmarkSync] Checking favicon availability...");
@@ -308,7 +314,7 @@ namespace DockedTools.Features.Pages.WebApp.EdgeSync
                             iconBytes
                         );
 
-                        allShortcuts.Add(shortcut);
+                        newShortcuts.Add(shortcut);
                         existingUrls.Add(bookmark.Url); // 防止重复添加
                         addedCount++;
                         
@@ -319,12 +325,37 @@ namespace DockedTools.Features.Pages.WebApp.EdgeSync
 
                 System.Diagnostics.Debug.WriteLine($"[EdgeBookmarkSync] Total new bookmarks to add: {addedCount}");
 
-                // 一次性保存所有新增的书签
+                // 一次性保存所有新增的书签。
+                // 走 UpdateAsync：持锁读最新快照 → 增量合并 → 写回，
+                // 读图标那几秒里别人写进去的条目不会被这次同步冲掉。
                 if (addedCount > 0)
                 {
                     System.Diagnostics.Debug.WriteLine("[EdgeBookmarkSync] Saving shortcuts...");
-                    await WebAppShortcutStore.SaveAsync(allShortcuts);
-                    System.Diagnostics.Debug.WriteLine("[EdgeBookmarkSync] Shortcuts saved successfully");
+
+                    addedCount = await WebAppShortcutStore.UpdateAsync<int>(current =>
+                    {
+                        var urls = new HashSet<string>(current.Select(s => s.Url), StringComparer.OrdinalIgnoreCase);
+                        var merged = current.ToList();
+
+                        foreach (var candidate in newShortcuts)
+                        {
+                            // 同步期间可能已经有别人（桥接/用户手动）加过同一个 URL，
+                            // 这里再判一次，别插重了
+                            if (urls.Add(candidate.Url))
+                            {
+                                merged.Add(candidate);
+                            }
+                        }
+
+                        if (merged.Count == current.Count)
+                        {
+                            return ((IReadOnlyList<WebAppShortcut>?)null, 0);
+                        }
+
+                        return (merged, merged.Count - current.Count);
+                    });
+
+                    System.Diagnostics.Debug.WriteLine($"[EdgeBookmarkSync] Shortcuts saved successfully, actually added: {addedCount}");
                 }
 
                 LastSyncTime = DateTime.Now;

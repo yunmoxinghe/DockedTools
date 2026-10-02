@@ -37,10 +37,20 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                 // 2. 等待动画播放完成
                 await Task.Delay(animationDelayMs);
 
-                // 3. 从存储删除数据
-                var shortcuts = await WebAppShortcutStore.LoadAsync();
-                var updatedShortcuts = shortcuts.Where(s => s.Id != appId).ToList();
-                await WebAppShortcutStore.SaveAsync(updatedShortcuts);
+                // 3. 从存储删除数据。
+                // 走 UpdateAsync 一次持锁完成「读 → 过滤 → 写」：
+                // 动画那几百毫秒里桥接可能已经加过条目，裸 Load→Save 会把它一起抹掉。
+                // 没删掉任何东西就返回 null，别白写一次盘。
+                await WebAppShortcutStore.UpdateAsync(shortcuts =>
+                {
+                    var updatedShortcuts = shortcuts.Where(s => s.Id != appId).ToList();
+                    if (updatedShortcuts.Count == shortcuts.Count)
+                    {
+                        return null;
+                    }
+
+                    return updatedShortcuts;
+                });
 
                 System.Diagnostics.Debug.WriteLine($"[WebAppDeletionService] 数据已删除: {appId}");
 
@@ -64,10 +74,17 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         {
             try
             {
-                // 直接从存储删除
-                var shortcuts = await WebAppShortcutStore.LoadAsync();
-                var updatedShortcuts = shortcuts.Where(s => s.Id != appId).ToList();
-                await WebAppShortcutStore.SaveAsync(updatedShortcuts);
+                // 直接从存储删除（同样走原子读改写，理由见上面的带动画版本）
+                await WebAppShortcutStore.UpdateAsync(shortcuts =>
+                {
+                    var updatedShortcuts = shortcuts.Where(s => s.Id != appId).ToList();
+                    if (updatedShortcuts.Count == shortcuts.Count)
+                    {
+                        return null;
+                    }
+
+                    return updatedShortcuts;
+                });
 
                 // 触发删除完成事件
                 DeletionCompleted?.Invoke(null, appId);

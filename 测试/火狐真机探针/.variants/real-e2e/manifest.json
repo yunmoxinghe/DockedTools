@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "边栏助手配套扩展",
+  "version": "0.1.0",
+  "description": "把浏览器里的网页一键存进边栏助手（DockedTools）",
+  "action": {
+    "default_title": "边栏助手",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "scripts": [
+      "_guard.js",
+      "lib/bridge.js",
+      "background.js",
+      "trigger.js"
+    ]
+  },
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self';"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "dockedtools-bridge@dockedtools.app",
+      "strict_min_version": "142.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  }
+}

@@ -134,33 +134,42 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                         }
                         else
                         {
-                            // 合并模式：读取现有数据，合并新数据
-                            var existing = await WebAppShortcutStore.LoadAsync();
+                            // 合并模式：把导入的条目并进现有数据。
+                            // 走 UpdateAsync，对着落盘那一刻的最新快照做增量合并——
+                            // 解压、读文件的这段时间里别人写进去的条目不能被整份覆盖掉。
                             var imported = JsonSerializer.Deserialize(
                                 await File.ReadAllTextAsync(importedShortcutsFile),
                                 WebAppJsonContext.Default.ListStoredWebAppShortcut
                             );
 
-                            var existingIds = new HashSet<string>(existing.Select(s => s.Id));
-                            var merged = new List<WebAppShortcut>(existing);
-
                             if (imported != null)
                             {
-                                foreach (var item in imported)
+                                await WebAppShortcutStore.UpdateAsync(existing =>
                                 {
-                                    if (item.Id != null && !existingIds.Contains(item.Id))
-                                    {
-                                        merged.Add(new WebAppShortcut(
-                                            item.Id,
-                                            item.Name ?? string.Empty,
-                                            item.Url ?? string.Empty,
-                                            item.IconBytes
-                                        ));
-                                    }
-                                }
-                            }
+                                    var existingIds = new HashSet<string>(existing.Select(s => s.Id));
+                                    var merged = new List<WebAppShortcut>(existing);
 
-                            await WebAppShortcutStore.SaveAsync(merged);
+                                    foreach (var item in imported)
+                                    {
+                                        if (item.Id != null && !existingIds.Contains(item.Id))
+                                        {
+                                            merged.Add(new WebAppShortcut(
+                                                item.Id,
+                                                item.Name ?? string.Empty,
+                                                item.Url ?? string.Empty,
+                                                item.IconBytes
+                                            ));
+                                        }
+                                    }
+
+                                    if (merged.Count == existing.Count)
+                                    {
+                                        return null;
+                                    }
+
+                                    return merged;
+                                });
+                            }
                         }
                     }
 

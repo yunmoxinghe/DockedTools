@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    桥接后端的功能测试工程。
+
+    设计要点：把仓库里 DockedTools/功能/浏览器扩展/*.cs **原样编进来**，
+    只补三个替身类型（LogService / WebAppShortcut / WebAppShortcutStore），
+    这样就能脱离 WinUI 主工程，用真 WebSocket 客户端打真实端口。
+
+    不在 DockedTools.slnx 里，主工程构建不会带上它。
+    跑法见同目录 README.md。
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>DockedTools.BridgeTests</RootNamespace>
+    <AssemblyName>BridgeBackendTests</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="Stubs.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="..\..\DockedTools\功能\浏览器扩展\*.cs" />
+  </ItemGroup>
+
+</Project>

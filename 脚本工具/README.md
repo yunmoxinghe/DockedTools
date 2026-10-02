@@ -41,6 +41,58 @@ dotnet 脚本工具\图标调整工具.cs
 
 ---
 
+### 2. worktree 包身份工具 (`worktree.ps1`)
+
+**功能**：新建 git worktree 并自动获得独立的 MSIX 包身份，让多个 worktree 的 Debug 包**既能并存安装、也能同时运行**。附带体检模式，一眼看出当前 worktree 的身份对不对。
+
+**为什么需要它**：包的 `Identity Name` 只决定"能不能并列安装"，真正决定"能不能同时跑"的是运行时单实例标识（Mutex / 事件 / 命名管道）。两者必须同源，否则第二个实例会去激活第一个然后自己退出——**装得上但跑不起来**。
+
+本仓库从 worktree 目录名（`main-ffb0958c`）取 hash 前 4 位派生后缀 `.WTFFB0`，由 `DockedTools.csproj` 在构建时同时写进这两处。**前提是目录名带 hash**——`git worktree add ../my-fix` 这种名字不会触发隔离，本脚本就是为了保证这一点。
+
+> 我们的 worktree 一律由 WorkBuddy 生成，目录名形如 `main-ffb0958c`，自带 8 位 hex，
+> 所以后缀派生总是成立 —— **日常用不到 `-New`**，进新 worktree 跑一次 `-Status` 确认
+> 身份、再 `-Build -Run` 就行。`-New` 只在手动建 worktree 时才需要。
+
+**运行方式**：
+
+```powershell
+.\脚本工具\worktree.ps1 -Status                 # 体检（默认，只读）
+.\脚本工具\worktree.ps1 -Build -Run             # 构建并启动
+.\脚本工具\worktree.ps1 -ListPackages           # 列已装的包，标出归属 worktree / 孤儿包
+.\脚本工具\worktree.ps1 -New feat/xxx           # 手动建 worktree（目录名自动带 hash）
+.\脚本工具\worktree.ps1 -Build -Run             # 在当前 worktree 构建并启动
+.\脚本工具\worktree.ps1 -ListPackages           # 列出机器上已装的 DockedTools 包
+.\脚本工具\worktree.ps1 -Unregister <PackageFullName>   # 注销指定包
+```
+
+所有会改动系统的动作都可以加 `-DryRun` 预演（只打印命令，git / dotnet / winapp 全不动）。
+
+**体检输出示例**：
+
+```
+=== worktree 身份体检 ===
+  OK   DockedTools.csproj 已含隔离逻辑（_WriteWorktreeIdentity）
+  OK   目录名可派生后缀 : main-ffb0958c  ->  .WTFFB0
+
+  Identity Name   : 8B8CC4F4.482486777ECD9.Debug.WTFFB0
+  单实例 Mutex    : Local\DockedAI_SingleInstance_Mutex_DEBUG.WTFFB0
+  单实例管道      : DockedAI_SingleInstance_Pipe.WTFFB0
+  OK   身份长度 35（限制 3~50）
+  OK   Publisher 保持原样: CN=A19C62A9-...
+  OK   桥接端口 17829~17839 全空
+```
+
+**目录名不带 hash 时**会给出两条补救路径：`git worktree move` 改名，或每次带 `-Suffix WTXXXX`（走 `-p:WorktreeSuffix=` 传给 MSBuild，包身份与单实例标识一起变，无需改代码）。亦可设环境变量 `WORKTREE_SUFFIX`。
+
+**体检还会抓两类隐藏问题**：
+
+- **后缀撞车**：后缀只取 hash 前 4 位（16^4 = 65536 种）。若已有一个同名包指向别的目录，说明另一个 worktree 抢到了同一后缀 → 报 FAIL 并提示换 `-Suffix`。
+- **孤儿包**：worktree 删掉后包仍留在系统里，指向一个不存在的目录。`-ListPackages` 会标出来并给出可复制的 `-Unregister` 命令。
+
+**约束**：只在 Debug 下生效，Release 的后缀恒为空串，行为与加隔离前完全一致。只改 `Identity Name`，不动 `Publisher`——Publisher 必须与签名证书 Subject 一致，改了就得换证书。
+
+---
+
 ## 🚀 关于 .NET 10 File-based Apps
 
 ### 什么是 File-based Apps？

@@ -68,3 +68,13 @@ Vendors_Temp/
 # Debug log files
 DockedTools/debug_log.txt
 DockedTools/debug_log.err.txt
+
+# 浏览器插件（TypeScript）
+浏览器插件/node_modules/
+浏览器插件/dist/
+
+# 例外：扩展图标必须入库。上面「Windows」那节的 Icon? 本意是排除 macOS 的 Icon\r
+# 文件，但它会连带把 icons/ 目录整个忽略掉 —— 图标不进版本库的话，manifest 里
+# 引用的 icons / action.default_icon 在别人 clone 后就是死链接，扩展直接装不上。
+!浏览器插件/src/icons/
+!浏览器插件/src/icons/*.png

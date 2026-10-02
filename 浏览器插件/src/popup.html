@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>边栏助手</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>边栏助手</h1>
+    <span class="subtitle">本机桥接 · M0 探针</span>
+  </header>
+
+  <section class="card">
+    <div class="row">
+      <span class="label">连接状态</span>
+      <span id="status-badge" class="badge badge-idle">检测中</span>
+    </div>
+    <p id="status-detail" class="detail">正在探测 127.0.0.1 端口…</p>
+  </section>
+
+  <section class="card" id="hello-card" hidden>
+    <div class="row">
+      <span class="label">能力协商</span>
+      <span id="hello-version" class="badge badge-ok"></span>
+    </div>
+    <pre id="hello-detail" class="detail mono"></pre>
+  </section>
+
+  <section class="card" id="current-card">
+    <div class="row">
+      <span class="label">当前标签页</span>
+    </div>
+    <p id="current-title" class="detail"></p>
+    <p id="current-url" class="detail mono"></p>
+  </section>
+
+  <div class="actions">
+    <button id="btn-retry">重新连接</button>
+    <button id="btn-ping" hidden>测试 ping</button>
+  </div>
+
+  <div class="actions">
+    <button id="btn-save">存为网页应用</button>
+    <button id="btn-list">查看已有条目</button>
+  </div>
+
+  <p id="action-result" class="detail"></p>
+
+  <script src="lib/bridge.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
