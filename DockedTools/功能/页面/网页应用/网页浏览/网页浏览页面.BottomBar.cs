@@ -49,15 +49,35 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
             // 将 ReactorHostControl 添加到容器
             BottomButtonsContainer.Children.Add(_reactorHostControl);
+
+            // 宽度动画的驱动：每帧把新宽度写回组件并重新 Mount。
+            // 初值必须与上面组件的 ButtonWidth 一致，否则第一次布局会被当成一次「跳变」而滑一下。
+            _bottomBarWidthTransition = new Services.BottomBarWidthTransition(
+                DispatcherQueue,
+                width =>
+                {
+                    if (_bottomButtonBarComponent is null)
+                    {
+                        return;
+                    }
+
+                    _bottomButtonBarComponent.ButtonWidth = width;
+                    _reactorHostControl?.Mount(_bottomButtonBarComponent);
+                },
+                _bottomButtonBarComponent.ButtonWidth);
         }
 
         /// <summary>
         /// 按宿主可用宽度重算按钮宽度并下发。
         ///
         /// ⭐ 入口挂着 BottomBarHost.SizeChanged，而 SizeChanged 在**布局动画、窗口拖拽、
-        /// 多次重测量**期间会连续多帧触发；本方法每执行一次末尾就是一次 Mount()，
+        /// 多次重测量**期间会连续多帧触发；每下发一次宽度就是一次 Mount()，
         /// 也就是一次完整 reconcile。所以这里加了三道数值去抖，全部不含时间延迟 ——
         /// 目的是「别白干」，而不是「晚半拍」。
+        ///
+        /// <para>末尾的下发交给 <see cref="Services.BottomBarWidthTransition"/>：
+        /// 它在离散跳变时会额外按帧下发若干次，所以这里的去抖管的是「要不要重新计算」，
+        /// 每帧成本则由驱动那边的阈值兜着。</para>
         /// </summary>
         private void UpdateBottomBarLayout()
         {
@@ -119,16 +139,34 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             {
                 return;
             }
+            // ④ 下发宽度。
+            //    首帧（_lastAppliedButtonWidth 还是 NaN）一律直接落值：从组件构造时那个拍脑袋的
+            //    48 滑到算出来的真实宽度，观感是「页面刚出现、底栏自己抖一下」—— 那是 bug 的观感，
+            //    不是动画。之后才交给驱动去判断「该滑还是该跟」（判据见 BottomBarWidthTransition）。
+            bool firstApply = double.IsNaN(_lastAppliedButtonWidth);
             _lastAppliedButtonWidth = buttonWidth;
 
-            // 更新按钮宽度（间距已经在组件内部固定）
-            _bottomButtonBarComponent.ButtonWidth = buttonWidth;
-
-            // 触发重新渲染
-            _reactorHostControl?.Mount(_bottomButtonBarComponent);
+            if (firstApply)
+            {
+                _bottomBarWidthTransition?.Set(buttonWidth);
+            }
+            else
+            {
+                _bottomBarWidthTransition?.AnimateTo(buttonWidth);
+            }
 
             System.Diagnostics.Debug.WriteLine($"[UpdateBottomBarLayout] buttonWidth={buttonWidth:F2} (间距固定4px)");
         }
+
+        /// <summary>
+        /// 停掉底栏宽度动画（保持当前宽度，不回落）。
+        ///
+        /// <para>只在页面被真正拆除（<c>DisposeWebView</c>）时调用。
+        /// ⚠️ 刻意<b>不在 Unloaded 里调</b>：Unloaded 在切页时也会触发，而页面随后会被缓存复用，
+        /// 那时宿主尺寸可能完全没变、<c>SizeChanged</c> 不会再发一次，
+        /// 半路掐断就会让按钮宽度永久停在插值的中间值上。</para>
+        /// </summary>
+        private void StopBottomBarWidthAnimation() => _bottomBarWidthTransition?.Stop();
 
         /// <summary>
         /// 更新底部导航按钮的启用/禁用状态

@@ -590,6 +590,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 WebViewManager.DiagnoseState();
             }
             
+            // 页面都要拆了，没理由再让宽度动画继续写组件
+            StopBottomBarWidthAnimation();
+
             Loaded -= WebBrowserPage_Loaded;
             Unloaded -= WebBrowserPage_Unloaded;
             Pages.Settings.SettingsPage.WinUIContextMenuSettingsChanged -= OnWinUIContextMenuSettingsChanged;

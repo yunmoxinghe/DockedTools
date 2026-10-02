@@ -56,6 +56,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
         /// <summary>上一次实际下发的按钮宽度（<see cref="UpdateBottomBarLayout"/> 去抖用）</summary>
         private double _lastAppliedButtonWidth = double.NaN;
+
+        /// <summary>
+        /// 底部栏按钮宽度的平滑驱动（离散跳变时才滑，连续拖拽直接跟）。
+        /// 在构造函数里随底栏一起建，页面被 LRU 淘汰时随页面一起回收 ——
+        /// 停着的 DispatcherQueueTimer 不会被队列持有，不需要显式 Dispose。
+        /// </summary>
+        private Services.BottomBarWidthTransition? _bottomBarWidthTransition;
         
         // 顶部栏状态：页面只有【数据】（标题文本 + 图标文件路径），
         // 换行/省略号/换字动画这些渲染细节都在 AppTopBar 那一侧。
