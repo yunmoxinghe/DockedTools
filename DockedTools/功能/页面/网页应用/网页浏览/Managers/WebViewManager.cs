@@ -1,10 +1,11 @@
 using DockedTools.Features.Pages.Settings;
 using DockedTools.Features.Pages.WebApp.Common;
+using Microsoft.Web.WebView2.Core;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 
-namespace DockedTools.Features.Pages.WebApp.Browser
+namespace DockedTools.Features.Pages.WebApp.Browser.Managers
 {
     /// <summary>
     /// WebView 实例管理器，用于跟踪和限制同时打开的 WebView 数量
@@ -97,8 +98,69 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         }
 
         /// <summary>
-        /// 获取当前活跃的 WebView 数量
+        /// 取一个实例当前的内核引用（不激活、不改变 LRU 顺序）。
+        ///
+        /// <para>给「不跑页面但要借用内核能力」的场景用 —— 典型就是 Cookie 管理：
+        /// CoreWebView2CookieManager 只能挂在活着的 CoreWebView2 上，
+        /// 没有独立 construction 的入口（Environment 上并没有这类工厂方法），
+        /// 所以要么借一个现成的，要么自己创建一个 WebView。</para>
         /// </summary>
+        /// <param name="instanceId">网页应用实例 Id</param>
+        /// <param name="core">找到的内核；没找到为 null</param>
+        public static bool TryPeekCore(string instanceId, out CoreWebView2? core)
+        {
+            core = null;
+
+            if (string.IsNullOrEmpty(instanceId))
+            {
+                return false;
+            }
+
+            lock (_lock)
+            {
+                EnsureLRUCache();
+
+                // 刻意用 GetSnapshot 而不是 TryGet：TryGet 会把这个实例顶到 LRU 的「最近使用」端，
+                // 而这里只是借用一下内核，不该让一次 Cookie 查询改变淘汰顺序 ——
+                // 真淘汰掉一个正在加载的页面，代价远大于这次查询。
+                foreach (KeyValuePair<string, WebBrowserPage> kvp in _lruCache!.GetSnapshot())
+                {
+                    if (string.Equals(kvp.Key, instanceId, StringComparison.Ordinal))
+                    {
+                        core = kvp.Value.GetCoreWebView2();
+                        return core is not null;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// 取任意一个当前活着的内核。
+        /// 同一个 user data folder 下所有 CoreWebView2 共享同一份 Cookie，
+        /// 所以「谁的内核」对结果没有影响 —— 见 WebAppCookieService 的类注释。
+        /// </summary>
+        public static CoreWebView2? TryPeekAnyCore()
+        {
+            lock (_lock)
+            {
+                EnsureLRUCache();
+
+                foreach (KeyValuePair<string, WebBrowserPage> kvp in _lruCache!.GetSnapshot())
+                {
+                    CoreWebView2? core = kvp.Value.GetCoreWebView2();
+                    if (core is not null)
+                    {
+                        return core;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>获取当前活跃的 WebView 数量</summary>
         public static int ActiveCount
         {
             get

@@ -4,6 +4,7 @@ using DockedTools.Features.Pages.AI;
 using DockedTools.Features.Pages.Settings;
 using DockedTools.Features.Pages.Lab;
 using DockedTools.Features.Pages.WebApp.Browser;
+using DockedTools.Features.Pages.WebApp.Browser.Managers;
 using DockedTools.Features.Pages.WebApp.Shared;
 using DockedTools.Features.Localization;
 using DockedTools.Features.MainWindowContent.ContentArea;

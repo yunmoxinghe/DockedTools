@@ -1,5 +1,6 @@
 using DockedTools.Features.MainWindowContent.ContentArea;
 using DockedTools.Features.Pages.Settings;
+using DockedTools.Features.Pages.WebApp.Browser.Managers;
 using DockedTools.Features.Pages.WebApp.Shared;
 using DockedTools.Features.UnifiedCalls.AsyncSafety;
 using DockedTools.Features.UnifiedCalls.TopAppBar;
@@ -35,6 +36,12 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // 后果有两个：本页顶栏空白，以及回到上一页时它顶着本页的标题和按钮。
             // 放在最前：下面几处 early return 之前也要认领，否则一样会写错页。
             TopAppBarService.EnterPage(this);
+
+            // 认领底栏：底栏已按宿主实例分账（见 BottomBarThemeService 类注释），
+            //「最近活跃宿主」只影响那些不带宿主参数的旧调用。
+            // 从 LRU 缓存切回来时页面不会重新构造 ⇒ Register 不会再跑一次，
+            // 不认领的话那些旧调用会一路写到最后一个构造出来的页面上。
+            Services.BottomBarThemeService.ClaimForeground(BottomBarHost);
 
             // 设置页改取色参数后要即时重算栏色（页面被缓存时也要跟着改，所以订阅放在最前）
             SubscribeAdaptiveColourSettings();

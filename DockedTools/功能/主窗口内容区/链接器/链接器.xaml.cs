@@ -4,6 +4,7 @@ using DockedTools.Features.Pages.New;
 using DockedTools.Features.Pages.Settings;
 using DockedTools.Features.Pages.WebApp;
 using DockedTools.Features.Pages.WebApp.Browser;
+using DockedTools.Features.Pages.WebApp.Browser.Managers;
 using DockedTools.Features.Pages.WebApp.Shared;
 using DockedTools.Features.UnifiedCalls.TopAppBar;
 using Microsoft.UI.Xaml;

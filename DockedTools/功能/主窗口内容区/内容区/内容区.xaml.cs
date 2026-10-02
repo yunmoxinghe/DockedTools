@@ -10,6 +10,7 @@ using System.Numerics;
 using System.Threading.Tasks;
 using DockedTools.Features.Pages.WebApp.Shared;
 using DockedTools.Features.Pages.WebApp.Browser;
+using DockedTools.Features.Pages.WebApp.Browser.Managers;
 using DockedTools.Features.Pages.Settings;
 using DockedTools.Features.UnifiedCalls.TopAppBar;
 using Microsoft.UI.Xaml.Media.Animation;
@@ -230,7 +231,7 @@ namespace DockedTools.Features.MainWindowContent.ContentArea
             System.Diagnostics.Debug.WriteLine("[ContentArea] 事件订阅完成");
             
             // 订阅 WebViewManager 的淘汰事件
-            Pages.WebApp.Browser.WebViewManager.WebViewEvicted += OnWebViewEvicted;
+            Pages.WebApp.Browser.Managers.WebViewManager.WebViewEvicted += OnWebViewEvicted;
             System.Diagnostics.Debug.WriteLine("[ContentArea] WebViewManager 事件订阅完成");
             
             // 初始化 Frame 动画
@@ -403,7 +404,7 @@ namespace DockedTools.Features.MainWindowContent.ContentArea
         /// <summary>
         /// WebView 被 LRU 淘汰事件处理
         /// </summary>
-        private void OnWebViewEvicted(object? sender, Pages.WebApp.Browser.WebViewEvictedEventArgs e)
+        private void OnWebViewEvicted(object? sender, Pages.WebApp.Browser.Managers.WebViewEvictedEventArgs e)
         {
             System.Diagnostics.Debug.WriteLine($"[ContentArea] WebView 被 LRU 淘汰: {e.InstanceId}");
             
