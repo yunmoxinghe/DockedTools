@@ -3,7 +3,6 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using DockedTools.功能.WebView备份.Services;
-using Microsoft.UI;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Xaml;
@@ -31,6 +30,16 @@ namespace DockedTools.功能.WebView备份.Components;
 /// </summary>
 public class WebViewBackupComponent : Component
 {
+    // ── 官方主题资源键（走 Theme.Ref 交给框架跟随亮暗，不写死颜色）──
+    // 键名取自 WASDK 2.5.1 依赖的 Microsoft.WindowsAppSDK.WinUI 2.3.9 的 generic.xaml
+    // （本项目 Microsoft.WindowsAppSDK 2.5.1 ⇒ WinUI 2.3.9）。
+    // 卡片描边：官方卡片/内容层描边色，亮暗两套值。
+    private const string TokenCardStroke = "CardStrokeColorDefaultBrush";
+    // 状态文字色：成功 / 失败 / 进行中，对应原硬编码的 #4CAF50 / #F44336 / #FF9800。
+    private const string TokenStatusSuccess = "SystemFillColorSuccessBrush";
+    private const string TokenStatusCritical = "SystemFillColorCriticalBrush";
+    private const string TokenStatusCaution = "SystemFillColorCautionBrush";
+
     public override Element Render()
     {
         var (status, setStatus) = UseState("就绪");
@@ -185,14 +194,18 @@ public class WebViewBackupComponent : Component
                     TextBlock(status)
                         .TextWrapping(Microsoft.UI.Xaml.TextWrapping.Wrap)
                         .Foreground(
-                            status.StartsWith("✅") ? "#4CAF50" :
-                            status.StartsWith("❌") ? "#F44336" :
-                            "#FF9800")
+                            status.StartsWith("✅") ? Theme.Ref(TokenStatusSuccess) :
+                            status.StartsWith("❌") ? Theme.Ref(TokenStatusCritical) :
+                            Theme.Ref(TokenStatusCaution))
                 ).Padding(16).Spacing(8)
             )
             .Background(Theme.SubtleFill)
-            .Set(b => b.BorderBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(Colors.Gray))
-            .Set(b => b.BorderThickness = new Microsoft.UI.Xaml.Thickness(1))
+            // ⚠️ 不能写成 .Set(b => b.BorderBrush = ...) / .Set(b => b.BorderThickness = ...)：
+            // Reactor 的 Border 走对象池，归池时这两个属性会被重置，.Set() 里写的值在
+            // 下一次重渲染就丢了（表现：卡片灰边框莫名消失）＝编译警告 REACTOR_POOL_001。
+            // WithBorder 是 render 期修饰器，每次渲染都按同一份声明写回，天然自愈。
+            // 画刷走 ThemeRef 而非写死 Colors.Gray：官方卡片描边色随亮暗主题变化。
+            .WithBorder(Theme.Ref(TokenCardStroke), 1)
             .CornerRadius(8),
 
             // 操作按钮
@@ -265,8 +278,8 @@ public class WebViewBackupComponent : Component
                                 ).Padding(16).Spacing(12)
                             )
                             .Background(Theme.SubtleFill)
-                            .Set(b => b.BorderBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(Colors.Gray))
-                            .Set(b => b.BorderThickness = new Microsoft.UI.Xaml.Thickness(1))
+                            // 同上方信息卡片：走 WithBorder 而非 .Set(...)，边框才不会在池回收后丢失
+                            .WithBorder(Theme.Ref(TokenCardStroke), 1)
                             .CornerRadius(8)
                             .WithKey(backup);
                         }).ToArray()
