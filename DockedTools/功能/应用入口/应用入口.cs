@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -120,6 +121,12 @@ namespace DockedTools
 
         // 应用退出状态标志（防止主动退出时 keep-alive 自愈重新创建窗口）
         private bool _isExiting = false;
+
+        /// <summary>
+        /// 冷启动（应用本来没在跑）时被通知唤醒的那一次激活参数。
+        /// 在这里先存着，等窗口和内容区都建好之后再回头处理 —— 见 OnLaunched 末尾。
+        /// </summary>
+        private Microsoft.Windows.AppNotifications.AppNotificationActivatedEventArgs? _pendingNotificationActivation;
 
         /// <summary>
         /// 获取主窗口实例（用于内部访问）
@@ -254,6 +261,15 @@ namespace DockedTools
                 _shareLaunchHandler = new ShareLaunchHandler(this);
                 System.Diagnostics.Debug.WriteLine("[App] Launch handlers initialized");
 
+                // ⭐ 网页通知：注册必须排在下面那句 GetActivatedEventArgs() 之前。
+                //    官方写得很直白 —— 先 Register 再取激活参数，反了的话通知带来的 arguments 会丢，
+                //    表现为「点了通知，应用被叫起来了，但不知道该跳哪儿」。
+                //    同理，Activated 的订阅也要在 Register 之前挂好：应用没在跑时系统走 COM 激活，
+                //    Register 的那一刻起事件就可能开始投递。
+                DockedTools.Features.Pages.WebApp.Browser.Services.WebNotificationBridge.Activated +=
+                    OnWebNotificationActivated;
+                DockedTools.Features.Pages.WebApp.Browser.Services.WebNotificationBridge.EnsurePlatformRegistered();
+
                 // Check for ShareTarget activation
                 var activationArgs = AppInstance.GetCurrent().GetActivatedEventArgs();
                 System.Diagnostics.Debug.WriteLine($"[App] Activation kind: {activationArgs?.Kind}");
@@ -264,6 +280,18 @@ namespace DockedTools
                     System.Diagnostics.Debug.WriteLine("[App] Handling ShareTarget activation");
                     HandleShareTargetActivation(activationArgs.Data as ShareTargetActivatedEventArgs);
                     return;
+                }
+
+                // 被网页通知唤醒的冷启动：这里只登记，不处理。
+                // 此刻主窗口、托盘、ContentArea 全都还没建起来，ContentAreaService.Navigate
+                // 会因为「ContentArea 未注册」直接抛异常 —— 所以留到 OnLaunched 末尾回头处理。
+                // 另外注意：应用没在跑时，部分路径上报的 kind 是 Launch 而不是 AppNotification，
+                // 那时参数会改由 NotificationInvoked 事件送到（已订阅），两条路径最终汇到同一个处理函数。
+                if (activationArgs?.Kind == Microsoft.Windows.AppLifecycle.ExtendedActivationKind.AppNotification)
+                {
+                    System.Diagnostics.Debug.WriteLine("[App] 检测到 AppNotification 激活，延后到窗口就绪后处理");
+                    _pendingNotificationActivation = activationArgs.Data
+                        as Microsoft.Windows.AppNotifications.AppNotificationActivatedEventArgs;
                 }
 
                 // Check if this is an auto-launch scenario
@@ -342,6 +370,16 @@ namespace DockedTools
                 _ = System.Threading.Tasks.Task.Run(
                     () => DockedTools.Features.BrowserExtension.BridgeService.StartAsync());
 
+                // 冷启动被通知唤醒的那一次：走到这里窗口、托盘、内容区都已就绪，回头补上跳转。
+                // 压到 Low 优先级是为了排在窗口首帧之后 —— 否则跳转会和首帧布局抢同一帧。
+                if (_pendingNotificationActivation is { } pendingNotification)
+                {
+                    _pendingNotificationActivation = null;
+                    UIDispatcherQueue?.TryEnqueue(
+                        Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                        () => OnWebNotificationActivated(pendingNotification));
+                }
+
                 System.Diagnostics.Debug.WriteLine("[App] OnLaunched completed successfully");
                 
                 // 优化说明：
@@ -380,6 +418,108 @@ namespace DockedTools
             
             // ⭐ 强制唤醒窗口到最前（Win32 API）
             BringWindowToFront(_window);
+        }
+
+        /// <summary>
+        /// 用户点了某条网页通知：把窗口唤到前台，并跳到发出这条通知的那个网页应用。
+        ///
+        /// <para>两个激活路径都会进到这里 ——
+        /// ① 应用已经在跑：<c>AppNotificationManager.NotificationInvoked</c>；
+        /// ② 应用没在跑：系统 COM 激活，走 OnLaunched 的登记 + 末尾补处理。</para>
+        ///
+        /// <para>为什么<b>先无条件唤窗口</b>：跳到某个网页应用是有条件的（得有 origin 匹配的条目），
+        /// 但「点了通知却什么都没发生」是无论如何都不能接受的 —— 通知本身已经在通知中心里，
+        /// 用户点了没反应只会以为应用坏了。</para>
+        /// </summary>
+        private void OnWebNotificationActivated(
+            Microsoft.Windows.AppNotifications.AppNotificationActivatedEventArgs args)
+        {
+            string? origin = DockedTools.Features.Pages.WebApp.Browser.Services
+                .WebNotificationBridge.ReadOrigin(args);
+
+            if (origin is null)
+            {
+                // 不是网页通知（action 对不上），本入口不认领，交给将来别的处理方
+                System.Diagnostics.Debug.WriteLine("[App] 收到非网页通知的激活，忽略");
+                return;
+            }
+
+            System.Diagnostics.Debug.WriteLine($"[App] 网页通知被点击，来源: {origin}");
+
+            // ⚠️ 一律切回主线程：NotificationInvoked 那条路径不保证在 UI 线程上投递，
+            //    而唤窗口、Frame 导航都只能碰主线程。冷启动时 UIDispatcherQueue 已在
+            //    OnLaunched 开头捕获过，这里拿得到。
+            Microsoft.UI.Dispatching.DispatcherQueue? queue = UIDispatcherQueue;
+            if (queue is null)
+            {
+                System.Diagnostics.Debug.WriteLine("[App] 主线程队列尚未就绪，跳过通知跳转");
+                return;
+            }
+
+            queue.TryEnqueue(() =>
+            {
+                OnShowWindowRequested();
+                _ = NavigateToWebAppByOriginAsync(origin);
+            });
+        }
+
+        /// <summary>
+        /// 按来源 origin 找到对应的网页应用并跳转过去。
+        /// 找不到就什么都不做 —— 窗口已经唤出来了，静默地停在原地好过弹一个用户看不懂的报错。
+        /// </summary>
+        private async Task NavigateToWebAppByOriginAsync(string origin)
+        {
+            try
+            {
+                IReadOnlyList<Features.Pages.WebApp.Shared.WebAppShortcut> shortcuts =
+                    await Features.Pages.WebApp.Shared.WebAppShortcutStore.LoadAsync();
+
+                // 按 origin（scheme + host + port）匹配，而不是整个 URL 相等：
+                // 通知来自页面里的任意路径，拿页面 URL 去比必然一条都对不上。
+                Features.Pages.WebApp.Shared.WebAppShortcut? match = null;
+                foreach (Features.Pages.WebApp.Shared.WebAppShortcut shortcut in shortcuts)
+                {
+                    if (IsSameOrigin(shortcut.Url, origin))
+                    {
+                        match = shortcut;
+                        break;
+                    }
+                }
+
+                if (match is null)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[App] 没有 origin 匹配的网页应用: {origin}");
+                    return;
+                }
+
+                Features.UnifiedCalls.ContentArea.ContentAreaService.Navigate(
+                    typeof(Features.Pages.WebApp.Browser.WebBrowserPage), match);
+
+                System.Diagnostics.Debug.WriteLine($"[App] 已跳转到网页应用: {match.Name}");
+            }
+            catch (Exception ex)
+            {
+                // 跳转失败不该影响「窗口已经唤出来了」这个结果，所以只记日志
+                LogService.Error("应用入口", "按通知来源跳转网页应用失败", ex);
+            }
+        }
+
+        /// <summary>
+        /// 判断两个 URL 是否同源（scheme + host + port）。
+        /// <c>Uri.GetLeftPart(UriPartial.Authority)</c> 也能做，但它会带上用户信息段，
+        /// 而且大小写规矩和这里不完全一致 —— 三个分量分开比更不容易出错。
+        /// </summary>
+        private static bool IsSameOrigin(string? url, string origin)
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? left) ||
+                !Uri.TryCreate(origin, UriKind.Absolute, out Uri? right))
+            {
+                return false;
+            }
+
+            return string.Equals(left.Scheme, right.Scheme, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(left.Host, right.Host, StringComparison.OrdinalIgnoreCase)
+                && left.Port == right.Port;
         }
 
         /// <summary>

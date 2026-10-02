@@ -42,15 +42,58 @@ public static class WebNotificationBridge
     /// <summary>通知归属分组的前缀 —— 用来把不同站点的 tag 隔开，见 <see cref="Build"/></summary>
     private const string GroupPrefix = "web:";
 
+    /// <summary>
+    /// 本桥发的所有通知在 arguments 里打的标记。将来若接入别的通知来源，
+    /// 这条就是认领边界 —— 见 <see cref="ReadOrigin"/>。
+    /// </summary>
+    private const string ActionValue = "webNotification";
+
+    private const string ActionKey = "action";
+
+    private const string OriginKey = "origin";
+
     private static readonly object _registerLock = new();
 
     private static bool _platformRegistered;
 
     /// <summary>
+    /// 通知被点击（应用已经在跑的那条路径）。
+    /// 应用没在跑时系统走 COM 激活，由 <c>OnLaunched</c> 那边的
+    /// <c>ExtendedActivationKind.AppNotification</c> 分支接 —— 两条最终都汇聚到同一个处理函数。
+    /// </summary>
+    public static event Action<AppNotificationActivatedEventArgs>? Activated;
+
+    /// <summary>
+    /// 读出一条通知的来源 origin；返回 null 表示「这不是本桥发出的通知」，调用方应直接忽略。
+    ///
+    /// <para>为什么要认领判断：将来若接入别处的通知（备份完成、下载结束之类），
+    /// 所有通知都会走同一个 <see cref="Activated"/>。不校验 action 的话，
+    /// 一条备份通知被点开也会被当成「跳转到某个网页应用」。</para>
+    /// </summary>
+    public static string? ReadOrigin(AppNotificationActivatedEventArgs? args)
+    {
+        if (args?.Arguments is null)
+        {
+            return null;
+        }
+
+        if (!args.Arguments.TryGetValue(ActionKey, out string? action) || action != ActionValue)
+        {
+            return null;
+        }
+
+        return args.Arguments.TryGetValue(OriginKey, out string? origin) ? origin : null;
+    }
+
+    /// <summary>
     /// 系统通知平台注册。<c>AppNotificationManager.Show</c> 之前必须先 Register，
     /// 否则 Show 会静默失败 —— 不抛异常、不弹通知、调试输出里也什么都不留。
+    ///
+    /// <para>⚠️ 调用时机是硬要求：必须排在 <c>AppInstance.GetActivatedEventArgs()</c> <b>之前</b>。
+    /// 顺序反了的话通知激活参数会直接丢失 —— 用户点了通知，应用被叫起来了，
+    /// 但拿不到任何 arguments，等于点了个寂寞。所以应用入口里这一行被刻意放得很靠前。</para>
     /// </summary>
-    private static void EnsurePlatformRegistered()
+    public static void EnsurePlatformRegistered()
     {
         if (_platformRegistered)
         {
@@ -69,8 +112,8 @@ public static class WebNotificationBridge
                 AppNotificationManager manager = AppNotificationManager.Default;
 
                 // NotificationInvoked 只在【应用已经在跑】的时候触发；
-                // 没在跑的时候系统会按 OnLaunched 的激活路径重启进程。
-                // 后一条目前还没接，先在这里把控制权交给未来的实现，不假装已经处理干净。
+                // 没在跑的时候系统走 COM 激活，落在 OnLaunched 的
+                // ExtendedActivationKind.AppNotification 分支上。两条都得有，缺一条就有一段空窗。
                 manager.NotificationInvoked += OnNotificationInvoked;
                 manager.Register();
 
@@ -90,8 +133,9 @@ public static class WebNotificationBridge
     private static void OnNotificationInvoked(AppNotificationManager sender, AppNotificationActivatedEventArgs args)
     {
         System.Diagnostics.Debug.WriteLine(
-            $"[WebNotificationBridge] 通知被点击: {string.Join(", ", args.Arguments)} " +
-            "(⚠️ 尚未接 OnLaunched 激活路径，仅在应用已运行时生效)");
+            $"[WebNotificationBridge] 通知被点击: {string.Join(", ", args.Arguments)}");
+
+        Activated?.Invoke(args);
     }
 
     /// <summary>
@@ -192,8 +236,8 @@ public static class WebNotificationBridge
             : notification.Title;
 
         var builder = new AppNotificationBuilder()
-            .AddArgument("action", "webNotification")
-            .AddArgument("origin", origin ?? string.Empty)
+            .AddArgument(ActionKey, ActionValue)
+            .AddArgument(OriginKey, origin ?? string.Empty)
             .AddText(title);
 
         if (!string.IsNullOrWhiteSpace(notification.Body))

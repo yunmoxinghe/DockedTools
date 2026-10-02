@@ -6,7 +6,9 @@
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap uap5 rescap">
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  IgnorableNamespaces="uap uap5 rescap com desktop">
 
   <Identity
     Name="8B8CC4F4.482486777ECD9"
@@ -68,6 +70,23 @@
             Enabled="false"
             DisplayName="边栏助手" />
         </uap5:Extension>
+
+        <!-- 网页通知：把本应用登记成系统通知的激活目标。
+             两条是一套，缺一则应用没在跑时点通知唤不起来（只会被当成普通启动，拿不到 arguments）：
+             desktop 那条声明「点击通知时激活这个 CLSID」；
+             com 那条把该 CLSID 真的注册成一个 COM 服务器，并指回本 exe。
+             ⚠️ Arguments 必须是【四个】短横 —— WindowsAppSDK 靠这个前缀
+             把命令行负载识别成 AppNotification，写成两个会静默退化成普通启动。 -->
+        <desktop:Extension Category="windows.toastNotificationActivation">
+          <desktop:ToastNotificationActivation ToastActivatorCLSID="7413497E-3991-4463-BB6A-39AD3B1E3357" />
+        </desktop:Extension>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:ExeServer Executable="$targetnametoken$.exe" DisplayName="边栏助手" Arguments="----AppNotificationActivated:">
+              <com:Class Id="7413497E-3991-4463-BB6A-39AD3B1E3357" />
+            </com:ExeServer>
+          </com:ComServer>
+        </com:Extension>
       </Extensions>
     </Application>
   </Applications>
