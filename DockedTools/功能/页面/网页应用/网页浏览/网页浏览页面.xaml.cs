@@ -77,6 +77,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             
             Pages.Settings.SettingsPage.WinUIContextMenuSettingsChanged += OnWinUIContextMenuSettingsChanged;
             Pages.Settings.SettingsPage.WebViewPerformanceSettingsChanged += OnWebViewPerformanceSettingsChanged;
+            Pages.Lab.LabPage.WebViewTransparencySettingsChanged += OnWebViewTransparencySettingsChanged;
         }
 
         // ⚠️ InitializeTopBar、SetupTopBar、UpdateTopBarContent、SetupRightContent已移至 网页浏览页面.TopBar.cs

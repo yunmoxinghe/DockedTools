@@ -305,6 +305,80 @@
 
                 <Border Height="12" />
 
+                <!-- WebView2 透明背景实验室分组 -->
+                <TextBlock
+                    Text="WebView2 透明背景实验室"
+                    Style="{StaticResource BodyStrongTextBlockStyle}"
+                    Margin="1,0,0,4"/>
+
+                <StackPanel Spacing="4">
+                    <StackPanel.ChildrenTransitions>
+                        <EntranceThemeTransition FromVerticalOffset="50" />
+                        <RepositionThemeTransition IsStaggeringEnabled="False" />
+                    </StackPanel.ChildrenTransitions>
+
+                    <!-- 透明策略 -->
+                    <controls:SettingsCard
+                        Header="背景透明策略"
+                        Description="切换 WebView2 底色透明的施加方式（对照实验用）"
+                        IsClickEnabled="True"
+                        IsActionIconVisible="False"
+                        Click="OnWebViewTransparencyModeCardClick">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE7B3;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <ComboBox
+                            x:Name="WebViewTransparencyModeComboBox"
+                            HorizontalAlignment="Left"
+                            SelectionChanged="OnWebViewTransparencyModeChanged">
+                            <ComboBoxItem Content="不透明（基线对照）"/>
+                            <ComboBoxItem Content="XAML 属性 · 创建后（默认）"/>
+                            <ComboBoxItem Content="XAML 属性 · 创建前"/>
+                            <ComboBoxItem Content="环境变量"/>
+                            <ComboBoxItem Content="环境变量 + 创建前"/>
+                        </ComboBox>
+                    </controls:SettingsCard>
+
+                    <!-- 底层探针 -->
+                    <controls:SettingsCard
+                        Header="底层探针"
+                        Description="把 WebView 底色块刷成品红，用来判断能否看见 Z 轴更低的 XAML"
+                        IsClickEnabled="True"
+                        IsActionIconVisible="False"
+                        Click="OnWebViewTransparencyProbeCardClick">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE7C5;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <ToggleSwitch
+                            x:Name="WebViewTransparencyProbeToggle"
+                            Toggled="OnWebViewTransparencyProbeToggled"/>
+                    </controls:SettingsCard>
+
+                    <!-- 取消初始导航 -->
+                    <controls:SettingsCard
+                        Header="取消初始导航"
+                        Description="追加 --msWebView2CancelInitialNavigation，砍掉创建时的隐式首屏导航"
+                        IsClickEnabled="True"
+                        IsActionIconVisible="False"
+                        Click="OnWebViewCancelInitialNavigationCardClick">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xEDAD;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <ToggleSwitch
+                            x:Name="WebViewCancelInitialNavigationToggle"
+                            Toggled="OnWebViewCancelInitialNavigationToggled"/>
+                    </controls:SettingsCard>
+
+                    <TextBlock
+                        x:Name="WebViewTransparencyStatus"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        FontSize="12"
+                        TextWrapping="Wrap"
+                        Margin="4,4,0,0"/>
+                </StackPanel>
+
+                <Border Height="12" />
+
                 <!-- 托盘菜单设置分组 -->
                 <TextBlock
                     x:Uid="LabPage_TrayMenuSection"

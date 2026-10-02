@@ -94,6 +94,9 @@ namespace DockedTools.Features.Pages.Lab
             // 顶栏输入框测试卡：填候选值，并把默认形态下发一次
             InitializeSearchBoxCard();
 
+            // 初始化 WebView2 透明背景实验室设置
+            InitializeWebViewTransparencyLab();
+
             UpdateMargin();
         }
 

@@ -57,7 +57,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
     /// 1. <see cref="ProbeAsync"/> —— 一次性 ExecuteScriptAsync 探测（兜底用）；
     /// 2. <see cref="BuildMonitorScript"/> —— 常驻监控脚本，对齐上游 enableDynamic()：
     ///    click / resize / scroll / visibilitychange 四个事件，
-    ///    transition{end,cancel} / animation{end,cancel}（要求文档有焦点），
     ///    以及 darkReader、meta theme-color 属性、meta 标签增删、STYLE 标签增删四个 MutationObserver，
     ///    统一走 250ms trailing 节流后回传。
     ///
@@ -66,7 +65,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
     /// 2. 颜色归一化加哨兵色校验，避免非法值被静默解析成黑色；
     /// 3. 特殊页面判定去掉 Firefox 专属资源（chrome://、resource://），改用 SVG / 纯文本文档判定；
     /// 4. 常驻脚本在 readyState='loading' 时挂到 DOMContentLoaded 再启动
-    ///    （AddScriptToExecuteOnDocumentCreated 注入时 document.head/body 还不存在）。
+    ///    （AddScriptToExecuteOnDocumentCreated 注入时 document.head/body 还不存在）；
+    /// 5. 刻意不监听上游的 transition{end,cancel} / animation{end,cancel} ——
+    ///    带 CSS 动画的页面每播完一段就重跑一整条取色流水线（取色 → SetBottomBar →
+    ///    RequestedTheme → 整棵子树 ThemeResource 重求值 → VisualState → 布局），
+    ///    而且动画刚结束时采样到的往往是过渡态中间色，本身就不可用。
+    ///    SPA 路由切换有 click + MutationObserver 兜底，主题切换有 STYLE / darkReader 观察器兜底，
+    ///    不依赖这两个补不了的场景。
     /// </summary>
     public static class PageColourProbe
     {
@@ -500,10 +505,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
         }
     };
 
-    var sendColourRequiresFocus = function () {
-        if (document.hasFocus()) { sendColour(); }
-    };
-
     var start = function () {
         // 挂起中（命中 COLOUR 规则）：连监听都不装，页面外观完全不参与
         if (window.__dockedToolsColourSuspended === true) { return; }
@@ -537,10 +538,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
         });
         document.addEventListener('visibilitychange', sendColour);
         cleanups.push(function () { document.removeEventListener('visibilitychange', sendColour); });
-        ['transitionend', 'transitioncancel', 'animationend', 'animationcancel'].forEach(function (event) {
-            document.addEventListener(event, sendColourRequiresFocus, { passive: true });
-            cleanups.push(function () { document.removeEventListener(event, sendColourRequiresFocus); });
-        });
+        // 刻意不监听 transition{end,cancel} / animation{end,cancel}：见类注释「与上游的差异」第 5 条。
 
         darkReaderObserver.observe(document.documentElement, {
             attributes: true,

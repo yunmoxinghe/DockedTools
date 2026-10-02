@@ -39,6 +39,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // ✅ 同步动态圆角到背景色块
             SyncCornerRadius();
             
+            // ✅ 透明背景实验室：探针与 XAML 属性模式不依赖 CoreWebView2，立刻生效
+            ApplyWebViewTransparency();
+            ApplyWebViewTransparencyProbe();
+            
             // ✅ 订阅内容区圆角变化事件
             UnifiedCalls.ContentArea.ContentAreaService.CornerRadiusChanged += OnContentAreaCornerRadiusChanged;
             
@@ -65,11 +69,15 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // ✅ 取消订阅内容区圆角变化事件
             UnifiedCalls.ContentArea.ContentAreaService.CornerRadiusChanged -= OnContentAreaCornerRadiusChanged;
             
-            // ✅ 注销底部栏主题服务（带上自己的宿主：不是宿主就别把别人的注销掉）
-            Services.BottomBarThemeService.Unregister(BottomBarHost);
-            
             // ✅ 复位自适应栏色（恢复系统默认栏色）
+            // ⚠️ 必须排在 Unregister 之前：BottomBarThemeService 里所有写入都以宿主引用非空
+            // 为前提，先注销会把引用置空，复位随即全部静默 no-op，而日志照样报「已复位」。
+            // 顺序反了的后果是——若这个 BottomBarHost 被下一张网页复用，上一张的网页色会残留。
             ResetAdaptiveBarColour();
+
+            // ✅ 注销底部栏主题服务（带上自己的宿主：不是宿主就别把别人的注销掉）
+            //    复位已在前一步完成；Unregister 内部另外留了一次幂等复位兜底。
+            Services.BottomBarThemeService.Unregister(BottomBarHost);
             
             // 取消订阅更新事件
             Shared.WebAppUpdateService.UpdateCompleted -= OnWebAppUpdated;

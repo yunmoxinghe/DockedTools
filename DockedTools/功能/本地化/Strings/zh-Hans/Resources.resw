@@ -1256,6 +1256,21 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   <data name="BottomButtonBar_ThemeToggleButton" xml:space="preserve">
     <value>切换主题</value>
   </data>
+  <data name="BottomButtonBar_IdleModeButton" xml:space="preserve">
+    <value>窗口收起时的省电模式</value>
+  </data>
+  <data name="WebViewIdleMode_Normal" xml:space="preserve">
+    <value>普通</value>
+  </data>
+  <data name="WebViewIdleMode_Efficient" xml:space="preserve">
+    <value>高效</value>
+  </data>
+  <data name="WebViewIdleMode_Suspend" xml:space="preserve">
+    <value>挂起</value>
+  </data>
+  <data name="BottomButtonBar_IdleModeCycleHint" xml:space="preserve">
+    <value>点击切换</value>
+  </data>
   
   <!-- 数据管理页面 -->
   <data name="DataManagement_Title" xml:space="preserve">
