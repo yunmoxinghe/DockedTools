@@ -561,6 +561,36 @@ namespace DockedTools.Features.Pages.Settings
                 LocalizationHelper.GetString("SettingsPage_OpenLinkFailed") ?? "打开链接失败");
         }
 
+        private string GetQuickFeedbackLinkText()
+        {
+            try
+            {
+                var text = LocalizationHelper.GetString("SettingsPage_QuickFeedbackLink/Content");
+                if (string.IsNullOrEmpty(text))
+                {
+                    System.Diagnostics.Debug.WriteLine("[SettingsPage] Quick feedback link text not found in localization, using default");
+                    return "Quick Feedback";
+                }
+                return text;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[SettingsPage] Failed to get quick feedback link text: {ex}");
+                return "Quick Feedback";
+            }
+        }
+
+        /// <summary>
+        /// 打开「快速反馈」微软表单
+        /// 链接统一取自 QuickFeedbackService，托盘菜单走的是同一个地址
+        /// </summary>
+        private async void OnQuickFeedbackClick(object sender, RoutedEventArgs args)
+        {
+            await OpenExternalLinkAsync(
+                DockedTools.功能.统一调用.快速反馈.QuickFeedbackService.FormUrl,
+                LocalizationHelper.GetString("SettingsPage_OpenLinkFailed") ?? "打开链接失败");
+        }
+
         /// <summary>
         /// Unified helper for opening external links with user confirmation
         /// </summary>
