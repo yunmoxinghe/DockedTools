@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    真实 Store（网页应用快捷方式存储.cs）的并发与落盘测试工程。
+
+    和「桥接后端」那个工程分工不同：
+      桥接后端 → 测桥接逻辑，Store 用内存替身
+      本工程    → 把 Store 源码原样编进来，测 Store 自己的并发与落盘
+
+    为什么要单独一个：Store 依赖 Windows.Storage.ApplicationData 拿本地目录，
+    纯 net10.0 控制台里没有这个类型，所以 Shims.cs 声明了同名替身把路径指向临时目录。
+    除了这个路径来源，被测代码一行没改。
+
+    不在 DockedTools.slnx 里，主工程构建不会带上它。
+
+    跑法见同目录 README.md。
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>DockedTools.StoreTests</RootNamespace>
+    <AssemblyName>StoreConcurrencyTests</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Shims.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="..\..\DockedTools\功能\页面\网页应用\共享\网页应用快捷方式存储.cs" />
+    <Compile Include="..\..\DockedTools\功能\页面\网页应用\共享\网页应用快捷方式.cs" />
+    <Compile Include="..\..\DockedTools\功能\页面\网页应用\共享\键盘映射按钮配置.cs" />
+  </ItemGroup>
+
+</Project>

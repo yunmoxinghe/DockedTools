@@ -82,6 +82,13 @@
     <PackageReference Include="CommunityToolkit.WinUI.Controls.SettingsControls" Version="8.2.251219" />
     <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.53.3" />
     <PackageReference Include="WinUIEx" Version="2.9.3" />
+
+    <!--
+      浏览器扩展桥接服务需要 Kestrel + WebSocket 中间件（.NET 的 HttpListener 没有 AcceptWebSocketAsync）。
+      ⚠️ 这会引入 ASP.NET Core 运行时，Native AOT 发布体积会显著变大。
+      若 AOT 发布阶段出问题，备选是换成手写 TcpListener + RFC6455 实现，BridgeSession.HandleAsync 接口不用动。
+    -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
   <!--
@@ -124,4 +131,79 @@
   <!-- 上传到商店时包含符号文件 -->
   <AppxSymbolPackageEnabled>true</AppxSymbolPackageEnabled>
   </PropertyGroup>
+
+  <!-- ==========================================================================
+       worktree 包身份隔离
+
+       问题：每个 git worktree 都是一份完整源码，但 Package.Debug.appxmanifest 里的
+       Identity Name 是写死的。于是多个 worktree 的 Debug 构建共用同一个包身份，
+       后部署的会顶掉先部署的 —— 装不共存，更别提同时运行。
+
+       做法：从仓库目录名（如 main-ffb0958c）里取 hash 段的前 4 位，生成 .WTFFB0
+       这样的后缀，同时改两处：
+         1. MSIX Identity Name（决定能不能并存安装）
+         2. 运行时单实例标识（决定能不能同时运行）——见 功能/应用入口/WorktreeIdentity.g.cs
+
+       只动 Name、不动 Publisher：Publisher 必须与签名证书 Subject（CN=A19C62A9-...）
+       完全一致，改了就得换证书。Name 只影响 PackageFamilyName，装几个互不干扰。
+
+       约定与已有包一致：main-3ea53c21 → WT3EA5（机器上已装的那个就是这么来的）。
+       Release 与目录名不含 hash 时后缀为空，行为与改动前完全相同。
+       ========================================================================== -->
+  <PropertyGroup>
+    <_RepoDirName>$([System.IO.Path]::GetFileName($([System.IO.Path]::GetDirectoryName($(MSBuildProjectDirectory)))))</_RepoDirName>
+    <_WtHash>$([System.Text.RegularExpressions.Regex]::Match('$(_RepoDirName)', '-([0-9a-fA-F]{4,})').Groups[1].Value)</_WtHash>
+    <_WtHash4 Condition="'$(_WtHash)' != ''">$(_WtHash.Substring(0, 4))</_WtHash4>
+    <!-- 优先级：命令行 -p:WorktreeSuffix=.WTABCD  >  环境变量 WORKTREE_SUFFIX  >  目录名派生。
+         前两者是给「目录名不含 hash」的 worktree 留的兜底（脚本工具\worktree.ps1 会用到）。 -->
+    <WorktreeSuffix Condition="'$(WorktreeSuffix)' == '' AND '$(env:WORKTREE_SUFFIX)' != ''">$(env:WORKTREE_SUFFIX)</WorktreeSuffix>
+    <WorktreeSuffix Condition="'$(WorktreeSuffix)' == '' AND '$(Configuration)' == 'Debug' AND '$(_WtHash4)' != ''">.WT$(_WtHash4.ToUpperInvariant())</WorktreeSuffix>
+    <WorktreeSuffix Condition="'$(WorktreeSuffix)' == ''"></WorktreeSuffix>
+    <_WtIdentityFile>$(MSBuildProjectDirectory)\功能\应用入口\WorktreeIdentity.g.cs</_WtIdentityFile>
+  </PropertyGroup>
+
+  <!-- 始终写出身份文件：Debug 带后缀，其余写空串，保证 Release 行为不变 -->
+  <Target Name="_WriteWorktreeIdentity" BeforeTargets="BeforeBuild">
+    <WriteLinesToFile
+      File="$(_WtIdentityFile)"
+      Overwrite="true"
+      WriteOnlyWhenDifferent="true"
+      Lines="// &lt;auto-generated/&gt;;internal static class WorktreeIdentity;{;    public const string Suffix = &quot;$(WorktreeSuffix)&quot;%3B;}" />
+    <Message Importance="high"
+             Text="worktree 身份后缀 = [$(WorktreeSuffix)]  （目录 $(_RepoDirName)，配置 $(Configuration)）"
+             Condition="'$(WorktreeSuffix)' != ''" />
+  </Target>
+
+  <!-- Debug 且拿到后缀时，生成一份带新身份的 manifest 顶替 Package.Debug.appxmanifest -->
+  <Target Name="_WorktreeDebugManifest" BeforeTargets="BeforeBuild"
+          Condition="'$(Configuration)' == 'Debug' AND '$(WorktreeSuffix)' != ''">
+    <PropertyGroup>
+      <_WtManifest>$(IntermediateOutputPath)Package.Debug.worktree.appxmanifest</_WtManifest>
+      <_WtNs>&lt;Namespace Prefix='p' Uri='http://schemas.microsoft.com/appx/manifest/foundation/windows10'/&gt;&lt;Namespace Prefix='uap' Uri='http://schemas.microsoft.com/appx/manifest/uap/windows10'/&gt;&lt;Namespace Prefix='uap5' Uri='http://schemas.microsoft.com/appx/manifest/uap/windows10/5'/&gt;</_WtNs>
+      <_WtPkgName>8B8CC4F4.482486777ECD9.Debug$(WorktreeSuffix)</_WtPkgName>
+      <_WtDisplay>边栏助手 (Debug$(WorktreeSuffix))</_WtDisplay>
+    </PropertyGroup>
+
+    <Copy SourceFiles="Package.Debug.appxmanifest" DestinationFiles="$(_WtManifest)" />
+
+    <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)"
+             Query="/p:Package/p:Identity/@Name" Value="$(_WtPkgName)" />
+    <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)"
+             Query="/p:Package/p:Properties/p:DisplayName" Value="$(_WtDisplay)" />
+    <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)"
+             Query="/p:Package/p:Applications/p:Application/uap:VisualElements/@DisplayName" Value="$(_WtDisplay)" />
+    <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)"
+             Query="/p:Package/p:Applications/p:Application/uap:VisualElements/uap:DefaultTile/@ShortName" Value="$(_WtDisplay)" />
+    <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)"
+             Query="/p:Package/p:Applications/p:Application/p:Extensions/uap5:Extension/uap5:StartupTask/@DisplayName" Value="$(_WtDisplay)" />
+
+    <ItemGroup>
+      <AppxManifest Remove="@(AppxManifest)" />
+      <AppxManifest Include="$(_WtManifest)">
+        <SubType>Designer</SubType>
+      </AppxManifest>
+    </ItemGroup>
+
+    <Message Importance="high" Text="Debug 包身份已隔离为 $(_WtPkgName)" />
+  </Target>
 </Project>

@@ -95,14 +95,18 @@ namespace DockedTools
         private ShareLaunchHandler? _shareLaunchHandler;
 
         // 单实例 Mutex（在构造函数中提前检测）
+        // ⭐ 后缀来自 WorktreeIdentity.g.cs（构建时按 worktree 目录名生成）。
+        // 没有它的话，多个 worktree 的 Debug 构建即便 MSIX 包身份不同，运行时仍会
+        // 撞同一个 Mutex —— 装得下但跑不起来，第二个实例会去激活第一个然后自己退出。
+        // Release / 目录名不含 hash 时后缀为空，行为与加后缀之前完全一致。
 #if DEBUG
         private static Mutex? _singleInstanceMutex;
         private static bool _isMainInstance;
-        private const string MutexName = @"Local\DockedAI_SingleInstance_Mutex_DEBUG";
+        private const string MutexName = @"Local\DockedAI_SingleInstance_Mutex_DEBUG" + global::WorktreeIdentity.Suffix;
 #else
         private static Mutex? _singleInstanceMutex;
         private static bool _isMainInstance;
-        private const string MutexName = @"Local\DockedAI_SingleInstance_Mutex";
+        private const string MutexName = @"Local\DockedAI_SingleInstance_Mutex" + global::WorktreeIdentity.Suffix;
 #endif
 
         // 应用退出状态标志（防止主动退出时 keep-alive 自愈重新创建窗口）
@@ -261,6 +265,25 @@ namespace DockedTools
                 // 清理旧日志（保留最近 7 天）
                 LogService.CleanupOldLogs(7);
 
+                // 让桥接服务能安全地刷新界面。
+                // 桥接命令跑在 Kestrel 后台线程，直接碰 UI 集合会崩，所以注入一个会切回 UI 线程的委托。
+                try
+                {
+                    var uiDispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+                    DockedTools.Features.BrowserExtension.BridgeConfig.RequestUiRefresh = () =>
+                        uiDispatcher.TryEnqueue(
+                            DockedTools.Features.Pages.WebApp.Shared.WebAppEventBus.RequestRefresh);
+                }
+                catch (Exception ex)
+                {
+                    LogService.Error("应用入口", "注入桥接界面刷新委托失败", ex);
+                }
+
+                // 启动浏览器扩展桥接服务（本机回环 WebSocket，供浏览器扩展连接）
+                // 启动失败不能影响主流程，所以只跑后台任务并吞掉异常，详情看日志
+                _ = System.Threading.Tasks.Task.Run(
+                    () => DockedTools.Features.BrowserExtension.BridgeService.StartAsync());
+
                 System.Diagnostics.Debug.WriteLine("[App] OnLaunched completed successfully");
                 
                 // 优化说明：
@@ -404,6 +427,18 @@ namespace DockedTools
                     _singleInstanceCommunication = null;
                 }
                 
+                // 停掉浏览器扩展桥接（本机回环 WebSocket）。
+                // 不停的话 Kestrel 的监听线程会一直吊着，托盘退出后进程可能退不干净、
+                // 端口也还占着，下次启动会顺着端口段往后挪。
+                try
+                {
+                    await DockedTools.Features.BrowserExtension.BridgeService.StopAsync();
+                }
+                catch (Exception ex)
+                {
+                    LogService.Error("应用入口", "停止桥接服务失败", ex);
+                }
+
                 // 释放 Mutex
                 _singleInstanceMutex?.ReleaseMutex();
                 _singleInstanceMutex?.Dispose();

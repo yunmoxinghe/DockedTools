@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "DockedTools 真机探针",
+  "version": "1.0.0",
+  "description": "只用于验证 CSP / 主机权限 / Origin 行为，不是产品扩展",
+  "background": {
+    "scripts": [
+      "bg.js"
+    ],
+    "service_worker": "bg.js"
+  },
+  "permissions": [],
+  "host_permissions": [
+    "ws://127.0.0.1:*/*"
+  ]
+}

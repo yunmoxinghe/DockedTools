@@ -1,0 +1,15 @@
+{
+  "name": "dockedtools-browser-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "边栏助手（DockedTools）配套浏览器扩展：把网页一键存进边栏助手",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node build.mjs",
+    "watch": "tsc -p tsconfig.json --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.300",
+    "typescript": "^5.6.0"
+  }
+}

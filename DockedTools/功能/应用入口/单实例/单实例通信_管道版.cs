@@ -18,7 +18,9 @@ namespace DockedTools.Features.AppEntry.SingleInstance
     /// </summary>
     public class SingleInstanceCommunicationPipe : IDisposable
     {
-        private const string PipeName = "DockedAI_SingleInstance_Pipe";
+        // ⭐ 后缀与包身份同源（WorktreeIdentity.g.cs）：两个 Debug 实例若共用一个管道名，
+        //   第二个的 NamedPipeServerStream 会创建失败，单实例通信直接瘫掉。
+        private const string PipeName = "DockedAI_SingleInstance_Pipe" + global::WorktreeIdentity.Suffix;
         private const string ShowWindowCommand = "SHOW_WINDOW";
         
         private CancellationTokenSource? _cancellationTokenSource;
