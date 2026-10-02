@@ -171,8 +171,36 @@ namespace DockedTools.Features.Tray
             {
                 // 热键注册失败不应该阻止托盘初始化
                 System.Diagnostics.Debug.WriteLine($"[TrayIconManager] Failed to initialize global hotkey: {ex.Message}");
-                // TODO: 未来可以在这里显示通知给用户
+                NotifyHotkeyRegistrationFailed(ex.Message);
             }
+        }
+
+        /// <summary>
+        /// 热键注册失败的用户反馈（填掉这里挂了很久的 TODO）。
+        ///
+        /// <para>⚠️ 只在 DEBUG 下弹，别把这条 #if 直接删了改成无条件弹：<br/>
+        /// 热键最常见的失败原因不是崩溃，而是 <b>快捷键已被别的软件占用</b>
+        /// （<c>RegisterHotKey</c> 返回 FALSE，<c>GetLastError</c> =
+        /// <c>ERROR_HOTKEY_ALREADY_REGISTERED</c>）。这在很多人机器上是常态，
+        /// Release 下每次冷启动弹一条，用户只会觉得这应用很吵，然后关掉通知权限 ——
+        /// 反而把后面真正重要的通知（网页通知）一起牺牲掉。</para>
+        ///
+        /// <para>Release 下要让用户可感知，正确的落点不是通知，而是<b>设置页里那一行状态</b>
+        /// （「全局快捷键：已被占用」），那是常驻、可查、非打扰的。真要做请往那里做。</para>
+        ///
+        /// <para>走系统通知中心（AppNotification）而不是托盘气泡：后者从 Windows 10 1809
+        /// 起基本不再主动弹出，且不留历史，等于没提示。</para>
+        /// </summary>
+        private static void NotifyHotkeyRegistrationFailed(string detail)
+        {
+#if DEBUG
+            Features.MainWindow.Entry.DebugNotificationHelper.SendNotification(
+                "全局快捷键未生效",
+                $"注册失败：{detail}");
+#else
+            // Release：只留调试输出（已在调用点写过），不打扰用户。理由见上。
+            _ = detail;
+#endif
         }
 
         /// <summary>

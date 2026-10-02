@@ -2,12 +2,17 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
-namespace DockedTools.Features.Pages.WebApp.Common
+namespace DockedTools.Features.UnifiedCalls.LruCache
 {
     /// <summary>
     /// 通用 LRU（最近最少使用）缓存管理器
     /// 线程安全：所有公共方法使用锁保护
     /// AOT 兼容：不使用反射
+    ///
+    /// <para>⚠️ 这里不是「网页应用专用」：除了 WebView 实例池，主窗口内容区的
+    /// <c>PageCacheManager</c> 也在用它缓存页面。早先它被放在
+    /// <c>功能/页面/网页应用/通用/</c> 下，命名空间跟着叫 <c>…WebApp.Common</c>，
+    /// 于是「内容区缓存页面」这个用法看起来像是在跨层偷用别人的东西 —— 纯属目录误导。</para>
     /// </summary>
     /// <typeparam name="TKey">缓存键类型</typeparam>
     /// <typeparam name="TValue">缓存值类型</typeparam>

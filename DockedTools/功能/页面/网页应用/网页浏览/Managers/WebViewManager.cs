@@ -1,5 +1,5 @@
 using DockedTools.Features.Pages.Settings;
-using DockedTools.Features.Pages.WebApp.Common;
+using DockedTools.Features.UnifiedCalls.LruCache;
 using Microsoft.Web.WebView2.Core;
 using System;
 using System.Collections.Generic;
