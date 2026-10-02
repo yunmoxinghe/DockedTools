@@ -2,6 +2,7 @@ using DockedTools.Features.Pages.Settings;
 using DockedTools.Features.UnifiedCalls.AsyncSafety;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.Web.WebView2.Core;
 using System;
 using System.Collections.Generic;
@@ -76,6 +77,11 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 UpdateContextMenuConfiguration(useWinUIContextMenu);
                 
                 _isWebViewReady = true;
+                
+                // ⭐ 透明背景实验室：即使走重新配置路径也要同步背景色与探针
+                ApplyWebViewTransparency();
+                ApplyWebViewTransparencyProbe();
+                
                 System.Diagnostics.Debug.WriteLine($"[EnsureWebViewInitializedAsync] ✅ WebView 重新配置完成");
                 return;
             }
@@ -107,6 +113,12 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     AdditionalBrowserArguments = BuildBrowserArguments()
                 };
                 
+                // ⭐ 透明背景实验室：环境变量必须在任何一个 CoreWebView2 被创建之前设置，否则不生效
+                ApplyWebViewTransparencyEnvironmentVariable();
+                
+                // ⭐ PreInit 策略：在控制器创建之前就把底色写好，从源头消除白闪
+                ApplyTransparencyBeforeControllerCreation();
+                
                 System.Diagnostics.Debug.WriteLine($"[EnsureWebViewInitializedAsync] 创建 CoreWebView2Environment...");
                 CoreWebView2Environment environment = await CoreWebView2Environment.CreateWithOptionsAsync(
                     browserExecutableFolder: null,
@@ -123,8 +135,11 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 System.Diagnostics.Debug.WriteLine($"[EnsureWebViewInitializedAsync] 初始化 CoreWebView2...");
                 await WebView.EnsureCoreWebView2Async(environment);
                 
-                // 设置 WebView2 背景透明
-                WebView.DefaultBackgroundColor = Microsoft.UI.Colors.Transparent;
+                // 按实验室策略设置 WebView2 背景色
+                ApplyWebViewTransparency();
+                
+                // 按实验室探针开关渲染 WebView 底色块
+                ApplyWebViewTransparencyProbe();
 
                 if (WebView.CoreWebView2 is not null)
                 {
@@ -243,13 +258,123 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             return CultureInfo.CurrentUICulture.Name;
         }
 
+        /// <summary>
+        /// 透明背景实验室：在 CoreWebView2 创建之前设置或清理 WEBVIEW2_DEFAULT_BACKGROUND_COLOR
+        /// 
+        /// 【为什么必须放在这里】
+        /// 该环境变量只在「第一个 CoreWebView2 被创建」时被读取一次，晚调用等于没设。
+        /// 
+        /// 【为什么非环境变量模式下要显式删掉】
+        /// 环境变量是进程级的，一旦设了会影响之后所有新建的 WebView。
+        /// 所以切回其它策略时必须主动删除，否则会污染 LRU 里后续新建的实例。
+        /// </summary>
+        private void ApplyWebViewTransparencyEnvironmentVariable()
+        {
+            const string BackgroundColorVariable = "WEBVIEW2_DEFAULT_BACKGROUND_COLOR";
+            WebViewTransparencyMode mode = ExperimentalSettings.WebViewTransparencyMode;
+
+            if (mode == WebViewTransparencyMode.EnvironmentVariable ||
+                mode == WebViewTransparencyMode.EnvironmentVariableAndPreInit)
+            {
+                Environment.SetEnvironmentVariable(BackgroundColorVariable, "00000000");
+                System.Diagnostics.Debug.WriteLine($"[TransparencyLab] 已设置 {BackgroundColorVariable}=00000000");
+            }
+            else if (Environment.GetEnvironmentVariable(BackgroundColorVariable) != null)
+            {
+                Environment.SetEnvironmentVariable(BackgroundColorVariable, null);
+                System.Diagnostics.Debug.WriteLine($"[TransparencyLab] 已清除 {BackgroundColorVariable}");
+            }
+        }
+
+        /// <summary>
+        /// 透明背景实验室：只有 PreInit 与双保险两种策略需要在控制器创建之前定色
+        /// </summary>
+        private void ApplyTransparencyBeforeControllerCreation()
+        {
+            WebViewTransparencyMode mode = ExperimentalSettings.WebViewTransparencyMode;
+
+            if (mode is WebViewTransparencyMode.PreInit or WebViewTransparencyMode.EnvironmentVariableAndPreInit)
+            {
+                ApplyWebViewTransparency();
+            }
+        }
+
+        /// <summary>
+        /// 透明背景实验室：应用 XAML 层可见的背景色
+        /// 
+        /// 注意这里是「给 WebView 自己刷什么底色」，不代表能看见下面的 XAML。
+        /// 按微软 Visual layer 文档，WebView2 属于 external content，XAML 合成器会在它区域挖洞，
+        /// 因此 z 序更低的 Grid/Border 一律不可见，只有同为 external content 的
+        /// SystemBackdrop（Mica / 桌面亚克力）或纯窗口底色能透出来。
+        /// </summary>
+        private void ApplyWebViewTransparency()
+        {
+            if (WebView == null)
+            {
+                return;
+            }
+
+            WebViewTransparencyMode mode = ExperimentalSettings.WebViewTransparencyMode;
+            WebView.DefaultBackgroundColor = mode == WebViewTransparencyMode.Opaque
+                ? Microsoft.UI.Colors.White
+                : Microsoft.UI.Colors.Transparent;
+
+            System.Diagnostics.Debug.WriteLine($"[TransparencyLab] DefaultBackgroundColor = {mode}");
+        }
+
+        /// <summary>
+        /// 透明背景实验室：熏染 WebView 底色块，作为「能否看到 Z 轴更低内容」的肉眼探针
+        /// 
+        /// 判读方法：
+        /// - 看到品红 → XAML 合成器内容可见（与微软文档结论相反，值得记录）
+        /// - 看不到品红 → 确认挖洞成立，透明只可能穿透到 SystemBackdrop 或窗口底色
+        /// </summary>
+        private void ApplyWebViewTransparencyProbe()
+        {
+            if (WebPageWebViewBackground == null)
+            {
+                return;
+            }
+
+            if (ExperimentalSettings.WebViewTransparencyProbe)
+            {
+                // 品红：Z 序更低的合成器内容如果能被看见，肉眼一眼就能分辨
+                WebPageWebViewBackground.Background = new SolidColorBrush(new Windows.UI.Color
+                {
+                    A = 255,
+                    R = 255,
+                    G = 0,
+                    B = 255
+                });
+            }
+            else if (Application.Current.Resources["ApplicationPageBackgroundThemeBrush"] is Brush themeBrush)
+            {
+                WebPageWebViewBackground.Background = themeBrush;
+            }
+
+            System.Diagnostics.Debug.WriteLine($"[TransparencyLab] 探针 = {ExperimentalSettings.WebViewTransparencyProbe}");
+        }
+
         private string BuildBrowserArguments()
         {
             var args = new List<string>
             {
                 "--enable-smooth-scrolling",
-                "--enable-zero-copy",
-                "--disable-features=msExperimentalScrolling"
+                "--enable-zero-copy"
+
+                // ⚠️ 已于 2026-10-03 移除：--disable-features=msExperimentalScrolling
+                //
+                // 它关掉的是 Edge Scrolling Personality（即 edge://flags/#edge-experimental-scrolling，
+                // Windows 上 Edge 默认开启）。按 Edge 团队公开说明，这套 personality 包含三件事：
+                //   1. 改进的动量 / touch fling 动画曲线
+                //   2. 百分比滚动（用 scroller 高度计算 delta，而非固定 100px/tick）
+                //   3. 根滚动器上的 overscroll bounce —— 官方明确说对 touch 与 touchpad 都生效
+                // 这三项正是 Edge 相对标准 Chromium 在精密触摸板上「跟手」的直接来源。
+                // 关掉它 = 退回标准 Chromium 滚动 → 内容滞后于手指、手感发钝。
+                // 来源：Microsoft Tech Community 讨论（HotCakeX 说明该 flag 在 Edge 中默认开启）、
+                //       Thurrott 汇总的 Edge 团队官方博文、microsoft-ui-xaml#11408。
+                //
+                // ⚠️ 若要复现「标准 Chromium 手感」做对照，把这行加回列表即可（一行 A/B）。
             };
 
             // 🚀 启动速度优化（零内存成本）
@@ -259,6 +384,12 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // 🎨 消除白闪（无论是否快速启动模式都启用）
             args.Add("--disable-backgrounding-occluded-windows");  // 禁用窗口遮挡时的背景化
             args.Add("--disable-renderer-backgrounding");          // 禁用渲染器后台化
+            
+            // 🎨 透明背景实验室：砍掉创建时的隐式 about:blank 导航，消除首屏白闪
+            if (ExperimentalSettings.WebViewCancelInitialNavigation)
+            {
+                args.Add("--msWebView2CancelInitialNavigation");
+            }
             
             // 🎯 进程模型优化
             if (ExperimentalSettings.SingleProcessMode)
@@ -431,6 +562,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             Unloaded -= WebBrowserPage_Unloaded;
             Pages.Settings.SettingsPage.WinUIContextMenuSettingsChanged -= OnWinUIContextMenuSettingsChanged;
             Pages.Settings.SettingsPage.WebViewPerformanceSettingsChanged -= OnWebViewPerformanceSettingsChanged;
+            Pages.Lab.LabPage.WebViewTransparencySettingsChanged -= OnWebViewTransparencySettingsChanged;
             
             // 清理 WebView 实例
             CleanupAndCloseWebView(WebView);

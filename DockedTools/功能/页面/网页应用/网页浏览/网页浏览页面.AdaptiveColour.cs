@@ -23,9 +23,14 @@ namespace DockedTools.Features.Pages.WebApp.Browser
     ///   3. ResetAdaptiveBarColour 里对应复位，避免退出网页页后顶栏残留网页色。
     /// 对接点已经备好，见 CurrentAdaptiveBarColour。
     ///
-    /// 取色时机对齐上游 dynamic 模式：注入常驻脚本，由 click / resize / scroll / visibilitychange、
-    /// transition 与 animation 结束事件、以及四个 MutationObserver 驱动，250ms trailing 节流后回传；
+    /// 取色时机对齐上游 dynamic 模式：注入常驻脚本，由 click / resize / scroll / visibilitychange
+    /// 与四个 MutationObserver 驱动，250ms trailing 节流后回传；
     /// 页面 DOM 变化、SPA 切换、主题切换都能跟着更新。
+    ///
+    /// ⚠️ 上游还会监听 transition{end,cancel} / animation{end,cancel}，本机分支刻意移除了 ——
+    ///    页面每播完一段 CSS 动画就重跑一次整条流水线，且取到的是过渡态中间色。
+    ///    详见 <see cref="Services.PageColourProbe.BuildMonitorScript"/> 的说明。
+    ///    本机侧的兜底：单次写入前做脏值拦截（<see cref="ApplyAdaptiveBarColour"/>）。
     ///
     /// 作用范围：只写本页面自己的 WebPageTopAppBarBackground 色块和底部栏（都是 page 的一部分），
     /// 不触碰 TopAppBarService / TopAppBarControl —— 顶栏正在其他 worktree 大修。
@@ -183,17 +188,45 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             });
         }
 
+        /// <summary>
+        /// 把取色结果写到本页面的顶部色块与底部栏。
+        ///
+        /// ⭐ 脏值拦截（即使上游重复触发也不往下污染）
+        /// 这条链路的终点不是一次简单的笔刷赋值，而是一条连锁反应：
+        ///     写 Background
+        ///     → 改变 BottomBarHost.RequestedTheme
+        ///     → 整棵子树的 ThemeResource 重新求值
+        ///     → VisualState / 按钮样式跟着重刷
+        ///     → 再一次布局测量
+        /// 上游由 MutationObserver / scroll / click 驱动，同一结果重复回传非常常见。
+        /// 因此在写入前逐个比对现值，值没变就完全不碰它 —— 这是整条链路上最廉价、
+        /// 也最靠后的一道去重，无论上游怎么抖都不会穿透到这里。
+        /// </summary>
         private void ApplyAdaptiveBarColour(AdaptiveBarColourResult result)
         {
+            // 即使不落地也要刷新：这是对外暴露的查询结果，顶栏对接时会读它
             CurrentAdaptiveBarColour = result;
 
             var theme = result.Scheme == AdaptiveScheme.Dark ? ElementTheme.Dark : ElementTheme.Light;
 
-            // 只改本页面的顶部色块，顶栏控件一律不动
-            _adaptiveTopBarBrush.Color = result.Frame;
-            WebPageTopAppBarBackground.Background = _adaptiveTopBarBrush;
+            bool applied = false;
 
-            Services.BottomBarThemeService.SetBottomBar(theme, result.Frame);
+            // 顶部色块：色值相同就不碰 Background（赋值会切断 ThemeResource 绑定）
+            if (_adaptiveTopBarBrush.Color != result.Frame)
+            {
+                _adaptiveTopBarBrush.Color = result.Frame;
+                WebPageTopAppBarBackground.Background = _adaptiveTopBarBrush;
+                applied = true;
+            }
+
+            // 底部栏：服务内部同样按「主题 + 背景色」两个值比脏，返回是否真的写了东西
+            // ⚠️ 用 |= 而非 ||，保证 SetBottomBar 一定会被调用
+            applied |= Services.BottomBarThemeService.SetBottomBar(theme, result.Frame);
+
+            if (!applied)
+            {
+                return;
+            }
 
             System.Diagnostics.Debug.WriteLine(
                 $"[WebBrowserPage] 自适应栏色: 方案={result.Scheme}, 来源={result.Reason}, " +

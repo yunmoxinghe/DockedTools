@@ -53,9 +53,22 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
     /// 1. <see cref="ProbeAsync"/> —— 一次性 ExecuteScriptAsync 探测（兜底用）；
     /// 2. <see cref="BuildMonitorScript"/> —— 常驻监控脚本，对齐上游 enableDynamic()：
     ///    click / resize / scroll / visibilitychange 四个事件，
-    ///    transition{end,cancel} / animation{end,cancel}（要求文档有焦点），
     ///    以及 darkReader、meta theme-color 属性、meta 标签增删、STYLE 标签增删四个 MutationObserver，
     ///    统一走 250ms trailing 节流后回传。
+    ///
+    /// ⚠️ 刻意不去监听 transition{end,cancel} / animation{end,cancel}：
+    ///    上游 enableDynamic() 确实会挂这四个事件（且要求 document.hasFocus()），初衷是抓 SPA 的
+    ///    主题过渡。但代价是**页面每播完一段 CSS 动画，整条取色流水线就重跑一遍** ——
+    ///    而 CSS 动画在真实站点上是高频事件：轮播图、骨架屏、进度条、光标闪烁都在持续触发。
+    ///    更糟的是动画刚结束时页面往往还停在过渡态，取到的是中间色而不是稳定色，
+    ///    这个中间色会被一路写到色块与底栏上，视觉上就是「颜色跳回默认」。
+    ///    移除后剩下的触发源已覆盖真正需要刷新的场景：
+    ///       · SPA 路由切换      → click + MutationObserver
+    ///       · 主题切换          → MutationObserver（STYLE 标签增删 + darkReader 属性变更）
+    ///       · meta theme-color  → metaThemeColourObserver
+    ///       · 布局 / 滚动变化   → resize / scroll
+    ///    本机侧还有第二道防线：写入前的脏值拦截（见 WebBrowserPage.ApplyAdaptiveBarColour
+    ///    与 BottomBarThemeService.SetBottomBar）。一道减少无效工作，一道保证落地幂等，互不冲突。
     ///
     /// 与上游的差异：
     /// 1. 回传通道用 WebView2 的 chrome.webview.postMessage，替代 browser.runtime.sendMessage；
@@ -378,11 +391,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
         }
     };
 
-    var sendColourRequiresFocus = function () {
-        if (document.hasFocus()) { sendColour(); }
-    };
-
-    var start = function () {
+        var start = function () {
         var darkReaderObserver = new MutationObserver(sendColour);
         var metaThemeColourObserver = new MutationObserver(sendColour);
         var metaTagObserver = new MutationObserver(function (mutationList) {
@@ -407,9 +416,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
 
         ['click', 'resize', 'scroll', 'visibilitychange'].forEach(function (event) {
             document.addEventListener(event, sendColour);
-        });
-        ['transitionend', 'transitioncancel', 'animationend', 'animationcancel'].forEach(function (event) {
-            document.addEventListener(event, sendColourRequiresFocus);
         });
 
         darkReaderObserver.observe(document.documentElement, {

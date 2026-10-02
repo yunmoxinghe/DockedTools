@@ -48,6 +48,12 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         // Reactor 底部按钮栏
         private Microsoft.UI.Reactor.Hosting.ReactorHostControl? _reactorHostControl;
         private Components.BottomButtonBar? _bottomButtonBarComponent;
+
+        /// <summary>上一次参与按钮宽度计算的宿主宽度（<see cref="UpdateBottomBarLayout"/> 去抖用）</summary>
+        private double _lastBottomBarHostWidth = double.NaN;
+
+        /// <summary>上一次实际下发的按钮宽度（<see cref="UpdateBottomBarLayout"/> 去抖用）</summary>
+        private double _lastAppliedButtonWidth = double.NaN;
         
         // 顶部栏UI元素
         private StackPanel? _topBarContent;

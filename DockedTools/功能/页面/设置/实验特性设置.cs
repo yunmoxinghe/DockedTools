@@ -34,12 +34,18 @@ namespace DockedTools.Features.Pages.Settings
         private const string WebViewMemoryModeKey = "WebSettings_MemoryMode";
         private const string WebViewAutoClearCacheKey = "WebSettings_AutoClearCache";
         private const string WebViewSuspendInactiveKey = "WebSettings_SuspendInactive";
+        private const string WebViewIdlePowerModeKey = "WebSettings_IdlePowerMode";
         private const string WebViewDisableBackgroundNetworkKey = "WebSettings_DisableBackgroundNetwork";
         private const string WebViewDisableExtensionsKey = "WebSettings_DisableExtensions";
         private const string WebViewDisablePluginsKey = "WebSettings_DisablePlugins";
         private const string WebViewDiskCacheSizeKey = "WebSettings_DiskCacheSize";
         private const string WebViewFastStartupModeKey = "WebSettings_FastStartupMode";
         private const string WebViewSingleProcessModeKey = "WebSettings_SingleProcessMode";
+        
+        // WebView2 透明背景实验室
+        private const string WebViewTransparencyModeKey = "WebSettings_TransparencyMode";
+        private const string WebViewTransparencyProbeKey = "WebSettings_TransparencyProbe";
+        private const string WebViewCancelInitialNavigationKey = "WebSettings_CancelInitialNavigation";
         
         // GPU 优化设置
         private const string WebViewEnableHardwareAccelerationKey = "WebSettings_EnableHardwareAcceleration";
@@ -238,6 +244,37 @@ namespace DockedTools.Features.Pages.Settings
         }
 
         /// <summary>
+        /// 获取或设置窗口/页面被收起时 WebView 的省电模式
+        /// </summary>
+        public static WebViewIdlePowerMode IdlePowerMode
+        {
+            get => AotSafeSettingsHelper.GetEnum(
+                _localSettings,
+                WebViewIdlePowerModeKey,
+                WebViewIdlePowerMode.Normal
+            );
+            set => AotSafeSettingsHelper.SetEnum(_localSettings, WebViewIdlePowerModeKey, value);
+        }
+
+        /// <summary>
+        /// 循环切换到下一个省电模式（普通 → 高效 → 挂起 → 普通）
+        /// </summary>
+        public static WebViewIdlePowerMode CycleIdlePowerMode()
+        {
+            WebViewIdlePowerMode next = IdlePowerMode switch
+            {
+                WebViewIdlePowerMode.Normal => WebViewIdlePowerMode.Efficient,
+                WebViewIdlePowerMode.Efficient => WebViewIdlePowerMode.Suspend,
+                _ => WebViewIdlePowerMode.Normal
+            };
+            IdlePowerMode = next;
+
+            // 保持旧开关与新模式一致，避免设置页 UI 与实际行为不同步
+            SuspendInactiveWebView = next == WebViewIdlePowerMode.Suspend;
+            return next;
+        }
+
+        /// <summary>
         /// 获取或设置是否禁用后台网络
         /// </summary>
         public static bool DisableBackgroundNetwork
@@ -287,6 +324,40 @@ namespace DockedTools.Features.Pages.Settings
         {
             get => AotSafeSettingsHelper.GetBool(_localSettings, WebViewFastStartupModeKey, defaultValue: true);
             set => AotSafeSettingsHelper.SetBool(_localSettings, WebViewFastStartupModeKey, value);
+        }
+
+        /// <summary>
+        /// 获取或设置 WebView2 背景透明策略（透明背景实验室）
+        /// 透明只能穿透到「外部内容」层：Mica/亚克力 SystemBackdrop 或窗口底色，
+        /// 永远看不到 Z 轴更低的普通 XAML 内容（微软 Visual layer 文档的 external content 约束）。
+        /// </summary>
+        public static WebViewTransparencyMode WebViewTransparencyMode
+        {
+            get => AotSafeSettingsHelper.GetEnum(
+                _localSettings,
+                WebViewTransparencyModeKey,
+                WebViewTransparencyMode.PostInit
+            );
+            set => AotSafeSettingsHelper.SetEnum(_localSettings, WebViewTransparencyModeKey, value);
+        }
+
+        /// <summary>
+        /// 获取或设置是否开启底层探针（把 WebView 底色块刷成品红，用于肉眼判断是否穿透到合成器内容）
+        /// </summary>
+        public static bool WebViewTransparencyProbe
+        {
+            get => AotSafeSettingsHelper.GetBool(_localSettings, WebViewTransparencyProbeKey, defaultValue: false);
+            set => AotSafeSettingsHelper.SetBool(_localSettings, WebViewTransparencyProbeKey, value);
+        }
+
+        /// <summary>
+        /// 获取或设置是否追加 --msWebView2CancelInitialNavigation（砍掉创建时的隐式 about:blank，治首屏白闪）
+        /// 需要重建 WebView 才生效。
+        /// </summary>
+        public static bool WebViewCancelInitialNavigation
+        {
+            get => AotSafeSettingsHelper.GetBool(_localSettings, WebViewCancelInitialNavigationKey, defaultValue: false);
+            set => AotSafeSettingsHelper.SetBool(_localSettings, WebViewCancelInitialNavigationKey, value);
         }
 
         /// <summary>
@@ -388,6 +459,65 @@ namespace DockedTools.Features.Pages.Settings
         /// 低内存模式（推荐后台标签页）
         /// </summary>
         Low = 1
+    }
+
+    /// <summary>
+    /// WebView 在窗口/页面被收起时的省电模式
+    /// 对应 WebView2 的三档隐藏能力：MemoryUsageTargetLevel / TrySuspend
+    /// </summary>
+    public enum WebViewIdlePowerMode
+    {
+        /// <summary>
+        /// 普通：收起后不做任何处理，保持完全性能
+        /// </summary>
+        Normal = 0,
+
+        /// <summary>
+        /// 高效：收起后把 MemoryUsageTargetLevel 降到 Low，
+        /// 脚本仍可运行、网络连接不断，但内存可被换出到磁盘
+        /// </summary>
+        Efficient = 1,
+
+        /// <summary>
+        /// 挂起：收起后调用 TrySuspendAsync，脚本与网络一并暂停（省电最猛）
+        /// </summary>
+        Suspend = 2
+    }
+
+    /// <summary>
+    /// WebView2 背景透明策略（透明背景实验室用）
+    /// </summary>
+    public enum WebViewTransparencyMode
+    {
+        /// <summary>
+        /// 不透明：白色底，作为 A/B 对照基线
+        /// </summary>
+        Opaque = 0,
+
+        /// <summary>
+        /// XAML 属性（创建后）：控制器创建完成后再写 WebView.DefaultBackgroundColor（默认，可即时切换）
+        /// 代价是可能出现一帧白闪。
+        /// </summary>
+        PostInit = 1,
+
+        /// <summary>
+        /// XAML 属性（创建前）：在 EnsureCoreWebView2Async 之前就写好 DefaultBackgroundColor，
+        /// 控制器创建时底色已经确定，从源头消除白闪。
+        /// 注意：Core 层的 CoreWebView2ControllerOptions 在当前 projection 里没有可用构造，
+        /// 所以这一档走 WinUI 层的等价写法（官方 WinUI3 文档也推荐用 WebView2 对象的这个属性）。
+        /// </summary>
+        PreInit = 2,
+
+        /// <summary>
+        /// 环境变量：WEBVIEW2_DEFAULT_BACKGROUND_COLOR=00000000，进程级且创建时读取一次。
+        /// 官方明确写了它会覆盖 Controller 选项成为初始值。
+        /// </summary>
+        EnvironmentVariable = 3,
+
+        /// <summary>
+        /// 环境变量 + 创建前属性：双保险，用于确认环境变量是否真的生效（环境变量优先级更高）
+        /// </summary>
+        EnvironmentVariableAndPreInit = 4
     }
 
     /// <summary>

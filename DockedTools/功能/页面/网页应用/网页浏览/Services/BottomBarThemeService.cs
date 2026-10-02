@@ -38,31 +38,54 @@ public static class BottomBarThemeService
 
     /// <summary>
     /// 【一行调用】设置底部栏主题和背景颜色
+    ///
+    /// ⭐ 脏值拦截：三个值（RequestedTheme / 是否自定义背景 / 背景色）全都没变时整体短路，
+    /// 一次都不写。**RequestedTheme 是本 API 里最贵的一步** —— 改动它会让整棵子树的
+    /// ThemeResource 重新求值，按钮样式与 VisualState 全都跟着重刷。写背景色反而是便宜的。
+    /// 所以这里宁可多比一次，也不要无脑重写。
     /// </summary>
     /// <param name="theme">主题模式：Light（亮）、Dark（暗）、Default（跟随系统）</param>
     /// <param name="backgroundColor">背景颜色：传入颜色值，或 null 表示跟随系统</param>
+    /// <returns>是否真的写过值。false 表示与现状完全一致、未做任何改动</returns>
     /// <example>
     /// // 亮色主题 + 跟随系统背景
     /// BottomBarThemeService.SetBottomBar(ElementTheme.Light, null);
-    /// 
+    ///
     /// // 暗色主题 + 自定义红色背景
     /// BottomBarThemeService.SetBottomBar(ElementTheme.Dark, Colors.Red);
-    /// 
+    ///
     /// // 跟随系统主题 + 跟随系统背景
     /// BottomBarThemeService.SetBottomBar(ElementTheme.Default, null);
     /// </example>
-    public static void SetBottomBar(ElementTheme theme, Color? backgroundColor = null)
+    public static bool SetBottomBar(ElementTheme theme, Color? backgroundColor = null)
     {
         if (_bottomBarHost is null)
         {
             System.Diagnostics.Debug.WriteLine("[BottomBarThemeService] ⚠️ 底部栏容器未注册");
-            return;
+            return false;
         }
 
-        // 设置主题模式
-        _bottomBarHost.RequestedTheme = theme;
+        // ⭐ 比脏：主题没变且（或不是）背景没变 → 完全不动
+        bool themeChanged = _bottomBarHost.RequestedTheme != theme;
+        bool backgroundChanged = backgroundColor != _customBackgroundBrush?.Color;
 
-        // 设置背景颜色
+        if (!themeChanged && !backgroundChanged)
+        {
+            return false;
+        }
+
+        if (themeChanged)
+        {
+            _bottomBarHost.RequestedTheme = theme;
+        }
+
+        if (!backgroundChanged)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[BottomBarThemeService] 底部栏已设置: 主题={theme}, 背景={(backgroundColor.HasValue ? "自定义" : "跟随系统")}");
+            return true;
+        }
+
         if (backgroundColor.HasValue)
         {
             // 自定义颜色
@@ -84,6 +107,8 @@ public static class BottomBarThemeService
             _bottomBarHost.ClearValue(Border.BackgroundProperty);
             System.Diagnostics.Debug.WriteLine($"[BottomBarThemeService] ✅ 底部栏已设置: 主题={theme}, 背景=跟随系统");
         }
+
+        return true;
     }
 
     #endregion
@@ -108,14 +133,21 @@ public static class BottomBarThemeService
 
     /// <summary>
     /// 设置底部栏背景颜色（仅控制背景，不改变主题）
+    /// 同 <see cref="SetBottomBar"/> 一样做脏值拦截，色值没变就不写。
     /// </summary>
     /// <param name="color">背景颜色，null 表示恢复跟随系统</param>
-    public static void SetBackgroundColor(Color? color)
+    /// <returns>是否真的写过值。false 表示与现状完全一致、未做任何改动</returns>
+    public static bool SetBackgroundColor(Color? color)
     {
         if (_bottomBarHost is null)
         {
             System.Diagnostics.Debug.WriteLine("[BottomBarThemeService] ⚠️ 底部栏容器未注册");
-            return;
+            return false;
+        }
+
+        if (color == _customBackgroundBrush?.Color)
+        {
+            return false;
         }
 
         if (color.HasValue)
@@ -137,6 +169,8 @@ public static class BottomBarThemeService
             _bottomBarHost.ClearValue(Border.BackgroundProperty);
             System.Diagnostics.Debug.WriteLine("[BottomBarThemeService] ✅ 底部栏背景已恢复跟随系统");
         }
+
+        return true;
     }
 
     /// <summary>

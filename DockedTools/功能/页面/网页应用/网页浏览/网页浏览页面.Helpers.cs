@@ -277,20 +277,49 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
         /// <summary>
         /// 主窗口状态变化完成事件处理器
-        /// 当窗口从隐藏状态恢复显示动画完成后，给 WebView 设置焦点
-        /// 
+        ///
+        /// 承担两件事：
+        /// <list type="number">
+        /// <item>窗口显示动画完成后给 WebView 设置焦点（原有行为）</item>
+        /// <item>⭐ 窗口收起（Hidden）/ 重新显示时切换「收起时模式」</item>
+        /// </list>
+        ///
+        /// 【为什么第二件事必须挂在这里，而不是 OnNavigatedFrom】
+        /// DockedTools 的「窗口收起」走的是窗口状态机（Pinned / Windowed / Hidden），
+        /// Frame 根本不发生导航，所以 Page.OnNavigatedFrom 与 INavigationAware.OnNavigatedFrom
+        /// 一次都不会触发 —— 挂在那里的挂起逻辑等于死代码。这里才是唯一对得上的时机。
+        ///
         /// 【注意】
         /// StateCompleted 事件在动画播放完成后触发，无需延迟等待
         /// </summary>
         private void OnMainWindowStateCompleted(object? sender, DockedTools.Features.MainWindow.State.StateCompletedEventArgs args)
         {
+            const DockedTools.Features.MainWindow.State.WindowState hiddenState =
+                DockedTools.Features.MainWindow.State.WindowState.Hidden;
+
+            bool nowHidden = args.CurrentState == hiddenState;
+            bool wasHidden = args.PreviousState == hiddenState;
+
+            if (nowHidden)
+            {
+                // ⭐ 窗口已收起：按「收起时模式」降功耗
+                System.Diagnostics.Debug.WriteLine(
+                    $"[WebBrowserPage] 窗口收起 {args.PreviousState} -> {args.CurrentState}，应用收起时模式");
+                _isPageActive = false;
+                _ = ApplyIdlePowerModeAsync();
+                return;
+            }
+
             // 只在窗口从隐藏状态恢复显示时处理
-            if (args.PreviousState == DockedTools.Features.MainWindow.State.WindowState.Hidden &&
-                args.CurrentState != DockedTools.Features.MainWindow.State.WindowState.Hidden &&
+            if (wasHidden && args.CurrentState != hiddenState &&
                 args.CurrentState != DockedTools.Features.MainWindow.State.WindowState.NotCreated)
             {
                 System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 窗口显示动画完成：{args.PreviousState} -> {args.CurrentState}");
-                
+
+                // ⭐ 先把挂起的 WebView 拉回完全可用状态，再交焦点，顺序反了焦点会打到空白上
+                _isPageActive = true;
+                RestoreWebViewFromIdleState();
+
                 // ⭐ 动画已完成，直接设置焦点，无需延迟
                 _ = DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal, () =>
                 {

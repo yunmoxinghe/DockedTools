@@ -86,6 +86,9 @@ namespace DockedTools.Features.Pages.Lab
             // 更新局部主题状态显示
             UpdateThemeStatus();
 
+            // 初始化 WebView2 透明背景实验室设置
+            InitializeWebViewTransparencyLab();
+
             UpdateMargin();
         }
 

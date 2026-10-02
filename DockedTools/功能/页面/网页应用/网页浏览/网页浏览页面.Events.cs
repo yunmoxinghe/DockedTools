@@ -39,6 +39,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // ✅ 同步动态圆角到背景色块
             SyncCornerRadius();
             
+            // ✅ 透明背景实验室：探针与 XAML 属性模式不依赖 CoreWebView2，立刻生效
+            ApplyWebViewTransparency();
+            ApplyWebViewTransparencyProbe();
+            
             // ✅ 订阅内容区圆角变化事件
             UnifiedCalls.ContentArea.ContentAreaService.CornerRadiusChanged += OnContentAreaCornerRadiusChanged;
             

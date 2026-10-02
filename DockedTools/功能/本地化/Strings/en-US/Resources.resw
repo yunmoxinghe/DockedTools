@@ -1241,6 +1241,21 @@ Error Message: {1}</value>
   <data name="BottomButtonBar_ThemeToggleButton" xml:space="preserve">
     <value>Toggle theme</value>
   </data>
+  <data name="BottomButtonBar_IdleModeButton" xml:space="preserve">
+    <value>Power saving mode when collapsed</value>
+  </data>
+  <data name="WebViewIdleMode_Normal" xml:space="preserve">
+    <value>Normal</value>
+  </data>
+  <data name="WebViewIdleMode_Efficient" xml:space="preserve">
+    <value>Efficient</value>
+  </data>
+  <data name="WebViewIdleMode_Suspend" xml:space="preserve">
+    <value>Suspend</value>
+  </data>
+  <data name="BottomButtonBar_IdleModeCycleHint" xml:space="preserve">
+    <value>Click to cycle</value>
+  </data>
   
   <!-- Data Management Page -->
   <data name="DataManagement_Title" xml:space="preserve">
