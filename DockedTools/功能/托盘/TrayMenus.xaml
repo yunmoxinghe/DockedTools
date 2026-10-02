@@ -28,6 +28,12 @@
             </MenuFlyoutItem.Icon>
         </MenuFlyoutItem>
         
+        <MenuFlyoutItem x:Name="MouseQuickFeedback" x:Uid="TrayMenu_QuickFeedbackText" Text="快速反馈">
+            <MenuFlyoutItem.Icon>
+                <FontIcon Glyph="&#xED15;"/>
+            </MenuFlyoutItem.Icon>
+        </MenuFlyoutItem>
+        
         <MenuFlyoutSeparator/>
         
         <MenuFlyoutItem x:Name="MouseExit" x:Uid="TrayMenu_ExitText" Text="退出">
@@ -60,6 +66,12 @@
         <MenuFlyoutItem x:Name="TouchRateApp" x:Uid="TrayMenu_RateAppText" Text="评价应用">
             <MenuFlyoutItem.Icon>
                 <FontIcon Glyph="&#xE90A;"/>
+            </MenuFlyoutItem.Icon>
+        </MenuFlyoutItem>
+        
+        <MenuFlyoutItem x:Name="TouchQuickFeedback" x:Uid="TrayMenu_QuickFeedbackText" Text="快速反馈">
+            <MenuFlyoutItem.Icon>
+                <FontIcon Glyph="&#xED15;"/>
             </MenuFlyoutItem.Icon>
         </MenuFlyoutItem>
         

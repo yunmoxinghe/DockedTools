@@ -160,6 +160,11 @@ public static partial class TrayContextMenuService
                     // 根据设置决定是否显示评价按钮
                     menuItem.Visibility = ExperimentalSettings.HideTrayRateButton ? Visibility.Collapsed : Visibility.Visible;
                 }
+                else if (menuItem.Name == $"{prefix}QuickFeedback")
+                {
+                    menuItem.Click += OnQuickFeedback;
+                    menuItem.Text = LocalizationHelper.GetString("TrayMenu_QuickFeedback");
+                }
                 else if (menuItem.Name == $"{prefix}Exit")
                 {
                     menuItem.Click += (s, e) => OnSmartExit(onExit);
@@ -262,6 +267,15 @@ public static partial class TrayContextMenuService
         rateItem.Click += OnRateApp;
         flyout.Items.Add(rateItem);
 
+        // 快速反馈（微软表单）
+        var quickFeedbackItem = new MenuFlyoutItem
+        {
+            Text = LocalizationHelper.GetString("TrayMenu_QuickFeedback"),
+            Icon = new FontIcon { Glyph = "\uED15" } // 反馈图标
+        };
+        quickFeedbackItem.Click += OnQuickFeedback;
+        flyout.Items.Add(quickFeedbackItem);
+
         // 分隔线
         flyout.Items.Add(new MenuFlyoutSeparator());
 
@@ -330,6 +344,21 @@ public static partial class TrayContextMenuService
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[TrayContextMenu] Rate app failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 快速反馈：打开微软反馈表单
+    /// </summary>
+    private static async void OnQuickFeedback(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            await DockedTools.功能.统一调用.快速反馈.QuickFeedbackService.LaunchAsync();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[TrayContextMenu] Quick feedback failed: {ex.Message}");
         }
     }
 

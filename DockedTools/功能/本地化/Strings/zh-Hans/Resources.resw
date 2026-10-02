@@ -211,6 +211,9 @@
   <data name="SettingsPage_FeedbackLink.Content" xml:space="preserve">
     <value>提交反馈和建议</value>
   </data>
+  <data name="SettingsPage_QuickFeedbackLink.Content" xml:space="preserve">
+    <value>填写快速反馈表单</value>
+  </data>
   <data name="SettingsPage_LicenseLink.Content" xml:space="preserve">
     <value>查看开源协议</value>
   </data>
@@ -226,6 +229,9 @@
   </data>
   <data name="TrayMenu_RateApp" xml:space="preserve">
     <value>给个好评</value>
+  </data>
+  <data name="TrayMenu_QuickFeedback" xml:space="preserve">
+    <value>快速反馈</value>
   </data>
   <data name="TrayMenu_Exit" xml:space="preserve">
     <value>退出</value>
@@ -738,6 +744,9 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   </data>
   <data name="TrayMenu_RateAppText.Text" xml:space="preserve">
     <value>给个好评</value>
+  </data>
+  <data name="TrayMenu_QuickFeedbackText.Text" xml:space="preserve">
+    <value>快速反馈</value>
   </data>
   <data name="TrayMenu_ExitText.Text" xml:space="preserve">
     <value>退出</value>

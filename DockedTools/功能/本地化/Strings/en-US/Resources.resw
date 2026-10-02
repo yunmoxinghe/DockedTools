@@ -181,6 +181,9 @@
   <data name="SettingsPage_FeedbackLink.Content" xml:space="preserve">
     <value>Submit Feedback</value>
   </data>
+  <data name="SettingsPage_QuickFeedbackLink.Content" xml:space="preserve">
+    <value>Quick Feedback Form</value>
+  </data>
   <data name="SettingsPage_LicenseLink.Content" xml:space="preserve">
     <value>View License</value>
   </data>
@@ -196,6 +199,9 @@
   </data>
   <data name="TrayMenu_RateApp" xml:space="preserve">
     <value>Rate App</value>
+  </data>
+  <data name="TrayMenu_QuickFeedback" xml:space="preserve">
+    <value>Quick Feedback</value>
   </data>
   <data name="TrayMenu_Exit" xml:space="preserve">
     <value>Exit</value>
@@ -708,6 +714,9 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   </data>
   <data name="TrayMenu_RateAppText.Text" xml:space="preserve">
     <value>Rate App</value>
+  </data>
+  <data name="TrayMenu_QuickFeedbackText.Text" xml:space="preserve">
+    <value>Quick Feedback</value>
   </data>
   <data name="TrayMenu_ExitText.Text" xml:space="preserve">
     <value>Exit</value>
