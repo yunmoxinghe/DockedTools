@@ -717,6 +717,13 @@ namespace DockedTools.Features.Pages.Settings
             Frame.Navigate(typeof(WebViewPerformancePage), null, transitionInfo);
         }
 
+        private void OnAdaptiveColourCardClick(object sender, RoutedEventArgs e)
+        {
+            var animationType = ExperimentalSettings.SubPageNavigationAnimation;
+            var transitionInfo = GetNavigationTransitionInfo(animationType);
+            Frame.Navigate(typeof(AdaptiveColourPage), null, transitionInfo);
+        }
+
         /// <summary>
         /// 根据动画类型获取对应的 NavigationTransitionInfo
         /// </summary>

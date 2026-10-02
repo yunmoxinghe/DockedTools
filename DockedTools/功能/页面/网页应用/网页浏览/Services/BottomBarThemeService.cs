@@ -16,6 +16,12 @@ public static class BottomBarThemeService
     private static SolidColorBrush? _customBackgroundBrush;
 
     /// <summary>
+    /// 当前注册的宿主。BottomBarThemeService 是静态单例（一次只认一个底部栏），
+    /// 多个网页页面实例并存时用它确认"我到底是不是宿主"，避免把别人的底部栏改成本页颜色。
+    /// </summary>
+    public static Border? RegisteredHost => _bottomBarHost;
+
+    /// <summary>
     /// 注册底部栏容器实例（由网页浏览页面在初始化时调用）
     /// </summary>
     public static void Register(Border bottomBarHost)
@@ -27,8 +33,19 @@ public static class BottomBarThemeService
     /// <summary>
     /// 注销底部栏容器（页面卸载时清理）
     /// </summary>
-    public static void Unregister()
+    /// <param name="bottomBarHost">
+    /// 传入自己的宿主时，只有当前宿主是自己才会注销。
+    /// 多页面实例并存时，若非宿主的旧页面 Unload 无差别清空，真正的宿主之后
+    /// 写底栏就会被 IsBottomBarHostOwner() 挡在门外，底栏从此不再更新。
+    /// </param>
+    public static void Unregister(Border? bottomBarHost = null)
     {
+        if (bottomBarHost is not null && !ReferenceEquals(_bottomBarHost, bottomBarHost))
+        {
+            System.Diagnostics.Debug.WriteLine("[BottomBarThemeService] ⚠️ 非宿主页请求注销，已忽略");
+            return;
+        }
+
         _bottomBarHost = null;
         _customBackgroundBrush = null;
         System.Diagnostics.Debug.WriteLine("[BottomBarThemeService] 底部栏容器已注销");

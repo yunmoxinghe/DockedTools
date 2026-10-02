@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <root>
   <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
     <xsd:import namespace="http://www.w3.org/XML/1998/namespace" />
@@ -1459,5 +1459,157 @@ Error Message: {1}</value>
   </data>
   <data name="LinkOpen_Cancel" xml:space="preserve">
     <value>Cancel</value>
+  </data>
+  <!-- 自适应栏色设置 -->
+  <data name="AdaptiveColourPage_Title.Text" xml:space="preserve">
+    <value>Adaptive bar colour</value>
+  </data>
+  <data name="AdaptiveColourPage_Subtitle.Text" xml:space="preserve">
+    <value>Tint the top and bottom bars to match the page. Options and defaults follow Adaptive Tab Bar Colour (ATBC).</value>
+  </data>
+  <data name="AdaptiveColourPage_BasicSection.Text" xml:space="preserve">
+    <value>Basic</value>
+  </data>
+  <data name="AdaptiveColourPage_BrightnessSection.Text" xml:space="preserve">
+    <value>Brightness offsets</value>
+  </data>
+  <data name="AdaptiveColourPage_AdvancedSection.Text" xml:space="preserve">
+    <value>Contrast and fallback</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleSection.Text" xml:space="preserve">
+    <value>Global rules</value>
+  </data>
+  <data name="AdaptiveColourPage_EnabledHeader.Header" xml:space="preserve">
+    <value>Adaptive bar colour</value>
+  </data>
+  <data name="AdaptiveColourPage_EnabledHeader.Description" xml:space="preserve">
+    <value>When off, bars fall back to the system default colours</value>
+  </data>
+  <data name="AdaptiveColourPage_DynamicHeader.Header" xml:space="preserve">
+    <value>Dynamic refresh</value>
+  </data>
+  <data name="AdaptiveColourPage_DynamicHeader.Description" xml:space="preserve">
+    <value>Keep updating on scroll, navigation and animations; when off, sample once after each navigation</value>
+  </data>
+  <data name="AdaptiveColourPage_SchemeHeader.Header" xml:space="preserve">
+    <value>Colour scheme</value>
+  </data>
+  <data name="AdaptiveColourPage_SchemeHeader.Description" xml:space="preserve">
+    <value>Decides which contrast and fallback set is used</value>
+  </data>
+  <data name="AdaptiveColourPage_SchemeSystem.Content" xml:space="preserve">
+    <value>Follow system</value>
+  </data>
+  <data name="AdaptiveColourPage_SchemeLight.Content" xml:space="preserve">
+    <value>Light</value>
+  </data>
+  <data name="AdaptiveColourPage_SchemeDark.Content" xml:space="preserve">
+    <value>Dark</value>
+  </data>
+  <data name="AdaptiveColourPage_NoThemeColourHeader.Header" xml:space="preserve">
+    <value>Ignore theme-color</value>
+  </data>
+  <data name="AdaptiveColourPage_NoThemeColourHeader.Description" xml:space="preserve">
+    <value>Use the real page appearance instead of the brand colour declared in meta theme-color</value>
+  </data>
+  <data name="AdaptiveColourPage_AllowDarkLightHeader.Header" xml:space="preserve">
+    <value>Allow light/dark flip</value>
+  </data>
+  <data name="AdaptiveColourPage_AllowDarkLightHeader.Description" xml:space="preserve">
+    <value>When contrast is too low, allow a light page with dark bars and vice versa</value>
+  </data>
+  <data name="AdaptiveColourPage_TabBarHeader.Header" xml:space="preserve">
+    <value>Bar brightness offset</value>
+  </data>
+  <data name="AdaptiveColourPage_TabBarHeader.Description" xml:space="preserve">
+    <value>Brightness tweak for the bar background, default 0</value>
+  </data>
+  <data name="AdaptiveColourPage_PopupHeader.Header" xml:space="preserve">
+    <value>Popup brightness offset</value>
+  </data>
+  <data name="AdaptiveColourPage_PopupHeader.Description" xml:space="preserve">
+    <value>Brightness delta of popups relative to the bar, default 5</value>
+  </data>
+  <data name="AdaptiveColourPage_TabSelectedHeader.Header" xml:space="preserve">
+    <value>Selected brightness offset</value>
+  </data>
+  <data name="AdaptiveColourPage_TabSelectedHeader.Description" xml:space="preserve">
+    <value>Brightness delta of the selected state, default 15</value>
+  </data>
+  <data name="AdaptiveColourPage_MinContrastLightHeader.Header" xml:space="preserve">
+    <value>Minimum contrast (light)</value>
+  </data>
+  <data name="AdaptiveColourPage_MinContrastLightHeader.Description" xml:space="preserve">
+    <value>Correct the colour when contrast drops below this value, default 9.0</value>
+  </data>
+  <data name="AdaptiveColourPage_MinContrastDarkHeader.Header" xml:space="preserve">
+    <value>Minimum contrast (dark)</value>
+  </data>
+  <data name="AdaptiveColourPage_MinContrastDarkHeader.Description" xml:space="preserve">
+    <value>Correct the colour when contrast drops below this value, default 4.5</value>
+  </data>
+  <data name="AdaptiveColourPage_FallbackLightHeader.Header" xml:space="preserve">
+    <value>Light fallback colour</value>
+  </data>
+  <data name="AdaptiveColourPage_FallbackLightHeader.Description" xml:space="preserve">
+    <value>Used when no page colour can be sampled, default #ffffff</value>
+  </data>
+  <data name="AdaptiveColourPage_FallbackDarkHeader.Header" xml:space="preserve">
+    <value>Dark fallback colour</value>
+  </data>
+  <data name="AdaptiveColourPage_FallbackDarkHeader.Description" xml:space="preserve">
+    <value>Used when no page colour can be sampled, default #2b2a33</value>
+  </data>
+  <data name="AdaptiveColourPage_QueryHeader.Header" xml:space="preserve">
+    <value>Colour selector</value>
+  </data>
+  <data name="AdaptiveColourPage_QueryHeader.Description" xml:space="preserve">
+    <value>A CSS selector (e.g. .header) whose colour wins when it matches; empty disables it</value>
+  </data>
+  <data name="SettingsPage_AdaptiveColourHeader.Header" xml:space="preserve">
+    <value>Adaptive bar colour</value>
+  </data>
+  <data name="SettingsPage_AdaptiveColourHeader.Description" xml:space="preserve">
+    <value>Tint the top and bottom bars to match the page</value>
+  </data>
+  <!-- 自适应栏色 · 站点规则 -->
+  <data name="AdaptiveColourPage_SiteRuleSection.Text" xml:space="preserve">
+    <value>Site rules</value>
+  </data>
+  <data name="AdaptiveColourPage_SiteRuleHeader.Header" xml:space="preserve">
+    <value>Override per site</value>
+  </data>
+  <data name="AdaptiveColourPage_SiteRuleHeader.Description" xml:space="preserve">
+    <value>Port of ATBC's ruleList: later rules override earlier ones; full URL, host (with subdomains), wildcards * and **, and regex are all supported</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleHostBox.PlaceholderText" xml:space="preserve">
+    <value>Host or URL, e.g. github.com</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleValueBox.PlaceholderText" xml:space="preserve">
+    <value>Value: colour / true|false / CSS selector</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleTypeColour.Content" xml:space="preserve">
+    <value>Fixed colour</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleTypeTheme.Content" xml:space="preserve">
+    <value>theme-color</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleTypeQuery.Content" xml:space="preserve">
+    <value>CSS selector</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleSchemeBoth.Content" xml:space="preserve">
+    <value>Both schemes</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleSchemeLight.Content" xml:space="preserve">
+    <value>Light only</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleSchemeDark.Content" xml:space="preserve">
+    <value>Dark only</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleAddButton.Content" xml:space="preserve">
+    <value>Add</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleEmptyHint.Text" xml:space="preserve">
+    <value>No rules yet — the ones above are the built-in site exceptions from early ATBC; delete one and that site falls back to the global settings.</value>
   </data>
 </root>

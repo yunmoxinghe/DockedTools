@@ -75,6 +75,14 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 // 根据设置配置右键菜单
                 UpdateContextMenuConfiguration(useWinUIContextMenu);
                 
+                // 常驻取色脚本必须赶在导航之前注入 —— AddScriptToExecuteOnDocumentCreated
+                // 只对【注入之后才创建的文档】生效，等 NavigationCompleted 之后再注入的话，
+                // 用户看到的第一个页面永远拿不到脚本：那个页面上「动态刷新」等于关着的，
+                // 只剩进站时那两次一次性采样。
+                // probeCurrentDocument: false —— 这个分支里文档可能已经加载完了，
+                // 注入对它无效，交给下面的一次性探测补。
+                _ = EnsureAdaptiveColourSourceAsync(probeCurrentDocument: false);
+
                 _isWebViewReady = true;
                 System.Diagnostics.Debug.WriteLine($"[EnsureWebViewInitializedAsync] ✅ WebView 重新配置完成");
                 return;
@@ -163,6 +171,15 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     // 根据设置配置右键菜单
                     UpdateContextMenuConfiguration(useWinUIContextMenu);
                     
+                    // 常驻取色脚本必须赶在首次导航之前注入：
+                    // AddScriptToExecuteOnDocumentCreated 只对【注入之后才创建的文档】生效，
+                    // 等到 NavigationCompleted 之后再注入的话，用户看到的第一个页面
+                    // 永远拿不到脚本 —— 那个页面上「动态刷新」等于关着的，
+                    // 只剩进站时那两次一次性采样，页面滚动/换肤都不会再更新。
+                    // probeCurrentDocument: false —— 这里还没导航，探测只会取到空白页；
+                    // 第一次导航的 NavigationCompleted 会补上探测。
+                    _ = EnsureAdaptiveColourSourceAsync(probeCurrentDocument: false);
+
                     // 只有在 CoreWebView2 成功初始化后才设置为 ready
                     _isWebViewReady = true;
                     System.Diagnostics.Debug.WriteLine($"[EnsureWebViewInitializedAsync] ✅ WebView 初始化完成，准备导航");

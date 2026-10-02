@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <root>
   <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
     <xsd:import namespace="http://www.w3.org/XML/1998/namespace" />
@@ -1465,5 +1465,157 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   </data>
   <data name="LinkOpen_Cancel" xml:space="preserve">
     <value>取消</value>
+  </data>
+  <!-- 自适应栏色设置 -->
+  <data name="AdaptiveColourPage_Title.Text" xml:space="preserve">
+    <value>自适应栏色</value>
+  </data>
+  <data name="AdaptiveColourPage_Subtitle.Text" xml:space="preserve">
+    <value>让顶栏与底栏按网页外观自动上色。选项与默认值对齐 Adaptive Tab Bar Colour（ATBC）。</value>
+  </data>
+  <data name="AdaptiveColourPage_BasicSection.Text" xml:space="preserve">
+    <value>基础</value>
+  </data>
+  <data name="AdaptiveColourPage_BrightnessSection.Text" xml:space="preserve">
+    <value>亮度偏移</value>
+  </data>
+  <data name="AdaptiveColourPage_AdvancedSection.Text" xml:space="preserve">
+    <value>对比度与兜底色</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleSection.Text" xml:space="preserve">
+    <value>全局取色规则</value>
+  </data>
+  <data name="AdaptiveColourPage_EnabledHeader.Header" xml:space="preserve">
+    <value>启用自适应栏色</value>
+  </data>
+  <data name="AdaptiveColourPage_EnabledHeader.Description" xml:space="preserve">
+    <value>关闭后顶栏与底栏完全回退到系统默认色</value>
+  </data>
+  <data name="AdaptiveColourPage_DynamicHeader.Header" xml:space="preserve">
+    <value>动态刷新</value>
+  </data>
+  <data name="AdaptiveColourPage_DynamicHeader.Description" xml:space="preserve">
+    <value>跟随页面滚动、切换、动画持续更新栏色；关闭后只在导航完成时取一次色</value>
+  </data>
+  <data name="AdaptiveColourPage_SchemeHeader.Header" xml:space="preserve">
+    <value>配色方案</value>
+  </data>
+  <data name="AdaptiveColourPage_SchemeHeader.Description" xml:space="preserve">
+    <value>决定使用哪一套对比度与兜底色</value>
+  </data>
+  <data name="AdaptiveColourPage_SchemeSystem.Content" xml:space="preserve">
+    <value>跟随系统</value>
+  </data>
+  <data name="AdaptiveColourPage_SchemeLight.Content" xml:space="preserve">
+    <value>浅色</value>
+  </data>
+  <data name="AdaptiveColourPage_SchemeDark.Content" xml:space="preserve">
+    <value>深色</value>
+  </data>
+  <data name="AdaptiveColourPage_NoThemeColourHeader.Header" xml:space="preserve">
+    <value>忽略 theme-color</value>
+  </data>
+  <data name="AdaptiveColourPage_NoThemeColourHeader.Description" xml:space="preserve">
+    <value>按页面真实外观取色，不使用 meta theme-color 声明的品牌色</value>
+  </data>
+  <data name="AdaptiveColourPage_AllowDarkLightHeader.Header" xml:space="preserve">
+    <value>允许亮暗反转</value>
+  </data>
+  <data name="AdaptiveColourPage_AllowDarkLightHeader.Description" xml:space="preserve">
+    <value>对比度不足时，允许亮页面配深色栏、暗页面配浅色栏</value>
+  </data>
+  <data name="AdaptiveColourPage_TabBarHeader.Header" xml:space="preserve">
+    <value>栏体亮度偏移</value>
+  </data>
+  <data name="AdaptiveColourPage_TabBarHeader.Description" xml:space="preserve">
+    <value>顶栏与底栏背景的亮度微调，默认 0</value>
+  </data>
+  <data name="AdaptiveColourPage_PopupHeader.Header" xml:space="preserve">
+    <value>浮层亮度偏移</value>
+  </data>
+  <data name="AdaptiveColourPage_PopupHeader.Description" xml:space="preserve">
+    <value>弹出层背景相对栏体的亮度差，默认 5</value>
+  </data>
+  <data name="AdaptiveColourPage_TabSelectedHeader.Header" xml:space="preserve">
+    <value>选中态亮度偏移</value>
+  </data>
+  <data name="AdaptiveColourPage_TabSelectedHeader.Description" xml:space="preserve">
+    <value>选中/激活态背景相对栏体的亮度差，默认 15</value>
+  </data>
+  <data name="AdaptiveColourPage_MinContrastLightHeader.Header" xml:space="preserve">
+    <value>浅色最小对比度</value>
+  </data>
+  <data name="AdaptiveColourPage_MinContrastLightHeader.Description" xml:space="preserve">
+    <value>前景与栏色达不到该对比度时自动校正，默认 9.0</value>
+  </data>
+  <data name="AdaptiveColourPage_MinContrastDarkHeader.Header" xml:space="preserve">
+    <value>深色最小对比度</value>
+  </data>
+  <data name="AdaptiveColourPage_MinContrastDarkHeader.Description" xml:space="preserve">
+    <value>前景与栏色达不到该对比度时自动校正，默认 4.5</value>
+  </data>
+  <data name="AdaptiveColourPage_FallbackLightHeader.Header" xml:space="preserve">
+    <value>浅色兜底色</value>
+  </data>
+  <data name="AdaptiveColourPage_FallbackLightHeader.Description" xml:space="preserve">
+    <value>取不到页面颜色时使用，默认 #ffffff</value>
+  </data>
+  <data name="AdaptiveColourPage_FallbackDarkHeader.Header" xml:space="preserve">
+    <value>深色兜底色</value>
+  </data>
+  <data name="AdaptiveColourPage_FallbackDarkHeader.Description" xml:space="preserve">
+    <value>取不到页面颜色时使用，默认 #2b2a33</value>
+  </data>
+  <data name="AdaptiveColourPage_QueryHeader.Header" xml:space="preserve">
+    <value>取色选择器</value>
+  </data>
+  <data name="AdaptiveColourPage_QueryHeader.Description" xml:space="preserve">
+    <value>填写 CSS 选择器（例如 .header），命中时优先用该元素的颜色；留空表示不启用</value>
+  </data>
+  <data name="SettingsPage_AdaptiveColourHeader.Header" xml:space="preserve">
+    <value>自适应栏色</value>
+  </data>
+  <data name="SettingsPage_AdaptiveColourHeader.Description" xml:space="preserve">
+    <value>让顶栏与底栏按网页外观自动上色</value>
+  </data>
+  <!-- 自适应栏色 · 站点规则 -->
+  <data name="AdaptiveColourPage_SiteRuleSection.Text" xml:space="preserve">
+    <value>站点规则</value>
+  </data>
+  <data name="AdaptiveColourPage_SiteRuleHeader.Header" xml:space="preserve">
+    <value>按站点覆盖取色行为</value>
+  </data>
+  <data name="AdaptiveColourPage_SiteRuleHeader.Description" xml:space="preserve">
+    <value>对齐 ATBC 的 ruleList：后面的规则覆盖前面的；支持完整地址、主机（含子域）、通配符 * 与 **，以及正则</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleHostBox.PlaceholderText" xml:space="preserve">
+    <value>主机或地址，例如 github.com</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleValueBox.PlaceholderText" xml:space="preserve">
+    <value>值：颜色 / true|false / CSS 选择器</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleTypeColour.Content" xml:space="preserve">
+    <value>指定颜色</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleTypeTheme.Content" xml:space="preserve">
+    <value>theme-color</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleTypeQuery.Content" xml:space="preserve">
+    <value>CSS 选择器</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleSchemeBoth.Content" xml:space="preserve">
+    <value>两种方案</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleSchemeLight.Content" xml:space="preserve">
+    <value>仅浅色</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleSchemeDark.Content" xml:space="preserve">
+    <value>仅深色</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleAddButton.Content" xml:space="preserve">
+    <value>添加</value>
+  </data>
+  <data name="AdaptiveColourPage_RuleEmptyHint.Text" xml:space="preserve">
+    <value>还没有规则 —— 上面这些是 ATBC 早期版本内置的站点特例，删掉后该站点就按全局设置取色。</value>
   </data>
 </root>

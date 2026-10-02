@@ -27,6 +27,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // 放在最前：下面几处 early return 之前也要认领，否则一样会写错页。
             TopAppBarService.EnterPage(this);
 
+            // 设置页改取色参数后要即时重算栏色（页面被缓存时也要跟着改，所以订阅放在最前）
+            SubscribeAdaptiveColourSettings();
+
             // ⭐ 订阅窗口状态完成事件
             DockedTools.Features.UnifiedCalls.MainWindow.MainWindowService.StateCompleted += OnMainWindowStateCompleted;
             System.Diagnostics.Debug.WriteLine("[WebBrowserPage] 已订阅主窗口状态完成事件 (OnNavigatedTo)");
@@ -91,6 +94,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             System.Diagnostics.Debug.WriteLine("[WebBrowserPage] 已取消订阅主窗口状态完成事件 (OnNavigatedFrom)");
             
             RestoreSharedTopAppBarBackground();
+
+            // 顶栏是全局共享控件，网页取色按网页亮暗改过它的局部主题 —— 离开时必须复位，
+            // 否则下一个页面会顶着上一个网页的亮/暗。（底栏是本页私有的，Unloaded 里统一收尾）
+            ResetAdaptiveBarColour();
+
+            // 已经不在前台：设置页的改动不该再驱动本页重算
+            UnsubscribeAdaptiveColourSettings();
         }
 
         // INavigationAware 实现
@@ -100,6 +110,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             
             // ⭐ 订阅窗口状态完成事件，当窗口恢复显示动画完成后给 WebView 焦点
             DockedTools.Features.UnifiedCalls.MainWindow.MainWindowService.StateCompleted += OnMainWindowStateCompleted;
+
+            // 页面可能没走 override（导航层直调 INavigationAware），这里补一次订阅
+            SubscribeAdaptiveColourSettings();
             System.Diagnostics.Debug.WriteLine("[WebBrowserPage] 已订阅主窗口状态完成事件");
             
             // ⭐ 如果页面被 LRU 清理过，需要重置 _isDisposed 标志以允许重新初始化
@@ -219,6 +232,11 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             
             RestoreSharedTopAppBarBackground();
             System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 已恢复统一顶部栏背景");
+
+            // 同 override：顶栏主题必须复位（见那边注释）
+            ResetAdaptiveBarColour();
+
+            UnsubscribeAdaptiveColourSettings();
             
             // 如果启用了暂停不活跃 WebView 的功能
             if (ExperimentalSettings.SuspendInactiveWebView && WebView?.CoreWebView2 != null)
