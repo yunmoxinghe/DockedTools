@@ -218,19 +218,15 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             {
                 if (_currentShortcut is not null && !string.IsNullOrWhiteSpace(_currentShortcut.Name))
                 {
-                    if (_topBarTitle != null)
-                    {
-                        _topBarTitle.Text = _currentShortcut.Name;
-                    }
+                    _topBarTitleText = _currentShortcut.Name;
+                    PublishTopBarCenter();
                 }
 
                 return;
             }
 
-            if (_topBarTitle != null)
-            {
-                _topBarTitle.Text = title;
-            }
+            _topBarTitleText = title;
+            PublishTopBarCenter();
         }
 
 

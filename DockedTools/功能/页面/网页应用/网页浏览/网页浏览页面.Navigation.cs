@@ -2,6 +2,7 @@ using DockedTools.Features.MainWindowContent.ContentArea;
 using DockedTools.Features.Pages.Settings;
 using DockedTools.Features.Pages.WebApp.Shared;
 using DockedTools.Features.UnifiedCalls.AsyncSafety;
+using DockedTools.Features.UnifiedCalls.TopAppBar;
 using Microsoft.UI.Xaml.Navigation;
 using System;
 using System.Threading.Tasks;
@@ -18,6 +19,14 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         {
             base.OnNavigatedTo(e);
 
+            // 认领顶栏：本页是沉浸式网页页 —— 没有 ScrollViewer，因此【不用智能标题】，
+            // 而智能标题.Setup 平时兼任"认领"这一职责（内部会调 EnterPage）。这里必须自己认领，
+            // 否则本次 OnNavigatedTo 里的顶栏写入（PublishTopBarCenter / SetupTopBar / 注册回调）
+            // 会记到【上一个页面】的作用域上 —— 因为导航层要到 Frame.Navigated 才切换前台身份。
+            // 后果有两个：本页顶栏空白，以及回到上一页时它顶着本页的标题和按钮。
+            // 放在最前：下面几处 early return 之前也要认领，否则一样会写错页。
+            TopAppBarService.EnterPage(this);
+
             // ⭐ 订阅窗口状态完成事件
             DockedTools.Features.UnifiedCalls.MainWindow.MainWindowService.StateCompleted += OnMainWindowStateCompleted;
             System.Diagnostics.Debug.WriteLine("[WebBrowserPage] 已订阅主窗口状态完成事件 (OnNavigatedTo)");
@@ -33,11 +42,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             }
 
             _currentShortcut = shortcut;
-            if (_topBarTitle != null)
-            {
-                _topBarTitle.Text = string.IsNullOrWhiteSpace(shortcut.Name) ? uri.Host : shortcut.Name;
-            }
-            _ = ShowShortcutIconAsync(shortcut.IconBytes);
+            _topBarTitleText = string.IsNullOrWhiteSpace(shortcut.Name) ? uri.Host : shortcut.Name;
+            PublishTopBarCenter();
+            _ = PublishShortcutIconAsync(shortcut.IconBytes);
 
             _pendingNavigationUri = uri;
             TryNavigatePendingUri();

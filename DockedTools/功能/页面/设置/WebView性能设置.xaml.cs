@@ -25,7 +25,7 @@ namespace DockedTools.Features.Pages.Settings
         protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
         {
             base.OnNavigatedTo(e);
-            _智能标题.Setup(PageScrollViewer, PageTitleBlock);
+            _智能标题.Setup(this, PageScrollViewer, PageTitleBlock);
         }
 
         protected override void OnNavigatedFrom(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)

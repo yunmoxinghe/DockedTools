@@ -104,7 +104,20 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
         private KeyboardMappingButtonConfig? _originalLeftButtonConfig;
         private KeyboardMappingButtonConfig? _originalRightButtonConfig;
         private bool _hasChanges;
-        private Button? _saveButton;
+
+        // 保存按钮：新顶栏收的是按钮数据，所以这里只记 Id 与"当前是否可用"，
+        // 真正的禁用外观与点击拦截由 AppTopBar 负责。
+        private const string SaveButtonId = "__webapp_detail_save";
+        private bool _saveButtonEnabled;
+
+        private void SetSaveButtonEnabled(bool enabled)
+        {
+            // 不做"值没变就不下发"的短路：首次进入时要显式把按钮压成禁用，
+            // 而快照默认给出的按钮是 Enabled —— 短路会让这次压制丢失。
+            // 重复下发是安全的：TopBarSnapshot 是值语义，内容相同不会触发重渲染。
+            _saveButtonEnabled = enabled;
+            TopAppBarService.SetButtonEnabled(SaveButtonId, enabled);
+        }
 
         public WebAppDetailPage()
         {
@@ -116,7 +129,7 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
         protected override void OnNavigatedTo(NavigationEventArgs e)
         {
             base.OnNavigatedTo(e);
-            _智能标题.Setup(PageScrollViewer, PageTitleBlock);
+            _智能标题.Setup(this, PageScrollViewer, PageTitleBlock);
 
             // ⭐ 增强调试：详细记录导航参数
             LogDebug($"OnNavigatedTo 被调用");
@@ -142,11 +155,14 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
             }
 
             // 添加保存按钮到标题栏（使用 C# Unicode 转义格式）
-            _saveButton = TopAppBarService.SetRightIconButton("\uE74E", OnSaveClick, LocalizationHelper.GetString("WebAppDetailPage_SaveButton"));
-            if (_saveButton != null)
-            {
-                _saveButton.IsEnabled = false;
-            }
+            // 注：新顶栏返回按钮数据而不是 Button 实例，可用/禁用改由 SetButtonEnabled 下发状态。
+            TopAppBarService.SetRightIconButton(
+                id: SaveButtonId,
+                glyph: "\uE74E",
+                tooltip: LocalizationHelper.GetString("WebAppDetailPage_SaveButton"),
+                // OnSaveClick 是 XAML 事件签名，转接成顶栏要的 Action
+                onClick: () => OnSaveClick(null!, null!));
+            SetSaveButtonEnabled(false);
             
             LogDebug($"OnNavigatedTo 完成，_appId = {_appId ?? "null"}");
         }
@@ -370,10 +386,9 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
 
             _hasChanges = nameChanged || urlChanged || iconChanged || leftButtonChanged || rightButtonChanged;
 
-            if (_saveButton != null)
-            {
-                _saveButton.IsEnabled = _hasChanges && !string.IsNullOrWhiteSpace(currentName) && !string.IsNullOrWhiteSpace(currentUrl);
-            }
+            SetSaveButtonEnabled(_hasChanges
+                && !string.IsNullOrWhiteSpace(currentName)
+                && !string.IsNullOrWhiteSpace(currentUrl));
         }
 
         private async void OnChooseLocalIconClick(object sender, RoutedEventArgs e)
@@ -510,7 +525,7 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
             IconPreviewFallback.Visibility = Visibility.Visible;
             CheckForChanges();
             
-            LogDebug($"OnResetIconClick: _hasChanges={_hasChanges}, SaveButton.IsEnabled={_saveButton?.IsEnabled}");
+            LogDebug($"OnResetIconClick: _hasChanges={_hasChanges}, SaveButton.IsEnabled={_saveButtonEnabled}");
             ShowStatus(LocalizationHelper.GetString("WebAppDetailPage_IconReset"), InfoBarSeverity.Success);
         }
 
@@ -551,11 +566,8 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
             try
             {
                 LogDebug("OnSaveClick: Starting save process");
-                
-                if (_saveButton != null)
-                {
-                    _saveButton.IsEnabled = false;
-                }
+
+                SetSaveButtonEnabled(false);
 
                 // ⭐ 检测变化类型（用于细粒度更新）
                 var updateType = WebAppUpdateType.None;
@@ -652,10 +664,7 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
             }
             finally
             {
-                if (_saveButton != null)
-                {
-                    _saveButton.IsEnabled = _hasChanges;
-                }
+                SetSaveButtonEnabled(_hasChanges);
                 LogDebug("OnSaveClick completed");
             }
         }

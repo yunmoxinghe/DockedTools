@@ -50,13 +50,17 @@ namespace DockedTools.Features.Pages.Lab
         protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
         {
             base.OnNavigatedTo(e);
-            _智能标题.Setup(PageScrollViewer, PageTitleBlock);
+            _智能标题.Setup(this, PageScrollViewer, PageTitleBlock);
         }
 
         protected override void OnNavigatedFrom(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
         {
             base.OnNavigatedFrom(e);
             _智能标题.Cleanup();
+
+            // 离开画面就撤掉实时文本回调：它是一条抱住本页实例的委托，
+            // 不收的话这页会被 scope 一直钉着 GC 不走。
+            TopAppBarService.ClearLiveTextCallback();
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e)
@@ -85,6 +89,9 @@ namespace DockedTools.Features.Pages.Lab
 
             // 更新局部主题状态显示
             UpdateThemeStatus();
+
+            // 顶栏输入框测试卡：填候选值，并把默认形态下发一次
+            InitializeSearchBoxCard();
 
             UpdateMargin();
         }
@@ -146,27 +153,28 @@ namespace DockedTools.Features.Pages.Lab
                 TopAppBarService.IsVisible = toggle.IsOn;
         }
 
+        // 实验室页面那枚"设置"按钮的固定 Id（演示用）
+        private const string LabSettingsButtonId = "__lab_settings";
+
         private void OnSetRightButtonClick(object sender, RoutedEventArgs e)
         {
-            var btn = new Button
-            {
-                Content = new FontIcon { Glyph = "\uE713", FontSize = 16 },
-                Style = (Style)Application.Current.Resources["NavigationBackButtonNormalStyle"],
-                Width = 36,
-                Height = 36,
-            };
-            btn.Click += (_, _) =>
-            {
-                TopAppBarService.SetRightContent(null);
-                RightButtonStatus.Text = LocalizationHelper.GetString("LabPage_RightButtonCleared");
-            };
-            TopAppBarService.SetRightContent(btn);
+            // 顶栏按钮现在是【数据】而不是 UIElement：给一个 TopBarButton 就完事，
+            // 外观（40×40、圆角、悬停/按下色、tooltip）全部由 AppTopBar 负责。
+            TopAppBarService.SetRightIconButton(
+                id: LabSettingsButtonId,
+                glyph: "Setting",
+                tooltip: LocalizationHelper.GetString("LabPage_TopBarRightSetButton"),
+                onClick: () =>
+                {
+                    TopAppBarService.SetRightButtons(null);
+                    RightButtonStatus.Text = LocalizationHelper.GetString("LabPage_RightButtonCleared");
+                });
             RightButtonStatus.Text = LocalizationHelper.GetString("LabPage_RightButtonSet");
         }
 
         private void OnClearRightButtonClick(object sender, RoutedEventArgs e)
         {
-            TopAppBarService.SetRightContent(null);
+            TopAppBarService.SetRightButtons(null);
             RightButtonStatus.Text = LocalizationHelper.GetString("LabPage_RightContentCleared");
         }
 
@@ -174,18 +182,12 @@ namespace DockedTools.Features.Pages.Lab
         {
             var text = CenterTitleInput.Text?.Trim();
             if (string.IsNullOrEmpty(text)) text = LocalizationHelper.GetString("LabPage_DefaultTitle");
-            TopAppBarService.SetCenterContent(new TextBlock
-            {
-                Text = text,
-                Style = (Style)Application.Current.Resources["BodyStrongTextBlockStyle"],
-                VerticalAlignment = VerticalAlignment.Center,
-                HorizontalAlignment = HorizontalAlignment.Center,
-            });
+            TopAppBarService.SetTitle(text);
         }
 
         private void OnClearCenterClick(object sender, RoutedEventArgs e)
         {
-            TopAppBarService.SetCenterContent(null);
+            TopAppBarService.ClearCenter();
         }
 
         private void OnToggleTopBarThemeClick(object sender, RoutedEventArgs e)
@@ -215,6 +217,124 @@ namespace DockedTools.Features.Pages.Lab
             string actualText = actualTheme == ElementTheme.Dark ? "深色" : "亮色";
             
             ThemeStatusText.Text = $"{themeText} (实际: {actualText})";
+        }
+
+        // ── 顶栏输入框测试卡 ────────────────────────────────────────
+        //
+        // 这张卡的存在意义：把「居中输入框」那两个新能力掰成一个能当场看见的东西 ——
+        //   ① 页面能不能实时拿到正在输入的内容（Search.LiveText）；
+        //   ② 右缘那枚确认按钮能不能换样子（TopBarAcceptIcon 联合类型）。
+        // 两者都在 <see cref="TopAppBarService"/> 上有对应入口，这里只是个遥控器。
+
+        // 组合框的候选值，同时也是"要哪种形态"的内部代号（字符串 code-behind 直写，
+        // 不走本地化：这是调试面板，读的人就是写的人）
+        private const string AcceptKindFind = "find";
+        private const string AcceptKindAccept = "accept";
+        private const string AcceptKindSend = "send";
+        private const string AcceptKindStatic = "static";
+        private const string AcceptKindNone = "none";
+
+        // 最近一次能在卡片上打出来的状态（顺带作为"回调真的打过来了"的证据）
+        private int _liveTicks;
+
+        private void InitializeSearchBoxCard()
+        {
+            AcceptIconCombo.Items.Clear();
+            AcceptIconCombo.Items.Add(new ComboBoxItem { Content = "动画放大镜（默认）", Tag = AcceptKindFind });
+            AcceptIconCombo.Items.Add(new ComboBoxItem { Content = "动画对勾", Tag = AcceptKindAccept });
+            AcceptIconCombo.Items.Add(new ComboBoxItem { Content = "动画右箭头", Tag = AcceptKindSend });
+            AcceptIconCombo.Items.Add(new ComboBoxItem { Content = "静态字形（用左边输入框里的码点）", Tag = AcceptKindStatic });
+            AcceptIconCombo.Items.Add(new ComboBoxItem { Content = "不要确认按钮", Tag = AcceptKindNone });
+            AcceptIconCombo.SelectedIndex = 0;
+
+            LiveTextToggle.IsOn = true;
+            AcceptGlyphInput.Text = "Accept";
+
+            // 显式下发一次：不能把"顶栏变成搜索框"寄托在 ToggleSwitch.IsOn 的 setter
+            // 会顺带触发 Toggled 上 —— 那属于副作用，一旦将来初值就是 true 便不再触发，
+            // 顶栏会停在纯标题形态，表现就是"输入框不出现 / 右缘按钮不出现"。
+            ApplyTopBarSearchBox();
+        }
+
+        /// <summary>按卡片上的选择重发一份居中位快照。</summary>
+        private void ApplyTopBarSearchBox()
+        {
+            var kind = (AcceptIconCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? AcceptKindFind;
+
+            // 联合类型的价值就在这一小段：每换一种形态只是多一个分支，
+            // 不用加 bool、不用动签名；新形态同理。
+            var accept = kind switch
+            {
+                AcceptKindAccept => TopBarAcceptIcon.Accept,
+                AcceptKindSend => TopBarAcceptIcon.Send,
+                AcceptKindNone => TopBarAcceptIcon.None,
+                AcceptKindStatic => TopBarAcceptIcon.OfGlyph(
+                    string.IsNullOrWhiteSpace(AcceptGlyphInput.Text)
+                        ? "Accept"
+                        : AcceptGlyphInput.Text.Trim()),
+                _ => TopBarAcceptIcon.Find,
+            };
+
+            // 必须在下发居中位【之前】认领：智能标题盯的是页面大标题 Text 的变化，
+            // 那串文本走 x:Uid，落地时间晚于本方法 —— 不认领的话，我们刚设好的搜索框
+            // 会在随后那一拍被它覆盖回纯标题（现象就是"设了没生效"/"输入框没文本"）。
+            TopAppBarService.SetSmartTitleSuppressed(true);
+
+            // 【为什么必须给非空文本】TopBarCenter.Search.Text 同时是"标题文字"和"输入框
+            // 当前内容"。给空串的话居中位宽度为 0 —— 不但看不见字，连"点一下展开搜索"
+            // 都点不到（命中区域就是那个 TextBlock），于是输入框永远出不来，右缘那枚确认
+            // 按钮也跟着不出来。想让输入框空着，是靠 Placeholder 提示，不是靠空标题。
+            var text = string.IsNullOrWhiteSpace(PageTitleBlock.Text)
+                ? LocalizationHelper.GetString("LabPage_DefaultTitle")
+                : PageTitleBlock.Text;
+
+            if (LiveTextToggle.IsOn)
+            {
+                TopAppBarService.SetLiveSearchTitle(
+                    text: text,
+                    onTextChanged: OnTopBarTextChanged,
+                    accept: accept,
+                    placeholder: "打字试试，页面这边会实时收到");
+            }
+            else
+            {
+                // 关掉实时回传 = 退化成普通可搜索标题（那条老路径应当毫发无伤）
+                TopAppBarService.ClearLiveTextCallback();
+                TopAppBarService.SetSearchableTitle(text, "打字不会被页面收到（除非回车）");
+            }
+
+            _liveTicks = 0;
+            SearchBoxStatusText.Text = kind == AcceptKindNone
+                ? "已切换到该形态；输入框只能用回车提交。"
+                : "已切换到该形态；点一下顶栏中间开始打字。";
+        }
+
+        // 实时文本的落点：每敲一个字都进这里一次。
+        // 注意【不要】在这里把文本回写进快照 —— 那会让每敲一个字触发一次全量重渲染
+        //（见 TopBarEvent.TextChanged 的注释）。只是读，就够了。
+        private void OnTopBarTextChanged(string text)
+        {
+            _liveTicks++;
+            SearchBoxStatusText.Text = string.IsNullOrEmpty(text)
+                ? $"收到第 {_liveTicks} 次通知（当前为空）"
+                : $"收到第 {_liveTicks} 次通知：{text}";
+        }
+
+        private void OnAcceptIconChanged(object sender, SelectionChangedEventArgs e) => ApplyTopBarSearchBox();
+
+        private void OnLiveTextToggled(object sender, RoutedEventArgs e) => ApplyTopBarSearchBox();
+
+        private void OnApplySearchBoxClick(object sender, RoutedEventArgs e) => ApplyTopBarSearchBox();
+
+        private void OnCloseSearchBoxClick(object sender, RoutedEventArgs e)
+        {
+            // 回调跟着页面 scope 走，但 explicit 收掉一次更保险：scope 是长期存活的，
+            // 留着一个抱着页面的委托，等于把本页钉在内存里。
+            TopAppBarService.ClearLiveTextCallback();
+            // 交还所有权：关掉测试之后，智能标题应当重新掌管页面大标题
+            TopAppBarService.SetSmartTitleSuppressed(false);
+            TopAppBarService.ClearCenter();
+            SearchBoxStatusText.Text = "已关闭输入框测试。";
         }
 
         private void OnTopBarMenuButtonToggled(object sender, RoutedEventArgs e)

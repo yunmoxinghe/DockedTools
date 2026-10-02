@@ -43,6 +43,11 @@ namespace DockedTools.Features.MainWindowContent.ContentArea
         /// </summary>
         private void OnPageEvicted(string cacheKey, Page page)
         {
+            // 页面实例即将离开缓存：把它对顶栏的登记一并收掉。
+            // 不做的话，它那份作用域凭证会留在通道的作用域栈里 —— 页面没了、Detach 的
+            // 入口也没了，那一项从此无人认领（见 TopBarChannel.Apply 里的清扫注释）。
+            DockedTools.Features.UnifiedCalls.TopAppBar.TopAppBarService.DisposePageScope(page);
+
             // 如果是 WebBrowserPage，调用其清理方法
             if (page is Pages.WebApp.Browser.WebBrowserPage webBrowserPage)
             {
@@ -164,6 +169,9 @@ namespace DockedTools.Features.MainWindowContent.ContentArea
             {
                 if (_lruCache.TryGet(cacheKey, out Page? page) && page != null)
                 {
+                    // 与 OnPageEvicted 同理：离开缓存就把顶栏登记一起收掉
+                    DockedTools.Features.UnifiedCalls.TopAppBar.TopAppBarService.DisposePageScope(page);
+
                     // 如果是 WebBrowserPage，调用其清理方法
                     if (page is Pages.WebApp.Browser.WebBrowserPage webBrowserPage)
                     {

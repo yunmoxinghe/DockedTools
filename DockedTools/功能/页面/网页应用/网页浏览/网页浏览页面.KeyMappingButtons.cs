@@ -1,3 +1,4 @@
+using DockedTools.Features.Pages.WebApp.Shared;
 using DockedTools.Features.UnifiedCalls.TopAppBar;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -14,200 +15,76 @@ namespace DockedTools.Features.Pages.WebApp.Browser
     /// </summary>
     public sealed partial class WebBrowserPage
     {
+        /// <summary>
+        /// 左侧映射按钮：下发【按钮数据】而不是 Button。
+        /// 旧实现要在这里手搓 Width/Height/Padding/CornerRadius + 三套悬停色 ResourceDictionary，
+        /// 现在外观由 AppTopBar 统一给出，页面只需要 Id（用于分派事件）、字形与提示。
+        /// </summary>
         private void SetupLeftMappingButton()
         {
-            if (_currentShortcut == null)
+            if (_currentShortcut?.LeftButton is not { } config || !config.IsEnabled)
             {
-                return;
-            }
-
-            var config = _currentShortcut.LeftButton;
-            
-            // 如果未启用，不显示按钮
-            if (!config.IsEnabled)
-            {
-                TopAppBarService.SetLeftContent(null);
                 _leftMappingButton = null;
+                TopAppBarService.UnregisterAction(LeftMappingButtonId);
+                TopAppBarService.SetLeftButtons(null);
                 return;
             }
 
-            // 根据图标类型创建图标
-            UIElement icon;
-            if (config.IconType == "Animated")
-            {
-                icon = CreateAnimatedIcon(config.AnimatedIconType);
-            }
-            else
-            {
-                var fontIcon = new FontIcon
-                {
-                    Glyph = config.StaticIconGlyph,
-                    FontFamily = new FontFamily("Segoe Fluent Icons"),
-                    FontSize = 16,
-                    Foreground = _topBarForegroundBrush
-                };
-                
-                // 调试日志
-                System.Diagnostics.Debug.WriteLine($"[CreateLeftButton] Glyph='{config.StaticIconGlyph}' (长度={config.StaticIconGlyph?.Length}), FontFamily={fontIcon.FontFamily.Source}");
-                
-                icon = fontIcon;
-            }
-            
-            _leftMappingButton = new Button
-            {
-                Width = 40,
-                Height = 40,
-                Padding = new Thickness(0),
-                BorderThickness = new Thickness(0),
-                CornerRadius = new CornerRadius(4),
-                Content = icon
-            };
+            _leftMappingButton = BuildMappingButton(LeftMappingButtonId, config);
 
-            // 设置按钮背景样式（与返回按钮一致）
-            var transparentColor = (Windows.UI.Color)Application.Current.Resources["SubtleFillColorTransparent"];
-            _leftMappingButton.Background = new SolidColorBrush(transparentColor);
-            _leftMappingButton.BackgroundSizing = BackgroundSizing.InnerBorderEdge;
-
-            // 设置悬停和按下状态的背景色
-            var resources = new ResourceDictionary();
-            var secondaryColor = (Windows.UI.Color)Application.Current.Resources["SubtleFillColorSecondary"];
-            var tertiaryColor = (Windows.UI.Color)Application.Current.Resources["SubtleFillColorTertiary"];
-            resources["ButtonBackgroundPointerOver"] = new SolidColorBrush(secondaryColor);
-            resources["ButtonBackgroundPressed"] = new SolidColorBrush(tertiaryColor);
-            _leftMappingButton.Resources = resources;
-
-            ToolTipService.SetToolTip(_leftMappingButton, config.Tooltip);
-            _leftMappingButton.Click += OnLeftMappingButtonClick;
-
-            // 创建容器
-            var container = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                Spacing = 4
-            };
-
-            container.Children.Add(_leftMappingButton);
-
-            TopAppBarService.SetLeftContent(container);
+            TopAppBarService.RegisterAction(LeftMappingButtonId, () => OnLeftMappingButtonClick());
+            TopAppBarService.SetLeftButtons(new[] { _leftMappingButton });
         }
 
         private void SetupRightMappingButton()
         {
             _rightMappingButton = null;
 
-            if (_currentShortcut == null)
+            if (_currentShortcut?.RightButton is not { } config || !config.IsEnabled)
             {
+                TopAppBarService.UnregisterAction(RightMappingButtonId);
                 return;
             }
 
-            var config = _currentShortcut.RightButton;
-            
-            // 如果未启用，不创建按钮
-            if (!config.IsEnabled)
-            {
-                return;
-            }
+            _rightMappingButton = BuildMappingButton(RightMappingButtonId, config);
 
-            // 根据图标类型创建图标
-            UIElement icon;
-            if (config.IconType == "Animated")
-            {
-                icon = CreateAnimatedIcon(config.AnimatedIconType);
-            }
-            else
-            {
-                var fontIcon = new FontIcon
-                {
-                    Glyph = config.StaticIconGlyph,
-                    FontFamily = new FontFamily("Segoe Fluent Icons"),
-                    FontSize = 16,
-                    Foreground = _topBarForegroundBrush
-                };
-                
-                icon = fontIcon;
-            }
-            
-            _rightMappingButton = new Button
-            {
-                Width = 40,
-                Height = 40,
-                Padding = new Thickness(0),
-                BorderThickness = new Thickness(0),
-                CornerRadius = new CornerRadius(4),
-                Content = icon,
-                Margin = new Thickness(0, 0, 4, 0)
-            };
-
-            // 设置按钮背景样式（与返回按钮一致）
-            var transparentColor = (Windows.UI.Color)Application.Current.Resources["SubtleFillColorTransparent"];
-            _rightMappingButton.Background = new SolidColorBrush(transparentColor);
-            _rightMappingButton.BackgroundSizing = BackgroundSizing.InnerBorderEdge;
-
-            // 设置悬停和按下状态的背景色
-            var resources = new ResourceDictionary();
-            var secondaryColor = (Windows.UI.Color)Application.Current.Resources["SubtleFillColorSecondary"];
-            var tertiaryColor = (Windows.UI.Color)Application.Current.Resources["SubtleFillColorTertiary"];
-            resources["ButtonBackgroundPointerOver"] = new SolidColorBrush(secondaryColor);
-            resources["ButtonBackgroundPressed"] = new SolidColorBrush(tertiaryColor);
-            _rightMappingButton.Resources = resources;
-
-            ToolTipService.SetToolTip(_rightMappingButton, config.Tooltip);
-            _rightMappingButton.Click += OnRightMappingButtonClick;
+            TopAppBarService.RegisterAction(RightMappingButtonId, () => OnRightMappingButtonClick());
         }
 
-        private Microsoft.UI.Xaml.Controls.AnimatedIcon CreateAnimatedIcon(string animatedIconType)
+        /// <summary>
+        /// 把一份映射按钮配置翻译成顶栏按钮【数据】。
+        /// 静态 / 动画二选一走 <see cref="TopBarButton"/> 的两个工厂；动画那条路组件内部
+        /// 会自己按指针按下/松开切 AnimatedIcon 的 Pressed / Normal 状态，
+        /// 页面不再需要持有 AnimatedIcon 实例去手动播放。
+        /// </summary>
+        private static TopBarButton BuildMappingButton(string id, KeyboardMappingButtonConfig config)
         {
-            var animatedIcon = new Microsoft.UI.Xaml.Controls.AnimatedIcon
-            {
-                Width = 16,
-                Height = 16,
-                Foreground = _topBarForegroundBrush
-            };
+            var fallbackGlyph = string.IsNullOrWhiteSpace(config.StaticIconGlyph)
+                ? "\uE8B5"
+                : config.StaticIconGlyph;
 
-            // 根据类型名创建对应的 Source
-            animatedIcon.Source = animatedIconType switch
-            {
-                "AnimatedAcceptVisualSource" => new Microsoft.UI.Xaml.Controls.AnimatedVisuals.AnimatedAcceptVisualSource(),
-                "AnimatedBackVisualSource" => new Microsoft.UI.Xaml.Controls.AnimatedVisuals.AnimatedBackVisualSource(),
-                "AnimatedChevronDownSmallVisualSource" => new Microsoft.UI.Xaml.Controls.AnimatedVisuals.AnimatedChevronDownSmallVisualSource(),
-                "AnimatedChevronRightDownSmallVisualSource" => new Microsoft.UI.Xaml.Controls.AnimatedVisuals.AnimatedChevronRightDownSmallVisualSource(),
-                "AnimatedChevronUpDownSmallVisualSource" => new Microsoft.UI.Xaml.Controls.AnimatedVisuals.AnimatedChevronUpDownSmallVisualSource(),
-                "AnimatedFindVisualSource" => new Microsoft.UI.Xaml.Controls.AnimatedVisuals.AnimatedFindVisualSource(),
-                "AnimatedGlobalNavigationButtonVisualSource" => new Microsoft.UI.Xaml.Controls.AnimatedVisuals.AnimatedGlobalNavigationButtonVisualSource(),
-                "AnimatedSettingsVisualSource" => new Microsoft.UI.Xaml.Controls.AnimatedVisuals.AnimatedSettingsVisualSource(),
-                _ => new Microsoft.UI.Xaml.Controls.AnimatedVisuals.AnimatedChevronDownSmallVisualSource() // 默认
-            };
-
-            // 设置状态为 Normal
-            Microsoft.UI.Xaml.Controls.AnimatedIcon.SetState(animatedIcon, "Normal");
-
-            return animatedIcon;
+            return string.Equals(config.IconType, "Animated", StringComparison.OrdinalIgnoreCase)
+                ? TopBarButton.OfAnimated(id, config.AnimatedIconType, config.Tooltip, fallbackGlyph)
+                : TopBarButton.Of(id, fallbackGlyph, config.Tooltip);
         }
 
-        private async void OnLeftMappingButtonClick(object sender, RoutedEventArgs e)
+        private async void OnLeftMappingButtonClick()
         {
             if (_currentShortcut == null || WebView?.CoreWebView2 == null)
             {
                 return;
             }
 
+            // 注：旧实现在这里手动播放 AnimatedIcon 的 Pressed→Normal；
+            // 新顶栏自建的按钮没有 Page 可以碰的元素实例，按下反馈由 AppTopBar 自己提供。
+
             var config = _currentShortcut.LeftButton;
-            
-            // 播放点击动画
-            if (_leftMappingButton?.Content is Microsoft.UI.Xaml.Controls.AnimatedIcon animatedIcon)
-            {
-                Microsoft.UI.Xaml.Controls.AnimatedIcon.SetState(animatedIcon, "Pressed");
-                await Task.Delay(200);
-                Microsoft.UI.Xaml.Controls.AnimatedIcon.SetState(animatedIcon, "Normal");
-            }
-            
-            // 发送快捷键到 WebView2
             await SendHotkeyToWebViewAsync(config.Key, config.Ctrl, config.Shift, config.Alt);
 
             System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 左侧按钮发送快捷键: {config.GetHotkeyDisplayText()}");
         }
 
-        private async void OnRightMappingButtonClick(object sender, RoutedEventArgs e)
+        private async void OnRightMappingButtonClick()
         {
             if (_currentShortcut == null || WebView?.CoreWebView2 == null)
             {
@@ -215,16 +92,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             }
 
             var config = _currentShortcut.RightButton;
-            
-            // 播放点击动画
-            if (_rightMappingButton?.Content is Microsoft.UI.Xaml.Controls.AnimatedIcon animatedIcon)
-            {
-                Microsoft.UI.Xaml.Controls.AnimatedIcon.SetState(animatedIcon, "Pressed");
-                await Task.Delay(200);
-                Microsoft.UI.Xaml.Controls.AnimatedIcon.SetState(animatedIcon, "Normal");
-            }
-            
-            // 发送快捷键到 WebView2
             await SendHotkeyToWebViewAsync(config.Key, config.Ctrl, config.Shift, config.Alt);
 
             System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 右侧按钮发送快捷键: {config.GetHotkeyDisplayText()}");

@@ -58,7 +58,8 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             }
 
             InitializeForegroundColors();
-            InitializeTopBar();
+            // 注：InitializeTopBar 已在 2026-10-02 删除 —— 顶栏只收【数据】，
+            // 页面不再预先构造标题/图标控件，SetupTopBar 时直接下发快照即可。
             InitializeBottomBarReactor(); // ✅ 初始化 Reactor 底部按钮栏
 
             // ⚠️ 不设置 BottomBarHost.Background，让 XAML 的 ThemeResource 生效
