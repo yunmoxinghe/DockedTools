@@ -98,6 +98,10 @@ namespace DockedTools.Features.Pages.Settings
             DiskCacheSizeBox.Value = ExperimentalSettings.DiskCacheSize;
             DiskCacheSizeBox.ValueChanged += OnDiskCacheSizeChanged;
 
+            WebNotificationsToggle.Toggled -= OnWebNotificationsToggled;
+            WebNotificationsToggle.IsOn = ExperimentalSettings.WebNotificationsEnabled;
+            WebNotificationsToggle.Toggled += OnWebNotificationsToggled;
+
             EnableHardwareAccelerationToggle.Toggled -= OnEnableHardwareAccelerationToggled;
             EnableHardwareAccelerationToggle.IsOn = ExperimentalSettings.EnableHardwareAcceleration;
             EnableHardwareAccelerationToggle.Toggled += OnEnableHardwareAccelerationToggled;
@@ -176,6 +180,18 @@ namespace DockedTools.Features.Pages.Settings
             {
                 ExperimentalSettings.DisableExtensions = toggle.IsOn;
                 RaiseWebViewPerformanceSettingsChanged();
+            }
+        }
+
+        private void OnWebNotificationsToggled(object sender, RoutedEventArgs e)
+        {
+            if (sender is ToggleSwitch toggle)
+            {
+                ExperimentalSettings.WebNotificationsEnabled = toggle.IsOn;
+
+                // 不用 RaiseWebViewPerformanceSettingsChanged：
+                // 桥接是在 CoreWebView2 初始化时挂的事件订阅，开关本身不需要重建 WebView ——
+                // 权限 requests 与回传都靠运行时读这个设置，下一次通知立刻生效。
             }
         }
 

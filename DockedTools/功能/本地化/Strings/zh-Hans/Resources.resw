@@ -884,6 +884,12 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   <data name="SettingsPage_DisablePluginsHeader.Description" xml:space="preserve">
     <value>禁用浏览器插件（需重启 WebView）</value>
   </data>
+  <data name="SettingsPage_WebNotificationsHeader.Header" xml:space="preserve">
+    <value>网页通知</value>
+  </data>
+  <data name="SettingsPage_WebNotificationsHeader.Description" xml:space="preserve">
+    <value>把网页发出的通知转投到 Windows 系统通知，并允许站点请求通知权限</value>
+  </data>
   <data name="SettingsPage_DiskCacheSizeHeader.Header" xml:space="preserve">
     <value>磁盘缓存大小</value>
   </data>
@@ -1062,7 +1068,7 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
     <value>Cookie 数据</value>
   </data>
   <data name="WebAppDetailPage_CookieHeader.Description" xml:space="preserve">
-    <value>查看和管理此应用的 Cookie（即将推出）</value>
+    <value>查看和管理此应用的 Cookie。所有网页应用共用一个数据目录，Cookie 也是共享的</value>
   </data>
   
   <!-- 网页应用详情页 - 键盘映射按钮 -->
@@ -1138,6 +1144,51 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   </data>
   <data name="WebAppDetailPage_CookieCount" xml:space="preserve">
     <value>{0} 个 Cookie</value>
+  </data>
+  <data name="WebAppDetailPage_CookieRefresh.Content" xml:space="preserve">
+    <value>刷新</value>
+  </data>
+  <data name="WebAppDetailPage_CookieClearSite.Content" xml:space="preserve">
+    <value>清除本站点</value>
+  </data>
+  <data name="WebAppDetailPage_CookieClearAll.Content" xml:space="preserve">
+    <value>清除全部</value>
+  </data>
+  <data name="WebAppDetailPage_CookieClearSiteTitle" xml:space="preserve">
+    <value>清除站点的 Cookie？</value>
+  </data>
+  <data name="WebAppDetailPage_CookieClearSiteContent" xml:space="preserve">
+    <value>会清除访问该网页地址时使用到的 Cookie，之后通常需要重新登录。</value>
+  </data>
+  <data name="WebAppDetailPage_CookieClearAllTitle" xml:space="preserve">
+    <value>清除所有网页应用的 Cookie？</value>
+  </data>
+  <data name="WebAppDetailPage_CookieClearAllContent" xml:space="preserve">
+    <value>所有网页应用共用一个数据目录，这一步会连带清掉其他网页应用的登录状态。</value>
+  </data>
+  <data name="WebAppDetailPage_CookieConfirmPrimary" xml:space="preserve">
+    <value>删除</value>
+  </data>
+  <data name="WebAppDetailPage_CookieConfirmCancel" xml:space="preserve">
+    <value>取消</value>
+  </data>
+  <data name="WebAppDetailPage_CookieCleared" xml:space="preserve">
+    <value>已清除 {0} 个 Cookie</value>
+  </data>
+  <data name="WebAppDetailPage_CookieClearedAll" xml:space="preserve">
+    <value>已清除全部 Cookie</value>
+  </data>
+  <data name="WebAppDetail_CookieExpiresSession" xml:space="preserve">
+    <value>本次会话结束时失效</value>
+  </data>
+  <data name="WebAppDetail_CookieExpiresUnknown" xml:space="preserve">
+    <value>未知</value>
+  </data>
+  <data name="WebAppDetail_CookieNoWebView" xml:space="preserve">
+    <value>暂时读不到 Cookie：需要至少有一个网页应用正在运行，Cookie 管理器挂在它的内核上。</value>
+  </data>
+  <data name="WebAppDetail_CookieBadUrl" xml:space="preserve">
+    <value>网页地址无效，无法查询 Cookie。</value>
   </data>
   
   <!-- 键盘映射按钮配置 -->

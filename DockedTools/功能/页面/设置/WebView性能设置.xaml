@@ -150,6 +150,16 @@
                     </controls:SettingsCard>
 
                     <controls:SettingsCard
+                        x:Uid="SettingsPage_WebNotificationsHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE91C;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <ToggleSwitch
+                            x:Name="WebNotificationsToggle"
+                            Toggled="OnWebNotificationsToggled"/>
+                    </controls:SettingsCard>
+
+                    <controls:SettingsCard
                         x:Uid="SettingsPage_DiskCacheSizeHeader">
                         <controls:SettingsCard.HeaderIcon>
                             <FontIcon Glyph="&#xE8B7;" />

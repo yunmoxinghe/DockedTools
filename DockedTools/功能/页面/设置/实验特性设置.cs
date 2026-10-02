@@ -41,6 +41,7 @@ namespace DockedTools.Features.Pages.Settings
         private const string WebViewDiskCacheSizeKey = "WebSettings_DiskCacheSize";
         private const string WebViewFastStartupModeKey = "WebSettings_FastStartupMode";
         private const string WebViewSingleProcessModeKey = "WebSettings_SingleProcessMode";
+        private const string WebViewNotificationsKey = "WebSettings_EnableWebNotifications";
         
         // WebView2 透明背景实验室
         private const string WebViewTransparencyModeKey = "WebSettings_TransparencyMode";
@@ -272,6 +273,21 @@ namespace DockedTools.Features.Pages.Settings
             // 保持旧开关与新模式一致，避免设置页 UI 与实际行为不同步
             SuspendInactiveWebView = next == WebViewIdlePowerMode.Suspend;
             return next;
+        }
+
+        /// <summary>
+        /// 获取或设置是否把网页的 Web Notification 转投成 Windows 系统通知。
+        ///
+        /// <para>默认关闭：开启意味着任何站点请求通知权限都会被放行，
+        /// 属于「一旦打开就静默扩大网页能力」的开关，交给用户点开比较合适。</para>
+        ///
+        /// <para>关着的时候网页连 requestPermission 都拿不到授权，
+        /// 也就轮不到通知桥接上场（详见 WebNotificationBridge.OnPermissionRequested）。</para>
+        /// </summary>
+        public static bool WebNotificationsEnabled
+        {
+            get => AotSafeSettingsHelper.GetBool(_localSettings, WebViewNotificationsKey, defaultValue: false);
+            set => AotSafeSettingsHelper.SetBool(_localSettings, WebViewNotificationsKey, value);
         }
 
         /// <summary>

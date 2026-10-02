@@ -1,4 +1,5 @@
 using DockedTools.Features.Pages.Settings;
+using DockedTools.Features.Pages.WebApp.Browser.Managers;
 using DockedTools.Features.UnifiedCalls.AsyncSafety;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -20,6 +21,14 @@ namespace DockedTools.Features.Pages.WebApp.Browser
     /// </summary>
     public sealed partial class WebBrowserPage
     {
+        /// <summary>
+        /// 取本页当前的内核引用。
+        /// WebView 是 XAML 私有元素，外部（WebViewManager / Cookie 服务）要借用内核能力
+        /// 只能走这里。刻意不做任何初始化 —— 没初始化就返回 null，调用方按「拿不到」处理，
+        /// 而不是替它偷偷 EnableCoreWebView2（那会凭空拉起一个浏览器进程）。
+        /// </summary>
+        public CoreWebView2? GetCoreWebView2() => WebView?.CoreWebView2;
+
         private async Task EnsureWebViewInitializedAsync()
         {
             if (WebView == null)
@@ -61,6 +70,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 
                 // ⭐ 订阅新窗口请求事件
                 WebView.CoreWebView2.NewWindowRequested += CoreWebView2_NewWindowRequested;
+                
+                // ⭐ 网页通知 → 系统通知的桥接（内部幂等，重复订阅安全）
+                Services.WebNotificationBridge.Attach(WebView.CoreWebView2);
                 
                 // ⭐ 任务 3.2：订阅 ProcessFailed 事件（防止重复订阅）
                 WebView.CoreWebView2.ProcessFailed -= CoreWebView2_ProcessFailed;
@@ -179,6 +191,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     
                     // ⭐ 订阅新窗口请求事件
                     WebView.CoreWebView2.NewWindowRequested += CoreWebView2_NewWindowRequested;
+                    
+                    // ⭐ 网页通知 → 系统通知的桥接（内部幂等，重复订阅安全）
+                    Services.WebNotificationBridge.Attach(WebView.CoreWebView2);
                     
                     // ⭐ 任务 3.2：订阅 ProcessFailed 事件
                     WebView.CoreWebView2.ProcessFailed += CoreWebView2_ProcessFailed;

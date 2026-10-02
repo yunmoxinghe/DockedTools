@@ -854,6 +854,12 @@ Error Message: {1}</value>
   <data name="SettingsPage_DisablePluginsHeader.Description" xml:space="preserve">
     <value>Disable browser plugins (requires WebView restart)</value>
   </data>
+  <data name="SettingsPage_WebNotificationsHeader.Header" xml:space="preserve">
+    <value>Web Notifications</value>
+  </data>
+  <data name="SettingsPage_WebNotificationsHeader.Description" xml:space="preserve">
+    <value>Relay web notifications to Windows system notifications and let sites request notification permission</value>
+  </data>
   <data name="SettingsPage_DiskCacheSizeHeader.Header" xml:space="preserve">
     <value>Disk Cache Size</value>
   </data>
@@ -1056,7 +1062,7 @@ Error Message: {1}</value>
     <value>Cookie Data</value>
   </data>
   <data name="WebAppDetailPage_CookieHeader.Description" xml:space="preserve">
-    <value>View and manage cookies for this app (Coming Soon)</value>
+    <value>View and manage cookies for this app. All web apps share one data folder, so cookies are shared too</value>
   </data>
   
   <!-- Web App Detail Page - Keyboard Mapping Buttons -->
@@ -1132,6 +1138,51 @@ Error Message: {1}</value>
   </data>
   <data name="WebAppDetailPage_CookieCount" xml:space="preserve">
     <value>{0} Cookies</value>
+  </data>
+  <data name="WebAppDetailPage_CookieRefresh.Content" xml:space="preserve">
+    <value>Refresh</value>
+  </data>
+  <data name="WebAppDetailPage_CookieClearSite.Content" xml:space="preserve">
+    <value>Clear This Site</value>
+  </data>
+  <data name="WebAppDetailPage_CookieClearAll.Content" xml:space="preserve">
+    <value>Clear All</value>
+  </data>
+  <data name="WebAppDetailPage_CookieClearSiteTitle" xml:space="preserve">
+    <value>Clear cookies for this site?</value>
+  </data>
+  <data name="WebAppDetailPage_CookieClearSiteContent" xml:space="preserve">
+    <value>This clears the cookies used when visiting this web address; you will usually need to sign in again.</value>
+  </data>
+  <data name="WebAppDetailPage_CookieClearAllTitle" xml:space="preserve">
+    <value>Clear cookies for every web app?</value>
+  </data>
+  <data name="WebAppDetailPage_CookieClearAllContent" xml:space="preserve">
+    <value>All web apps share one data folder, so this also signs every other web app out.</value>
+  </data>
+  <data name="WebAppDetailPage_CookieConfirmPrimary" xml:space="preserve">
+    <value>Delete</value>
+  </data>
+  <data name="WebAppDetailPage_CookieConfirmCancel" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+  <data name="WebAppDetailPage_CookieCleared" xml:space="preserve">
+    <value>{0} cookies cleared</value>
+  </data>
+  <data name="WebAppDetailPage_CookieClearedAll" xml:space="preserve">
+    <value>All cookies cleared</value>
+  </data>
+  <data name="WebAppDetail_CookieExpiresSession" xml:space="preserve">
+    <value>Expires at end of session</value>
+  </data>
+  <data name="WebAppDetail_CookieExpiresUnknown" xml:space="preserve">
+    <value>Unknown</value>
+  </data>
+  <data name="WebAppDetail_CookieNoWebView" xml:space="preserve">
+    <value>Cookies cannot be read right now: at least one web app must be running, since the cookie manager lives on its CoreWebView2.</value>
+  </data>
+  <data name="WebAppDetail_CookieBadUrl" xml:space="preserve">
+    <value>The web address is invalid, so cookies cannot be queried.</value>
   </data>
   
   <!-- Keyboard Mapping Configuration -->
