@@ -451,7 +451,7 @@ namespace DockedTools.Features.Pages.Settings
         protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
         {
             base.OnNavigatedTo(e);
-            _智能标题.Setup(SettingsScrollViewer, PageTitleBlock);
+            _智能标题.Setup(this, SettingsScrollViewer, PageTitleBlock);
             
             System.Diagnostics.Debug.WriteLine($"[SettingsPage] OnNavigatedTo - NavigationMode: {e.NavigationMode}");
             

@@ -46,7 +46,7 @@ namespace DockedTools.Features.Pages.Home
         protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
         {
             base.OnNavigatedTo(e);
-            _智能标题.Setup(HomeScrollViewer, PageTitleBlock);
+            _智能标题.Setup(this, HomeScrollViewer, PageTitleBlock);
         }
 
         protected override void OnNavigatedFrom(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)

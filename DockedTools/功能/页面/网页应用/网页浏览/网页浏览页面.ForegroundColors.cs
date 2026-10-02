@@ -86,10 +86,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             
             // 重新从主题资源获取颜色
             UpdateForegroundColorsFromTheme();
-            
-            // ✅ 立即更新 TopAppBar 的前景色（包括关闭按钮等）
-            TopAppBarService.SetForeground(_topBarForegroundBrush);
-            System.Diagnostics.Debug.WriteLine("[WebBrowserPage] TopAppBar 前景色已更新");
+
+            // 注：旧实现在这里把 _topBarForegroundBrush 塞进顶栏改按钮前景色。
+            // 新顶栏的前景色由它自己的主题资源 + RequestedTheme 决定（各页不再各画一套），
+            // 所以这里不再下发画刷；底栏仍是页面自绘的 Reactor 组件，保持原样。
             
             // 应用系统主题的默认颜色
             ApplySystemThemeColors();

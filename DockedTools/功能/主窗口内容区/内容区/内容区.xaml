@@ -5,11 +5,36 @@
     xmlns:controls="using:Microsoft.UI.Xaml.Controls"
     xmlns:animations="using:Microsoft.UI.Xaml.Media.Animation"
     xmlns:media="using:Microsoft.UI.Xaml.Media"
-    xmlns:topAppBar="using:DockedTools.Features.UnifiedCalls.TopAppBar"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
     UseLayoutRounding="True">
+
+    <!--
+        顶栏底衬的材质资源。
+        2026-10-02：Reactor 版 AppTopBar 不再自画材质 —— 它只上抛"要不要底衬"的
+        意图（TopBarEvent.Material），真正的材质由本区域订阅后刷在这一层 Border 上
+        （旧 XAML 版 TopAppBarControl 的 ThemeResources，这里就地接手）。
+
+        两支画刷【平铺】而不是放进 ThemeDictionaries：顶栏有自己的局部主题
+        （TopAppBarService.SetTheme），这里的元素主题未必等于顶栏主题；
+        而且 WinUI 对 ThemeDictionaries 里的 AcrylicBrush 在主题翻转时不一定重新求值，
+        由代码按 TopAppBarService.GetActualTheme() 显式选才是可靠的。
+    -->
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <AcrylicBrush x:Key="TopAppBarAcrylicBrushLight"
+                          TintColor="#F3F3F3"
+                          TintOpacity="0.5"
+                          TintLuminosityOpacity="0.85"
+                          FallbackColor="#F3F3F3" />
+            <AcrylicBrush x:Key="TopAppBarAcrylicBrushDark"
+                          TintColor="#2C2C2C"
+                          TintOpacity="0.8"
+                          TintLuminosityOpacity="0.96"
+                          FallbackColor="#2C2C2C" />
+        </ResourceDictionary>
+    </UserControl.Resources>
 
     <Grid UseLayoutRounding="True">
         <!-- Z轴下层：系统背景元素 - 亚克力 -->
@@ -93,11 +118,23 @@
                 VerticalAlignment="Stretch"
                 IsHitTestVisible="False" />
 
-            <!-- 第三层：顶部应用栏（独立控件管理 UI） -->
-            <topAppBar:TopAppBarControl
-                x:Name="TopAppBarHost"
-                HorizontalAlignment="Stretch"
-                VerticalAlignment="Top" />
+            <!--
+                第三层：顶部应用栏。原先这里是 XAML 控件 TopAppBarControl 自画 UI，
+                现已换成 Reactor 组件 AppTopBar，因此这里拆成两段：
+                  ① 材质层 —— 本控件负责：订阅顶栏的材质意图消息后显隐；
+                  ② 宿主容器 —— TopBarHost 经 ReactorHostControl 挂载到这里。
+            -->
+            <Border x:Name="TopBarMaterialLayer"
+                    Height="48"
+                    HorizontalAlignment="Stretch"
+                    VerticalAlignment="Top"
+                    IsHitTestVisible="False"
+                    Visibility="Collapsed" />
+
+            <Grid x:Name="TopBarHostContainer"
+                  HorizontalAlignment="Stretch"
+                  VerticalAlignment="Top"
+                  Height="48" />
             </Grid>
         </Grid>
     </Border>

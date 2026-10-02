@@ -45,7 +45,7 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
         protected override void OnNavigatedTo(NavigationEventArgs e)
         {
             base.OnNavigatedTo(e);
-            _智能标题.Setup(PageScrollViewer, PageTitleBlock);
+            _智能标题.Setup(this, PageScrollViewer, PageTitleBlock);
             
             // ⭐ 重新启用缓存（因为从详情页返回时需要保持状态）
             if (NavigationCacheMode == NavigationCacheMode.Disabled)

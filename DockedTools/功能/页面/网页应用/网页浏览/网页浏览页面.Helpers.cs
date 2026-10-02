@@ -129,50 +129,52 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             }
         }
 
-        private async Task ShowShortcutIconAsync(byte[]? iconBytes)
+        /// <summary>
+        /// 把快捷方式图标交给顶栏：先把字节落到临时目录，再把【文件 Uri】作为位图图标下发。
+        /// 为什么不直接给字节：顶栏契约只认 <see cref="BitmapCenterIcon"/>（一个 Uri），
+        /// 而且页面不该把 Image/字节流这种 UI 概念塞进契约里 —— 落盘这一步换来的是
+        /// "页面只给数据、渲染全在组件里"。
+        /// </summary>
+        private async Task PublishShortcutIconAsync(byte[]? iconBytes)
         {
             if (iconBytes is not { Length: > 0 })
             {
-                ShowFallbackIcon();
+                _topBarIconPath = null;
+                PublishTopBarCenter();
                 return;
             }
 
             try
             {
-                var bitmap = new BitmapImage();
-                using var stream = new InMemoryRandomAccessStream();
-                await stream.WriteAsync(iconBytes.AsBuffer());
-                stream.Seek(0);
-                await bitmap.SetSourceAsync(stream);
+                var directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "DockedTools", "ShortcutIcons");
+                System.IO.Directory.CreateDirectory(directory);
 
-                if (_topBarIcon != null)
+                // 用内容哈希做文件名：同一份图标不重复写，也天然避开多实例写同一个文件
+                var hash = System.Security.Cryptography.SHA256.HashData(iconBytes);
+                var name = Convert.ToHexString(hash)[..16];
+                var path = System.IO.Path.Combine(directory, name + GuessIconExtension(iconBytes));
+
+                if (!System.IO.File.Exists(path))
                 {
-                    _topBarIcon.Source = bitmap;
-                    _topBarIcon.Visibility = Visibility.Visible;
+                    await System.IO.File.WriteAllBytesAsync(path, iconBytes);
                 }
-                if (_topBarIconFallback != null)
-                {
-                    _topBarIconFallback.Visibility = Visibility.Collapsed;
-                }
+
+                _topBarIconPath = path;
             }
-            catch
+            catch (Exception ex)
             {
-                ShowFallbackIcon();
+                System.Diagnostics.Debug.WriteLine($"[PublishShortcutIconAsync] 图标落盘失败: {ex.Message}");
+                _topBarIconPath = null;
             }
+
+            PublishTopBarCenter();
         }
 
-        private void ShowFallbackIcon()
-        {
-            if (_topBarIcon != null)
-            {
-                _topBarIcon.Source = null;
-                _topBarIcon.Visibility = Visibility.Collapsed;
-            }
-            if (_topBarIconFallback != null)
-            {
-                _topBarIconFallback.Visibility = Visibility.Visible;
-            }
-        }
+        /// <summary>按文件头猜扩展名（快捷方式图标只有 PNG / ICO 两种）。</summary>
+        private static string GuessIconExtension(byte[] bytes) =>
+            bytes.Length > 4 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47
+                ? ".png"
+                : ".ico";
 
 
         private void HandleDoubleClick()
@@ -300,12 +302,12 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         }
 
         /// <summary>
-        /// 恢复共享顶部栏背景（页面离开时调用）
+        /// 恢复共享顶部栏状态（页面离开时调用）。
+        /// 注：新顶栏不再支持"外部塞一支画刷改背景/前景色"（顶栏的外观现在由主题资源 +
+        /// 组件自己负责，避免各页各画一套），所以这里只复位底衬开关。
         /// </summary>
         private static void RestoreSharedTopAppBarBackground()
         {
-            TopAppBarService.ResetBackground();
-            TopAppBarService.ResetForeground();
             TopAppBarService.ResetChromeVisibility();
         }
     }

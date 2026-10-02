@@ -16,7 +16,7 @@ namespace DockedTools.Features.Pages.AI
         protected override void OnNavigatedTo(NavigationEventArgs e)
         {
             base.OnNavigatedTo(e);
-            _智能标题.Setup(AIScrollViewer, PageTitleBlock);
+            _智能标题.Setup(this, AIScrollViewer, PageTitleBlock);
         }
 
         protected override void OnNavigatedFrom(NavigationEventArgs e)

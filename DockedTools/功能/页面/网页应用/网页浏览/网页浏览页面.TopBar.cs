@@ -1,203 +1,104 @@
+using System;
+using System.Collections.Generic;
 using DockedTools.Features.Pages.Settings;
 using DockedTools.Features.UnifiedCalls.TopAppBar;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
 
 namespace DockedTools.Features.Pages.WebApp.Browser
 {
     /// <summary>
     /// 网页浏览页面 - 顶部栏管理模块
-    /// 包含顶部栏UI初始化、内容更新、按钮设置等
+    /// 2026-10-02：顶栏换成 Reactor 版 AppTopBar，本模块从"自己拼 UI"改为"下发顶栏状态"：
+    /// 只提供标题文本/图标路径与一组按钮数据，外观与动画全部交给 AppTopBar。
     /// </summary>
     public sealed partial class WebBrowserPage
     {
-        private void InitializeTopBar()
+        // 左/右两侧映射按钮的固定 Id（用来让服务把 Clicked 事件分派回来）
+        private const string LeftMappingButtonId = "__browser_left_mapping";
+        private const string RightMappingButtonId = "__browser_right_mapping";
+        private const string UnpinButtonId = "__browser_unpin";
+
+        /// <summary>
+        /// 更新居中位。新契约下页面给出的是【标题数据】而不是 UIElement：
+        /// 只有文本 + 可选的位图/字形图标，其余（省略号、图标压到 16px、换字动画）
+        /// 全部由 <c>AppTopBar</c> 保证。
+        /// </summary>
+        private void PublishTopBarCenter()
         {
-            // 创建居中的标签页内容
-            _topBarContent = new StackPanel
+            // 本方法会被异步回调（网页标题变化、图标落盘完成）触发，那时本页可能【已经切走】，
+            // 顶栏的写入目标是新前台页 —— 照发下去会永久覆盖人家那份 state 里的标题。
+            // 文本照常记在 _topBarTitleText 上：回到本页时作用域重新上台会带着它，不会丢。
+            if (!TopAppBarService.IsWritingTarget(this))
             {
-                Orientation = Orientation.Horizontal,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-                Spacing = 8
-            };
+                return;
+            }
 
-            // 创建图标容器
-            var iconViewbox = new Viewbox
-            {
-                Width = 16,
-                Height = 16,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-
-            var iconGrid = new Grid
-            {
-                Width = 16,
-                Height = 16
-            };
-
-            _topBarIcon = new Image
-            {
-                Stretch = Stretch.UniformToFill,
-                Visibility = Visibility.Collapsed
-            };
-
-            _topBarIconFallback = new FontIcon
-            {
-                Glyph = "\uE774",
-                Width = 16,
-                Height = 16,
-                FontSize = 14,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-
-            iconGrid.Children.Add(_topBarIcon);
-            iconGrid.Children.Add(_topBarIconFallback);
-            iconViewbox.Child = iconGrid;
-
-            // 创建标题文本
-            _topBarTitle = new TextBlock
-            {
-                TextTrimming = TextTrimming.CharacterEllipsis,
-                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                TextWrapping = TextWrapping.NoWrap,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-                MaxWidth = 300
-            };
-
-            _topBarContent.Children.Add(iconViewbox);
-            _topBarContent.Children.Add(_topBarTitle);
-
-            // 创建取消固定按钮
-            // 右侧按钮由独立顶部栏统一创建，避免页面自管导致尺寸/裁切不一致。
+            var icon = string.IsNullOrEmpty(_topBarIconPath)
+                ? null
+                : TopBarCenterIcon.OfBitmap(_topBarIconPath);
+            TopAppBarService.SetTitle(_topBarTitleText, icon);
         }
 
         private void SetupTopBar()
         {
-            System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] SetupTopBar 被调用");
-            System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] _topBarContent.Children.Count = {_topBarContent?.Children.Count}");
-            
-            // 在页面加载后设置顶部栏
-            TopAppBarService.SetCenterContent(_topBarContent);
-            
-            // 设置左侧键盘映射按钮
+            // 标题 / 图标已由各自的 setter 写进 _topBarTitleText / _topBarIconPath，
+            // 这里统一汇总成一份快照下发
+            PublishTopBarCenter();
+
             SetupLeftMappingButton();
-            
-            // 设置右侧内容（映射按钮 + 关闭按钮）
             SetupRightContent();
-            
-            TopAppBarService.SetForeground(_topBarForegroundBrush);
+
             TopAppBarService.IsVisible = true;
-            
-            System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 顶部栏内容已设置，IsVisible = true");
-            System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] TopAppBarService.IsVisible = {TopAppBarService.IsVisible}");
-            
+            // 沉浸式：不要顶栏自己的底衬，让网页内容直接顶到顶栏下沿
             TopAppBarService.SetChromeVisible(false);
-            
-            // 恢复标题和图标（如果已有数据）
-            UpdateTopBarContent();
         }
-        
+
         private void UpdateTopBarContent()
         {
-            System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] UpdateTopBarContent 被调用");
-            System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] _topBarTitle = {(_topBarTitle != null ? "not null" : "null")}");
-            System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] _currentShortcut = {(_currentShortcut != null ? "not null" : "null")}");
-            
-            // 更新标题
-            if (_topBarTitle != null && _currentShortcut != null)
+            // 优先用网页标题，回落为快捷方式名 / URL 的 Host
+            if (_currentShortcut != null)
             {
-                if (WebView?.CoreWebView2 != null && !string.IsNullOrWhiteSpace(WebView.CoreWebView2.DocumentTitle))
-                {
-                    // 如果有网页标题，使用网页标题
-                    _topBarTitle.Text = WebView.CoreWebView2.DocumentTitle;
-                    System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 标题设置为网页标题: {_topBarTitle.Text}");
-                }
-                else
-                {
-                    // 否则使用快捷方式名称或 URL
-                    _topBarTitle.Text = string.IsNullOrWhiteSpace(_currentShortcut.Name) 
-                        ? (_pendingNavigationUri?.Host ?? _currentShortcut.Url) 
+                var documentTitle = WebView?.CoreWebView2?.DocumentTitle;
+                _topBarTitleText = !string.IsNullOrWhiteSpace(documentTitle)
+                    ? documentTitle
+                    : string.IsNullOrWhiteSpace(_currentShortcut.Name)
+                        ? (_pendingNavigationUri?.Host ?? _currentShortcut.Url)
                         : _currentShortcut.Name;
-                    System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 标题设置为快捷方式名称: {_topBarTitle.Text}");
-                }
+
+                PublishTopBarCenter();
             }
-            else
+
+            if (_currentShortcut?.IconBytes is { Length: > 0 } iconBytes)
             {
-                System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 无法更新标题：_topBarTitle 或 _currentShortcut 为 null");
-            }
-            
-            // 更新图标（如果已有数据）
-            if (_currentShortcut != null && _currentShortcut.IconBytes != null && _currentShortcut.IconBytes.Length > 0)
-            {
-                System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 显示快捷方式图标");
-                _ = ShowShortcutIconAsync(_currentShortcut.IconBytes);
-            }
-            else
-            {
-                System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 无图标数据");
+                _ = PublishShortcutIconAsync(iconBytes);
             }
         }
 
         private void SetupRightContent()
         {
-            var container = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                Spacing = 4
-            };
+            // 右侧 = 映射按钮（可选）+ 关闭按钮（可选）。
+            // 以前这里要手搓两个 Button 的背景/圆角/悬浮色，现在只发数据。
+            //
+            // 先重建右侧映射按钮的数据（它只填 _rightMappingButton 与回调，
+            // 真正的下发在本方法末尾统一做一次），否则 _rightMappingButton 会一直是旧值/null。
+            SetupRightMappingButton();
 
-            // 1. 添加右侧映射按钮（如果启用）
-            if (_currentShortcut?.RightButton.IsEnabled == true)
+            var buttons = new List<TopBarButton>();
+
+            if (_rightMappingButton is { } right)
             {
-                SetupRightMappingButton();
-                if (_rightMappingButton != null)
-                {
-                    container.Children.Add(_rightMappingButton);
-                }
+                buttons.Add(right);
             }
 
-            // 2. 添加关闭按钮（如果未隐藏）
             if (!ExperimentalSettings.HideWebViewCloseButton)
             {
-                _unpinButton = new Button
-                {
-                    Width = 40,
-                    Height = 40,
-                    Padding = new Thickness(0),
-                    BorderThickness = new Thickness(0),
-                    CornerRadius = new CornerRadius(4),
-                    Content = new FontIcon
-                    {
-                        Glyph = "\uE733",
-                        FontSize = 16,
-                        Foreground = _topBarForegroundBrush
-                    }
-                };
-
-                // 设置按钮背景样式（与返回按钮一致）
-                var transparentColor = (Windows.UI.Color)Application.Current.Resources["SubtleFillColorTransparent"];
-                _unpinButton.Background = new SolidColorBrush(transparentColor);
-                _unpinButton.BackgroundSizing = BackgroundSizing.InnerBorderEdge;
-
-                // 设置悬停和按下状态的背景色
-                var resources = new ResourceDictionary();
-                var secondaryColor = (Windows.UI.Color)Application.Current.Resources["SubtleFillColorSecondary"];
-                var tertiaryColor = (Windows.UI.Color)Application.Current.Resources["SubtleFillColorTertiary"];
-                resources["ButtonBackgroundPointerOver"] = new SolidColorBrush(secondaryColor);
-                resources["ButtonBackgroundPressed"] = new SolidColorBrush(tertiaryColor);
-                _unpinButton.Resources = resources;
-
-                ToolTipService.SetToolTip(_unpinButton, "关闭");
-                _unpinButton.Click += CloseButton_Click;
-                container.Children.Add(_unpinButton);
+                // 与旧版同一个字形（取消固定/关闭），避免换图标造成观感变化
+                buttons.Add(TopBarButton.Of(UnpinButtonId, "\uE733", "关闭"));
+                TopAppBarService.RegisterAction(UnpinButtonId, () => CloseButton_Click(null!, null!));
             }
 
-            // 设置到右侧面板
-            TopAppBarService.SetRightContent(container.Children.Count > 0 ? container : null);
+            TopAppBarService.SetRightButtons(buttons.Count > 0 ? buttons : null);
         }
     }
 }

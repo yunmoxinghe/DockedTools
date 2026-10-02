@@ -38,7 +38,7 @@ namespace DockedTools.Features.Pages.New
         protected override void OnNavigatedTo(NavigationEventArgs e)
         {
             base.OnNavigatedTo(e);
-            _智能标题.Setup(CreateScrollViewer, PageTitleBlock);
+            _智能标题.Setup(this, CreateScrollViewer, PageTitleBlock);
 
             System.Diagnostics.Debug.WriteLine($"NewPage.OnNavigatedTo called with parameter: {e.Parameter}");
 

@@ -1,3 +1,4 @@
+using DockedTools.Features.UnifiedCalls.TopAppBar;
 using Microsoft.UI;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -29,9 +30,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         private int _unresponsiveCount; // ⭐ 任务 3.4：记录 RenderProcessUnresponsive 连续次数
         private bool _isRecoveringWebView; // ⭐ 任务 3.5：防重入 guard，多个进程事件同时触发时只执行一次恢复
 
-        // 键盘映射按钮
-        private Button? _leftMappingButton;
-        private Button? _rightMappingButton;
+        // 键盘映射按钮：2026-10-02 起顶栏收的是【按钮数据】而不是 Button 实例，
+        // 页面不再自己 new Button / 自己配悬停色 —— 外观统一由 AppTopBar 负责。
+        private TopBarButton? _leftMappingButton;
+        private TopBarButton? _rightMappingButton;
 
         // ✅ 修复：初始背景色完全透明，避免黑色闪现
         // 首次采样后会立即设置为正确的颜色
@@ -49,11 +51,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         private Microsoft.UI.Reactor.Hosting.ReactorHostControl? _reactorHostControl;
         private Components.BottomButtonBar? _bottomButtonBarComponent;
         
-        // 顶部栏UI元素
-        private StackPanel? _topBarContent;
-        private Image? _topBarIcon;
-        private FontIcon? _topBarIconFallback;
-        private TextBlock? _topBarTitle;
-        private Button? _unpinButton;
+        // 顶部栏状态：页面只有【数据】（标题文本 + 图标文件路径），
+        // 换行/省略号/换字动画这些渲染细节都在 AppTopBar 那一侧。
+        private string _topBarTitleText = string.Empty;
+        private string? _topBarIconPath;
     }
 }

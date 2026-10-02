@@ -70,37 +70,99 @@ namespace DockedTools.Features.MainWindowContent.ContentArea
         public Grid OverlayContainer => OverlayLayer;
 
         /// <summary>
-        /// 顶部应用栏独立控件
+        /// 本内容区顶栏的那一条通道。
+        /// 2026-10-02：Reactor 版顶栏取代 XAML 版 TopAppBarControl 后，"谁决定顶栏长什么样"
+        /// 与"谁把顶栏画出来"彻底分开 —— 通道是二者的唯一接缝：
+        ///   · 转接层（TopAppBarService）往里下发 TopBarSnapshot；
+        ///   · Reactor 宿主（TopBarHost）订阅它并渲染 AppTopBar；
+        ///   · 顶栏的事件从这里上行。
         /// </summary>
-        public TopAppBarControl TopAppBar => TopAppBarHost;
+        public TopBarChannel TopBarChannel { get; } = new TopBarChannel();
+
+        // Reactor 组件的 WinUI 承载控件（与底部按钮栏同一套套路）
+        private readonly Microsoft.UI.Reactor.Hosting.ReactorHostControl _topBarReactorHost = new()
+        {
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+        };
 
         /// <summary>
-        /// 顶部应用栏背景容器，保留给需要定制背景的页面使用
-        /// </summary>
-        public Grid TopAppBarBackground => TopAppBarHost.AppBarBackground;
-
-        /// <summary>
-        /// 顶部应用栏左侧面板
-        /// </summary>
-        public StackPanel TopBarLeft => TopAppBarHost.LeftContentPanel;
-
-        /// <summary>
-        /// 顶部应用栏右侧面板
-        /// </summary>
-        public StackPanel TopBarRight => TopAppBarHost.RightContentPanel;
-
-        /// <summary>
-        /// 顶部应用栏中间内容
-        /// </summary>
-        public ContentPresenter TopBarCenter => TopAppBarHost.CenterContent;
-
-        /// <summary>
-        /// 显示或隐藏顶部应用栏（带淡入淡出动画）
+        /// 显示或隐藏顶部应用栏（具体显隐动画由 AppTopBar 组件负责）。
         /// </summary>
         public bool IsTopBarVisible
         {
-            get => TopAppBarHost.IsAppBarVisible;
-            set => TopAppBarHost.IsAppBarVisible = value;
+            get => TopAppBarService.IsVisible;
+            set => TopAppBarService.IsVisible = value;
+        }
+
+        private bool _topBarMaterialWanted;
+
+        // hub 是【进程级单例】，而这里要拿的是本内容区自己的材质层 ——
+        // 订阅必须存成字段并在 Unloaded 时摘掉，否则：
+        //   · 本内容区被 hub 静态钉住，重建一次就多一份；
+        //   · 多个内容区（多窗口）会同时响应同一条材质意图，错的那个也跟着改。
+        private Action<TopBarEvent>? _topBarMaterialHandler;
+
+        // ── 材质层：顶栏只上抛"要不要底衬"的意图，画在这里 ────────────
+        // AppTopBar 自己不挂任何材质画刷（Reactor 树里 in-app 亚克力采样源落空 ⇒ 只剩 tint
+        // ⇒ 发白），所以它把意图转成 TopBarEvent.Material 广播出来，由这一段落地。
+        private void InitializeTopBarMaterial()
+        {
+            _topBarMaterialHandler = e =>
+            {
+                if (e is not TopBarEvent.Material material)
+                {
+                    return;
+                }
+
+                _topBarMaterialWanted = material.Wanted;
+                ApplyTopBarMaterial();
+            };
+            TopBarMessageHub.Instance.EventReceived += _topBarMaterialHandler;
+
+            Unloaded += (_, _) =>
+            {
+                if (_topBarMaterialHandler is { } handler)
+                {
+                    TopBarMessageHub.Instance.EventReceived -= handler;
+                    _topBarMaterialHandler = null;
+                }
+            };
+
+            // 系统亮/暗翻转：顶栏走跟随模式（System）时 tint 要跟着换。
+            // 这条是元素自己的主题变化的兜底 —— 顶栏【手动】换主题走的是上面那条
+            // （AppTopBar 在主题提交后会补发一条 Material 意图）。
+            TopBarMaterialLayer.ActualThemeChanged += (_, _) => ApplyTopBarMaterial();
+
+            ApplyTopBarMaterial();
+        }
+
+        /// <summary>
+        /// 按顶栏意图落地材质层：显隐 + 按【顶栏当前实际主题】选 tint 画刷。
+        /// 走 GetActualTheme 而不是本元素的 ActualTheme —— 顶栏可以有自己的局部主题，
+        /// 与本区域继承来的主题未必一致。
+        /// </summary>
+        private void ApplyTopBarMaterial()
+        {
+            TopBarMaterialLayer.Visibility = _topBarMaterialWanted ? Visibility.Visible : Visibility.Collapsed;
+            if (!_topBarMaterialWanted)
+            {
+                return;
+            }
+
+            // 顶栏显式指定了 → 按它；跟随模式（System）→ 用本元素实际生效的主题推导
+            // （比读 UISettings 准：应用本身可以锁定主题而不跟系统走）。
+            var requested = TopAppBarService.GetRequestedTheme();
+            var dark = requested != Microsoft.UI.Xaml.ElementTheme.Default
+                ? requested == Microsoft.UI.Xaml.ElementTheme.Dark
+                : TopBarMaterialLayer.ActualTheme == Microsoft.UI.Xaml.ElementTheme.Dark;
+
+            var key = dark ? "TopAppBarAcrylicBrushDark" : "TopAppBarAcrylicBrushLight";
+
+            if (Resources[key] is Microsoft.UI.Xaml.Media.Brush brush)
+            {
+                TopBarMaterialLayer.Background = brush;
+            }
         }
 
         private UIElement? _pageTitle;
@@ -156,8 +218,15 @@ namespace DockedTools.Features.MainWindowContent.ContentArea
             System.Diagnostics.Debug.WriteLine("[ContentArea] NavigationService 初始化完成");
             
             ContentGrid.Loaded += ContentGrid_Loaded;
-            TopAppBarHost.BackButtonClicked += TopAppBarHost_BackButtonClicked;
-            TopAppBarHost.MenuButtonClicked += TopAppBarHost_MenuButtonClicked;
+
+            // 挂载 Reactor 版顶栏：宿主读同一条通道，服务往这条通道下发快照
+            _topBarReactorHost.Mount(new TopBarHost { Channel = TopBarChannel });
+            TopBarHostContainer.Children.Add(_topBarReactorHost);
+            InitializeTopBarMaterial();
+
+            // 顶栏的返回按钮由上行的 TopBarEvent.Clicked(Back) 转出，导航决策仍在这里做
+            TopAppBarService.BackButtonClicked += OnTopBarBackButtonClicked;
+            TopAppBarService.MenuButtonClicked += TopAppBarHost_MenuButtonClicked;
             System.Diagnostics.Debug.WriteLine("[ContentArea] 事件订阅完成");
             
             // 订阅 WebViewManager 的淘汰事件
@@ -192,47 +261,18 @@ namespace DockedTools.Features.MainWindowContent.ContentArea
         public event EventHandler? MenuButtonClicked;
 
         /// <summary>
-        /// 智能刷新返回按钮：根据 CanGoBack 自动显示/隐藏（带淡入淡出动画）。
-        /// 返回按钮在独立的第四层，不依赖顶栏背景容器，顶栏显隐由页面自行控制。
+        /// 【导航层专用】返回栈变了之后刷新返回按钮。
+        /// 返回按钮【只由 CanGoBack 决定】，页面没有任何途径干预它 —— 这是本区域
+        /// 对顶栏保留的唯一裁决权，与窗口左上角的返回永远保持一致。
         /// </summary>
-        public void RefreshBackButton()
-        {
-            TopAppBarHost.SetBackButtonVisible(ContentFrame.CanGoBack);
-        }
-
-        /// <summary>
-        /// 强制设置返回按钮可见性，用于页面自行管理顶部栏时覆盖默认行为。
-        /// </summary>
-        public void SetBackButtonVisible(bool visible)
-        {
-            TopAppBarHost.SetBackButtonVisible(visible);
-        }
+        public void RefreshBackButton() => TopAppBarService.RefreshBackButton();
 
         /// <summary>
         /// 设置菜单按钮的可见性
         /// </summary>
-        public void SetMenuButtonVisible(bool visible)
-        {
-            TopAppBarHost.SetMenuButtonVisible(visible);
-        }
+        public void SetMenuButtonVisible(bool visible) => TopAppBarService.SetMenuButtonVisible(visible);
 
-        /// <summary>
-        /// 设置更多按钮的可见性
-        /// </summary>
-        public void SetMoreButtonVisible(bool visible)
-        {
-            TopAppBarHost.SetMoreButtonVisible(visible);
-        }
-
-        /// <summary>
-        /// 获取更多按钮的菜单，用于动态添加菜单项
-        /// </summary>
-        public MenuFlyout? GetMoreMenu()
-        {
-            return TopAppBarHost.MoreMenu;
-        }
-
-        private void TopAppBarHost_BackButtonClicked(object? sender, EventArgs e)
+        private void OnTopBarBackButtonClicked(object? sender, EventArgs e)
         {
             // 优先让当前页面接管返回逻辑
             if (_navigationService.CurrentPage is IBackHandler handler && handler.OnBackRequested())
@@ -511,6 +551,9 @@ namespace DockedTools.Features.MainWindowContent.ContentArea
                 webBrowserPage.PageCloseRequested += OnPageCloseRequested;
             }
 
+            // 让刚上来的页面接管顶栏（缓存页自己的标题/按钮会随作用域原样恢复）
+            TopAppBarService.SetForegroundPage(_navigationService.CurrentPage);
+
             // 智能刷新返回按钮
             RefreshBackButton();
             
@@ -522,6 +565,8 @@ namespace DockedTools.Features.MainWindowContent.ContentArea
         {
             System.Diagnostics.Debug.WriteLine($"[ContentArea] NavigationService.CachedPageNavigated 事件触发: {e.PageType.Name}");
             
+            TopAppBarService.SetForegroundPage(_navigationService.CurrentPage);
+
             // 智能刷新返回按钮
             RefreshBackButton();
             
