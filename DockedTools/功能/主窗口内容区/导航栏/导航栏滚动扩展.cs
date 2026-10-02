@@ -22,7 +22,7 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
     /// 【UX 最佳实践】
     /// - 使用平滑动画（符合 Nielsen Norman Group 指导）
     /// - 防止用户在快捷键跳转时迷失方向
-    /// - 尊重系统的 prefers-reduced-motion 设置（TODO）
+    /// - 尊重系统的「减少动态效果」设置（见 <see cref="AnimationsAllowed"/>）
     /// 
     /// 【参考来源】
     /// - WinUI ScrollViewer.ChangeView API 文档
@@ -145,7 +145,9 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
                 // 这个方法会自动处理所有布局和滚动逻辑
                 var options = new Microsoft.UI.Xaml.BringIntoViewOptions
                 {
-                    AnimationDesired = animated
+                    // ⭐ animated 是【调用方】的意愿，系统设置是【用户】的意愿，两者取交集 ——
+                    //    早先这里直接写 AnimationDesired = animated，把「减少动态效果」给吃了。
+                    AnimationDesired = animated && AnimationsAllowed()
                 };
                 
                 item.StartBringIntoView(options);
@@ -268,13 +270,31 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
         // ==================== 辅助方法 ====================
 
         /// <summary>
-        /// 条件编译的调试日志方法
-        /// 
-        /// 【性能优化】
-        /// - 仅在 DEBUG 模式下执行，Release 版本完全移除
-        /// - 使用 [Conditional] 特性，编译器优化调用点
+        /// 系统是否允许动画效果。
+        ///
+        /// <para>WinUI 桌面应用拿不到 Web 那套 <c>prefers-reduced-motion</c> 媒体查询，
+        /// 最接近的等价物是「设置 → 辅助功能 → 视觉效果 → 动画效果」这个开关，
+        /// 它在 <c>UISettings.AnimationsEnabled</c> 上暴露。早先这里把它写成 TODO，
+        /// 于是用户明明在系统里关掉了动画，导航栏跳转照样滑得飞快。
+        /// 补上之后，本文件「UX 最佳实践」里那条才算真的闭环。</para>
+        ///
+        /// <para>为什么每次 new 一个 UISettings：这个开关是用户随时能改的，
+        /// 静态缓存一份的话改完必须重启应用才生效。构造它只是个薄薄的 WinRT 对象，
+        /// 在跳转这种低频操作上完全不心疼。</para>
         /// </summary>
-        [System.Diagnostics.Conditional("DEBUG")]
+        private static bool AnimationsAllowed()
+        {
+            try
+            {
+                return new Windows.UI.ViewManagement.UISettings().AnimationsEnabled;
+            }
+            catch
+            {
+                // 拿不到就按「允许」处理：宁可多一点动画，也不要把滚动变成一次硬跳
+                return true;
+            }
+        }
+
         private static void LogDebug(string message)
         {
             System.Diagnostics.Debug.WriteLine($"[NavigationViewScrollExtensions] {message}");

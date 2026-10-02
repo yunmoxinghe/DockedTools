@@ -10,11 +10,69 @@ namespace DockedTools.Features.Pages.WebApp.Browser
     /// </summary>
     public sealed partial class WebBrowserPage
     {
-        private void CoreWebView2Environment_BrowserProcessExited(object? sender, CoreWebView2BrowserProcessExitedEventArgs e)
+        /// <summary>
+        /// environment 级「浏览器进程退出」。
+        ///
+        /// <para>与其说是占位被填，不如说这里原本缺的是<b>区分层级</b>：
+        /// CoreWebView2_ProcessFailed 是内核级事件，带完整的日志与恢复策略
+        /// （渲染进程退出 → Reload；浏览器进程崩溃 → 关掉重建）；
+        /// 这条则是 environment 级 —— 同一个用户数据目录下关联的<b>整个进程组</b>都没了，
+        /// 此时内核对象还在但已经是个空壳，任何 CoreWebView2 调用都会失败。
+        /// 所以这里不该再去踢 Reload，只做两件事：</para>
+        ///
+        /// <para>① 留一条同等详细度的日志（排查「为什么整组进程都没了」靠的就是它）；
+        /// ② 把本页标记为「待重建」，由 INavigationAware.OnNavigatedTo 那边的重建路径兜 ——
+        /// 不在事件里直接重建，是因为页面此刻很可能不在前台（被 LRU 缓存着），
+        /// 为一个没给用户看的页面拉起浏览器进程组毫无意义。</para>
+        ///
+        /// <para>⚠️ 不要在这里Detach 事件：内核对象已归0，"-=" 本身就可能抛。
+        /// 反正这份引用随独享的 environment 一起走，页面被 Dispose 时不会再有人订阅。</para>
+        /// </summary>
+        private void CoreWebView2Environment_BrowserProcessExited(
+            object? sender, CoreWebView2BrowserProcessExitedEventArgs e)
         {
-            // TODO: 任务 3.3 将实现完整的日志记录逻辑
-            // TODO: 任务 3.4 将实现恢复策略
-            System.Diagnostics.Debug.WriteLine($"[CoreWebView2Environment_BrowserProcessExited] 浏览器进程退出 (占位方法)");
+            try
+            {
+                string kind = e.BrowserProcessExitKind.ToString();
+                string shortcutId = _currentShortcut?.Id ?? "null";
+
+                string message = $"WebView2 浏览器进程组已退出\n" +
+                    $"  退出方式: {kind}\n" +
+                    $"  Shortcut ID: {shortcutId}\n" +
+                    $"  实例 ID: {_instanceId}\n" +
+                    $"  IsDisposed: {_isDisposed}\n" +
+                    $"  IsWebViewReady: {_isWebViewReady}";
+
+                System.Diagnostics.Debug.WriteLine($"[BrowserProcessExited] {message}");
+
+                // 正常退出（例如本会话最后一个 WebView 被关闭）也要留痕：
+                // 「到底是崩了还是我关的」这两个最常见的疑问，光靠 Warning 级别区分不出来，
+                // 所以这里按 kind 分别落到 Warning / Info。
+                if (string.Equals(kind, "Failed", StringComparison.OrdinalIgnoreCase))
+                {
+                    Features.UnifiedCalls.Logging.LogService.Warning("WebView2.BrowserProcessExited", message);
+                }
+                else
+                {
+                    Features.UnifiedCalls.Logging.LogService.Info("WebView2.BrowserProcessExited", message);
+                }
+
+                if (_isDisposed)
+                {
+                    return;
+                }
+
+                // 整个进程组都没了 ⇒ 本页的内核必然已经失效。
+                // 标记之后由 INavigationAware.OnNavigatedTo 的 _needsWebViewRecreation 分支重建，
+                // 而不是在这里硬重建（见注释第 ② 条）。
+                _needsWebViewRecreation = true;
+                _isWebViewReady = false;
+            }
+            catch (Exception ex)
+            {
+                // 这里所有的 e.* 访问都可能因为底层 COM 已死而抛 —— 兜住，别带崩进程
+                System.Diagnostics.Debug.WriteLine($"[BrowserProcessExited] 处理失败: {ex.Message}");
+            }
         }
         
         /// <summary>
