@@ -252,7 +252,11 @@ namespace DockedTools.Features.Tray
             System.Diagnostics.Debug.WriteLine($"[SystemTrayIcon] Pre-cleanup: attempted to delete any existing tray icon");
             
             var data = CreateNotifyIconData(NIM_ADD);
-            
+            global::DockedTools.Features.Shared.AotOptimization.AotDebugLogger.Log(
+                $"[Tray] NIM_ADD 入参: uFlags=0x{data.uFlags:X} (NIF_TIP={(data.uFlags & NIF_TIP) != 0}, NIF_SHOWTIP={(data.uFlags & NIF_SHOWTIP) != 0}), " +
+                $"cbSize={data.cbSize}, uID={data.uID}, guidItem={data.guidItem}, hWnd=0x{_hWnd.ToInt64():X}, " +
+                $"tipLen={_tooltip.Length}, tip=「{_tooltip}」, szTip[0..3]={data.szTip[0]},{data.szTip[1]},{data.szTip[2]}");
+
             bool addResult = Shell_NotifyIconW(NIM_ADD, ref data);
             System.Diagnostics.Debug.WriteLine($"[SystemTrayIcon] Shell_NotifyIconW(NIM_ADD) returned: {addResult}");
             if (!addResult)
@@ -274,12 +278,25 @@ namespace DockedTools.Features.Tray
             }
             
             bool versionResult = Shell_NotifyIconW(NIM_SETVERSION, ref data);
+            global::DockedTools.Features.Shared.AotOptimization.AotDebugLogger.Log(
+                $"[Tray] NIM_ADD={addResult}, NIM_SETVERSION={versionResult}, lastError={Marshal.GetLastWin32Error()}");
             System.Diagnostics.Debug.WriteLine($"[SystemTrayIcon] Shell_NotifyIconW(NIM_SETVERSION) returned: {versionResult}");
             if (!versionResult)
             {
                 int error = Marshal.GetLastWin32Error();
                 System.Diagnostics.Debug.WriteLine($"[SystemTrayIcon] Shell_NotifyIconW(NIM_SETVERSION) FAILED, Win32Error={error} (0x{error:X})");
             }
+
+            // 🔧 切到 NOTIFYICON_VERSION_4 之后再补一次 NIM_MODIFY 重设 tooltip。
+            //    uVersion=4 会重写图标的通知通道，SETVERSION 携带的 NIF_TIP/NIF_SHOWTIP 不一定被保留，
+            //    实测少了这一步 explorer 侧就不出悬停文本。MODIFY 不带 NIF_MESSAGE / uVersion，
+            //    只下发图标与提示，不会把已设好的版本冲掉。
+            var modifyData = CreateNotifyIconData(NIM_MODIFY);
+            bool tipResult = Shell_NotifyIconW(NIM_MODIFY, ref modifyData);
+            global::DockedTools.Features.Shared.AotOptimization.AotDebugLogger.Log(
+                $"[Tray] NIM_MODIFY(重设tooltip)={tipResult}, uFlags=0x{modifyData.uFlags:X}, " +
+                $"NIF_TIP={(modifyData.uFlags & NIF_TIP) != 0}, NIF_SHOWTIP={(modifyData.uFlags & NIF_SHOWTIP) != 0}, " +
+                $"cbSize={modifyData.cbSize}, lastError={Marshal.GetLastWin32Error()}");
         }
 
         private void RemoveFromTray()
@@ -374,6 +391,16 @@ namespace DockedTools.Features.Tray
                             break;
                         case WM_CONTEXTMENU:  // 🛠️ 使用 WM_CONTEXTMENU 而不是 WM_RBUTTONDOWN
                             RightClick?.Invoke(this, args);
+                            break;
+                        case NIN_POPUPOPEN:
+                        case NIN_POPUPCLOSE:
+                            // 🔍 仅观察，且**带 NIF_SHOWTIP 时这里永远收不到是正常现象**：
+                            //    NIF_SHOWTIP 表示回退到 explorer 自绘的标准 tooltip，它自己画完就完事，不通知应用；
+                            //    只有去掉 NIF_SHOWTIP、改由应用自绘弹出 UI 时，explorer 才会下发这两个通知。
+                            //    （2026-10-03 实测：修好 cbSize 后 tooltip 正常显示，此处仍为 0 条。）
+                            global::DockedTools.Features.Shared.AotOptimization.AotDebugLogger.Log(
+                                $"[Tray] 收到 {(msg == NIN_POPUPOPEN ? "NIN_POPUPOPEN" : "NIN_POPUPCLOSE")}: " +
+                                $"x={(short)(wParam.ToInt64() & 0xffff)}, y={(short)((wParam.ToInt64() >> 16) & 0xffff)}");
                             break;
                     }
 
@@ -581,6 +608,10 @@ namespace DockedTools.Features.Tray
         private const uint WM_NULL = 0x0000;  // 🛠️ 添加 WM_NULL
         private const int SW_SHOW = 5;
         private const uint WM_GETMINMAXINFO = 0x0024;
+        // NOTIFYICON_VERSION_4 专用通知：explorer 悬停/移出图标时下发。
+        // 版本 4 下标准 tooltip 默认被抑制、改由应用自绘弹窗；想保留标准 tooltip 必须带 NIF_SHOWTIP。
+        private const uint NIN_POPUPOPEN = 0x0406;
+        private const uint NIN_POPUPCLOSE = 0x0407;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct POINT
@@ -620,6 +651,10 @@ namespace DockedTools.Features.Tray
             public ushort[] szInfoTitle;
             public uint dwInfoFlags;
             public Guid guidItem;
+            // ⚠️ 不能省。缺了它 Marshal.SizeOf 就是 968（= NOTIFYICONDATAW_V3_SIZE，Win7 结构），
+            //    shell 会认为调用方只支持 V3，NOTIFYICON_VERSION_4 的部分行为走不到完整路径。
+            //    补上后 sizeof = 976，才是完整 V4 结构。参考 shellapi.h。
+            public IntPtr hBalloonIcon;
         }
 
         [LibraryImport("shell32.dll")]
