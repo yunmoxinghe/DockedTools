@@ -1584,18 +1584,6 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   <data name="AdaptiveColourPage_TabBarHeader.Description" xml:space="preserve">
     <value>顶栏与底栏背景的亮度微调，默认 0</value>
   </data>
-  <data name="AdaptiveColourPage_PopupHeader.Header" xml:space="preserve">
-    <value>浮层亮度偏移</value>
-  </data>
-  <data name="AdaptiveColourPage_PopupHeader.Description" xml:space="preserve">
-    <value>弹出层背景相对栏体的亮度差，默认 5</value>
-  </data>
-  <data name="AdaptiveColourPage_TabSelectedHeader.Header" xml:space="preserve">
-    <value>选中态亮度偏移</value>
-  </data>
-  <data name="AdaptiveColourPage_TabSelectedHeader.Description" xml:space="preserve">
-    <value>选中/激活态背景相对栏体的亮度差，默认 15</value>
-  </data>
   <data name="AdaptiveColourPage_MinContrastLightHeader.Header" xml:space="preserve">
     <value>浅色最小对比度</value>
   </data>

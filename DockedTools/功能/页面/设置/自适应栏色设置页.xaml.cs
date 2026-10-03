@@ -97,14 +97,6 @@ namespace DockedTools.Features.Pages.Settings
             TabBarBox.Value = AdaptiveColourSettings.TabBar;
             TabBarBox.ValueChanged += OnTabBarChanged;
 
-            PopupBox.ValueChanged -= OnPopupChanged;
-            PopupBox.Value = AdaptiveColourSettings.Popup;
-            PopupBox.ValueChanged += OnPopupChanged;
-
-            TabSelectedBox.ValueChanged -= OnTabSelectedChanged;
-            TabSelectedBox.Value = AdaptiveColourSettings.TabSelected;
-            TabSelectedBox.ValueChanged += OnTabSelectedChanged;
-
             MinContrastLightBox.ValueChanged -= OnMinContrastLightChanged;
             MinContrastLightBox.Value = AdaptiveColourSettings.MinContrastLight;
             MinContrastLightBox.ValueChanged += OnMinContrastLightChanged;
@@ -234,22 +226,6 @@ namespace DockedTools.Features.Pages.Settings
             if (!double.IsNaN(args.NewValue))
             {
                 AdaptiveColourSettings.TabBar = args.NewValue;
-            }
-        }
-
-        private void OnPopupChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
-        {
-            if (!double.IsNaN(args.NewValue))
-            {
-                AdaptiveColourSettings.Popup = args.NewValue;
-            }
-        }
-
-        private void OnTabSelectedChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
-        {
-            if (!double.IsNaN(args.NewValue))
-            {
-                AdaptiveColourSettings.TabSelected = args.NewValue;
             }
         }
 

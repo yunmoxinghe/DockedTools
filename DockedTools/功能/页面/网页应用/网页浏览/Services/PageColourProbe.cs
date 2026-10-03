@@ -1,6 +1,7 @@
 using Microsoft.Web.WebView2.Core;
 using System;
 using System.Collections.Generic;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 
@@ -39,6 +40,14 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
     public sealed class AdaptiveTabColourData
     {
         public List<AdaptiveElementColour> Page { get; } = new();
+
+        /// <summary>
+        /// 底栏专用：视口<b>底端</b>那一带的元素栈（采样点 y = innerHeight - 3）。
+        /// 与 <see cref="Page"/> 同一套规则，只是采样点纵坐标不同 ——
+        /// 顶栏与底栏据此各取各的颜色，底栏不再复制顶栏。
+        /// 老版本脚本没有这个字段时为空列表，托管侧据此退化成「底栏跟随顶栏」。
+        /// </summary>
+        public List<AdaptiveElementColour> PageBottom { get; } = new();
 
         public AdaptiveThemeColour Theme { get; } = new();
 
@@ -86,9 +95,11 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
     /// 两种工作方式：
     /// 1. <see cref="ProbeAsync"/> —— 一次性 ExecuteScriptAsync 探测（兜底用）；
     /// 2. <see cref="BuildMonitorScript"/> —— 常驻监控脚本，对齐上游 enableDynamic()：
-    ///    click / resize / scroll / visibilitychange 四个事件，
-    ///    以及 darkReader、meta theme-color 属性、meta 标签增删、STYLE 标签增删四个 MutationObserver，
-    ///    统一走 250ms trailing 节流后回传。
+    ///    click / resize / scroll（捕获阶段）/ visibilitychange 四个事件，
+    ///    以及 darkReader、meta theme-color 属性、meta 标签增删、STYLE 标签增删、
+    ///    ⭐换肤属性（html/body 的 class 与 data-* 主题属性）五个 MutationObserver，
+    ///    外加 ⭐一个盯文档根元素的 ResizeObserver，统一走 250ms trailing 节流后回传。
+    ///    后两项是上游没有的 —— 上游漏了它们，站点自己换肤、页面内部布局变化时栏色不刷新。
     ///
     /// 与上游的差异：
     /// 1. 回传通道用 WebView2 的 chrome.webview.postMessage，替代 browser.runtime.sendMessage；
@@ -105,6 +116,14 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
     ///    而且动画刚结束时采样到的往往是过渡态中间色，本身就不可用。
     ///    SPA 路由切换有 click + MutationObserver 兜底，主题切换有 STYLE / darkReader 观察器兜底，
     ///    不依赖这两个补不了的场景。
+    /// 7. <b>scroll 走捕获阶段</b> —— scroll 事件不冒泡，上游挂在 document 上的冒泡监听
+    ///    收不到「页面主体在 overflow:auto 的容器里滚动」这类滚动（SPA 极常见），取色会整段哑掉。
+    ///    非冒泡事件仍有捕获阶段，加 <c>capture: true</c> 才能收到任意后代元素的滚动。
+    /// 8. <b>多一个换肤属性 MutationObserver</b> —— 站点自己的亮/暗切换几乎不增删 STYLE 节点，
+    ///    而是改 html/body 的 class（Tailwind 的 dark）或 data-* 主题属性（Bootstrap 的 data-bs-theme），
+    ///    上游四个观察者全都不覆盖，点了站内深色模式按钮栏色不动。
+    /// 9. <b>多一个 ResizeObserver</b> —— window 级 resize 只在窗口缩放时发，
+    ///    侧栏收起 / 折叠面板展开这类页面内部布局变化不动窗口，栏色同样不刷新。
     /// </summary>
     public static class PageColourProbe
     {
@@ -192,6 +211,76 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
 
         private const string SuspendCall =
             "if (window.__dockedToolsColourSuspend) { try { window.__dockedToolsColourSuspend(); } catch (e) { } }";
+
+        /// <summary>
+        /// 构建「读取常驻脚本触发埋点」的脚本。
+        ///
+        /// <para>常驻脚本跑在网页里，它的 <c>console</c> 输出<b>不会</b>进托管侧的日志通道
+        /// （winapp 的 --debug-output 只转发 App 进程的 <c>Debug.WriteLine</c>），
+        /// 托管侧原本又只看得见「最终上色」那一条 —— 触发了但被去重吃掉、被闸门挡掉的
+        /// 那些完全不留痕。要回答「取色到底触发了几次 / 为什么没刷新」，只能靠
+        /// ExecuteScript 把脚本里那个环形缓冲读出来。</para>
+        /// </summary>
+        public static string BuildLogScript()
+            => "JSON.stringify(window.__dockedToolsColourLog || []);";
+
+        /// <summary>
+        /// 把触发埋点格式化成可直接打印的一行文本。没有埋点时返回 null（调用方据此不打日志）。
+        /// </summary>
+        public static string? FormatLog(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return null;
+            }
+
+            try
+            {
+                using JsonDocument outer = JsonDocument.Parse(raw);
+                string json = outer.RootElement.ValueKind == JsonValueKind.String
+                    ? outer.RootElement.GetString() ?? string.Empty
+                    : raw;
+
+                if (string.IsNullOrWhiteSpace(json) || json == "[]")
+                {
+                    return null;
+                }
+
+                using JsonDocument document = JsonDocument.Parse(json);
+                if (document.RootElement.ValueKind != JsonValueKind.Array)
+                {
+                    return null;
+                }
+
+                var builder = new StringBuilder();
+
+                foreach (JsonElement item in document.RootElement.EnumerateArray())
+                {
+                    if (item.ValueKind != JsonValueKind.Object)
+                    {
+                        continue;
+                    }
+
+                    string source = item.TryGetProperty("src", out JsonElement src) ? src.ToString() : "?";
+                    string action = item.TryGetProperty("act", out JsonElement act) ? act.ToString() : "?";
+                    string time = item.TryGetProperty("t", out JsonElement t) ? t.ToString() : "?";
+
+                    if (builder.Length > 0)
+                    {
+                        builder.Append(' ');
+                    }
+
+                    builder.Append(source).Append('/').Append(action).Append('@').Append(time);
+                }
+
+                return builder.Length == 0 ? null : builder.ToString();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[PageColourProbe] 解析取色埋点失败: {ex.Message}");
+                return null;
+            }
+        }
 
         private static string InjectQuery(string script, string? query)
             => script.Replace(QueryToken, QueryLiteral(query));
@@ -289,6 +378,19 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
                     if (element is not null)
                     {
                         data.Page.Add(element);
+                    }
+                }
+            }
+
+            if (root.TryGetProperty("pageBottom", out JsonElement pageBottom) &&
+                pageBottom.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement item in pageBottom.EnumerateArray())
+                {
+                    var element = ReadElementColour(item);
+                    if (element is not null)
+                    {
+                        data.PageBottom.Add(element);
                     }
                 }
             }
@@ -464,8 +566,11 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
         };
     };
 
-    var __atbcPageColour = function () {
-        return document.elementsFromPoint(window.innerWidth / 2, 3)
+    // 采样点纵坐标参数化：顶栏取视口顶端（y=3），底栏取视口底端（y=innerHeight-3）。
+    // 两处共用同一套过滤与回退规则，只有 y 不同 —— 底栏不该是顶栏的复制品，
+    // 但也不该用另一套判定，否则同一个页面上下两栏会给出不可比的结果。
+    var __atbcPageColourAt = function (y) {
+        return document.elementsFromPoint(window.innerWidth / 2, y)
             .filter(function (element) {
                 return element instanceof HTMLElement &&
                     element.offsetWidth >= window.innerWidth * 0.9 &&
@@ -474,6 +579,17 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
             .map(function (element) { return __atbcElementColour(element); })
             .concat([__atbcElementColour(document.body), __atbcElementColour(document.documentElement)])
             .filter(function (data) { return data !== null; });
+    };
+
+    var __atbcPageColour = function () {
+        return __atbcPageColourAt(3);
+    };
+
+    // 底栏专用：视口底端那一带的元素栈。
+    // 页面极短（innerHeight < 3）时 elementsFromPoint 越界返回空数组，
+    // 但下面 concat 的 body / html 仍在 —— 于是退化成「和顶栏同色」，正是想要的兜底。
+    var __atbcPageBottomColour = function () {
+        return __atbcPageColourAt(window.innerHeight - 3);
     };
 
     var __atbcQueryColour = function (query) {
@@ -495,6 +611,8 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
         var page = __atbcPageColour();
         return {
             page: page,
+            // 底栏那一带的采样。托管侧据此给底栏单独上色，不再让它复制顶栏。
+            pageBottom: __atbcPageBottomColour(),
             theme: __atbcThemeColour(),
             query: __atbcQueryColour(query),
             special: page.length > 0 ? 'none' : __atbcSpecial(),
@@ -569,6 +687,30 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
     var throttleIntervalMs = 250;
     var lastSentAt = 0;
     var lastPayload = null;
+
+    // ⭐ 诊断埋点：这段脚本跑在网页里，console 输出既不会进 winapp 的 --debug-output
+    // （那条通道只转发 App 进程的 Debug.WriteLine），托管侧也只能看见「最终上色」那一条 ——
+    // 触发了但被去重吃掉、被闸门挡掉的那些完全不留痕。
+    // 于是「取色到底触发了几次 / 为什么没刷新」这个问题，光看 App 日志根本回答不了。
+    // 这里把最近若干次触发记进环形缓冲，托管侧用 ExecuteScript 读出来打进 Debug 日志。
+    // 只记一个固定长度的缓冲：常驻脚本在页面整个生命周期里活着，不能让它无限增长。
+    var colourLog = [];
+    var colourLogLimit = 40;
+    var log = function (source, action) {
+        colourLog.push({ t: Date.now() % 100000, src: source, act: action });
+        if (colourLog.length > colourLogLimit) { colourLog.shift(); }
+    };
+    window.__dockedToolsColourLog = colourLog;
+
+    // 触发源包装：只多记一笔就转交 sendColour。
+    // 返回值要留着做 removeEventListener —— 每次调用 trigger() 都是一个新的函数对象，
+    // 现调现传的话卸载时摘不掉，脚本叠加会留下僵尸监听。
+    var trigger = function (source) {
+        return function () {
+            log(source, 'hit');
+            sendColour();
+        };
+    };
 " + ColourHelpers + @"
     var dispatch = function () {
         // 动态刷新（ATBC: dynamic）在 dispatch 里查，不在 start() 里查：
@@ -577,20 +719,24 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
         // 结果就是「关掉再打开 → 必须导航一次才恢复」。
         // 放到 dispatch 里就是纯运行时开关：监听照装，发不发由变量说了算，
         // 关→开、开→关两个方向都能立刻生效。
-        if (window.__dockedToolsColourDynamic === false) { return; }
-        if (window.__dockedToolsColourSuspended === true) { return; }
-        if (document.visibilityState !== 'visible') { return; }
+        if (window.__dockedToolsColourDynamic === false) { log('dispatch', 'off'); return; }
+        if (window.__dockedToolsColourSuspended === true) { log('dispatch', 'suspended'); return; }
+        if (document.visibilityState !== 'visible') { log('dispatch', 'hidden'); return; }
         // 全屏（视频播放等）时取到的是视频画面而不是页面外观，保持当前栏色不动。
-        if (document.fullscreenElement) { return; }
+        if (document.fullscreenElement) { log('dispatch', 'fullscreen'); return; }
+        // 刻意放在去重之前：被 lastPayload 吃掉的那次也算「采样过一次」，
+        // 下一次采样仍要等满 250ms。放到去重之后的话，高频触发源（滚动、class 抖动）
+        // 会让每一帧都跑一整条取色流水线 —— 节流要挡的是【取色本身】的开销，不只是发消息。
         lastSentAt = Date.now();
         try {
             // 去重：scroll / resize / click 会反复触发，但页面颜色往往没变。
             // 颜色没变就不跨进程发消息，也免掉托管侧一轮 Evaluate + XAML 失效。
             var colourJson = JSON.stringify(__atbcColourData(currentQuery()));
-            if (colourJson === lastPayload) { return; }
+            if (colourJson === lastPayload) { log('dispatch', 'dedup'); return; }
             lastPayload = colourJson;
             window.chrome.webview.postMessage('{""header"":""" + MessageHeader + @""",""colour"":' + colourJson + '}');
-        } catch (e) { }
+            log('dispatch', 'sent');
+        } catch (e) { log('dispatch', 'error'); }
     };
 
     var sendColour = function () {
@@ -612,12 +758,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
         // 挂起中（命中 COLOUR 规则）：连监听都不装，页面外观完全不参与
         if (window.__dockedToolsColourSuspended === true) { return; }
 
-        var darkReaderObserver = new MutationObserver(sendColour);
-        var metaThemeColourObserver = new MutationObserver(sendColour);
+        var darkReaderObserver = new MutationObserver(trigger('darkreader'));
+        var metaThemeColourObserver = new MutationObserver(trigger('meta-attr'));
         var metaTagObserver = new MutationObserver(function (mutationList) {
             mutationList.forEach(function (mutation) {
                 mutation.addedNodes.forEach(function (node) {
                     if (node instanceof HTMLMetaElement && node.name === 'theme-color') {
+                        log('meta-add', 'hit');
                         sendColour();
                         metaThemeColourObserver.observe(node, { attributes: true });
                     }
@@ -631,16 +778,34 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
                 mutation.removedNodes.forEach(function (n) { nodes.push(n); });
                 return nodes.some(function (n) { return n.nodeName === 'STYLE'; });
             });
-            if (touched) { sendColour(); }
+            if (touched) { log('style-tag', 'hit'); sendColour(); }
         });
 
         // passive：这几个监听不会 preventDefault，声明成 passive 让滚动不必等我们的回调
-        ['click', 'resize', 'scroll'].forEach(function (event) {
-            document.addEventListener(event, sendColour, { passive: true });
-            cleanups.push(function () { document.removeEventListener(event, sendColour); });
+        ['click', 'resize'].forEach(function (event) {
+            var handler = trigger(event);
+            document.addEventListener(event, handler, { passive: true });
+            cleanups.push(function () { document.removeEventListener(event, handler); });
         });
-        document.addEventListener('visibilitychange', sendColour);
-        cleanups.push(function () { document.removeEventListener('visibilitychange', sendColour); });
+
+        // ⭐ scroll 必须走捕获阶段。
+        // scroll 事件【不冒泡】—— 页面主体放在 overflow:auto 的 div 里滚动时（SPA 极常见的布局），
+        // 事件只派发到那个 div 本身，document 上的冒泡监听一次都收不到，取色就彻底哑了：
+        // 用户滚了半天，栏色一直停在进站那一次。上游同样是 document.addEventListener('scroll')，
+        // 同样的洞 —— 这是「感觉取色刷新不频繁」的头号根因。
+        // 非冒泡事件仍然有捕获阶段（window → document → … → target），
+        // 在 document 上用 capture 才能收到任意后代元素的滚动。
+        // 卸载同样要带 capture:true —— 布尔与 options 两种写法对 removeEventListener 而言
+        // 是同一个 capture 标志，两边不一致就摘不掉，脚本叠加时会留下僵尸监听。
+        var scrollHandler = trigger('scroll');
+        document.addEventListener('scroll', scrollHandler, { passive: true, capture: true });
+        cleanups.push(function () {
+            document.removeEventListener('scroll', scrollHandler, { capture: true });
+        });
+
+        var visibilityHandler = trigger('visibility');
+        document.addEventListener('visibilitychange', visibilityHandler);
+        cleanups.push(function () { document.removeEventListener('visibilitychange', visibilityHandler); });
         // 刻意不监听 transition{end,cancel} / animation{end,cancel}：见类注释「与上游的差异」第 5 条。
 
         darkReaderObserver.observe(document.documentElement, {
@@ -658,19 +823,56 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
         if (document.head) { styleTagObserver.observe(document.head, { childList: true }); }
         cleanups.push(function () { styleTagObserver.disconnect(); });
 
+        // ⭐ 换肤观察者：站点自己的亮/暗切换基本【不增删 STYLE 节点】，
+        // 而是改 <html> / <body> 的 class（Tailwind 的 dark）或 data-* 主题属性
+        // （Bootstrap 5.3 的 data-bs-theme 等）。上游只有 STYLE 增删 / meta 属性 /
+        // darkReader 那几个观察者，这类换肤一个都抓不到 —— 于是「点了站内的深色模式按钮，
+        // 栏色还停在亮色」，得手动滚一下或者点一下才刷新。
+        // 只盯文档级这两个元素：具体元素的 class 变化（hover 态、入场动画）量太大，
+        // 而它们几乎不影响顶栏那一带的颜色，盯了纯属白烧 CPU。
+        // 刻意不盯 style：内联样式动画每帧都在写，盯进去等于把 250ms 节流窗口常年打满。
+        var themeSwitchObserver = new MutationObserver(trigger('theme-switch'));
+        var themeSwitchFilter = ['class', 'data-theme', 'data-bs-theme', 'data-color-scheme', 'data-mode'];
+        themeSwitchObserver.observe(document.documentElement, {
+            attributes: true,
+            attributeFilter: themeSwitchFilter
+        });
+        // start() 要么在 DOMContentLoaded 之后跑（body 必然存在），要么在 readyState 已过 loading 时跑，
+        // 两种情况下 body 都在；留个判空只为极端时序下别抛异常。
+        if (document.body) {
+            themeSwitchObserver.observe(document.body, {
+                attributes: true,
+                attributeFilter: themeSwitchFilter
+            });
+        }
+        cleanups.push(function () { themeSwitchObserver.disconnect(); });
+
+        // ⭐ 尺寸观察者：window 级 resize 只在【窗口本身】大小变化时才发，
+        // 而页面内部的布局变化（侧栏收起、图片撑开、虚拟列表换页、折叠面板展开）
+        // 根本不动窗口尺寸 —— 顶栏那一带的元素换了、高度变了，栏色却不刷新。
+        // 盯文档根元素即可覆盖这类变化（html 的盒高随内容走）。
+        // 回调里只有读操作（getComputedStyle / elementsFromPoint），不写任何样式，
+        // 不会触发 ResizeObserver 的循环告警；高频抖动由 250ms 节流 + 去重兜住。
+        if (typeof ResizeObserver !== 'undefined') {
+            var layoutObserver = new ResizeObserver(trigger('layout'));
+            layoutObserver.observe(document.documentElement);
+            cleanups.push(function () { layoutObserver.disconnect(); });
+        }
+
         // 首屏：DOMContentLoaded 时页面常常还只有浏览器的默认白底（CSS / 图片 / 字体没到位），
         // 这时取色会让栏色先刷成白的、等真实外观出来再跳一次 —— 就是首屏白闪。
         // 推到 load 之后再发第一次；load 之后的迟到渲染由下面那个兜底采样兜住。
+        var loadHandler = trigger('load');
         if (document.readyState === 'complete') {
-            sendColour();
+            loadHandler();
         } else {
-            window.addEventListener('load', sendColour, { once: true });
-            cleanups.push(function () { window.removeEventListener('load', sendColour); });
+            window.addEventListener('load', loadHandler, { once: true });
+            cleanups.push(function () { window.removeEventListener('load', loadHandler); });
             // SPA 常在 load 之后才渲染出真实外观（数据回来了才上色），补一次迟到但准的采样。
             // 颜色没变的话 dispatch 里的去重会把它吃掉，不会多刷一次。
             fallbackTimeout = setTimeout(function () {
                 fallbackTimeout = null;
-                sendColour();
+                trigger('fallback')();
             }, 1000);
         }
     };

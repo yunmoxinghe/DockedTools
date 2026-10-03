@@ -130,35 +130,10 @@
                             ValueChanged="OnTabBarChanged"/>
                     </controls:SettingsCard>
 
-                    <controls:SettingsCard x:Uid="AdaptiveColourPage_PopupHeader">
-                        <controls:SettingsCard.HeaderIcon>
-                            <FontIcon Glyph="&#xE790;" />
-                        </controls:SettingsCard.HeaderIcon>
-                        <NumberBox
-                            x:Name="PopupBox"
-                            Minimum="-100"
-                            Maximum="100"
-                            SmallChange="1"
-                            LargeChange="5"
-                            SpinButtonPlacementMode="Inline"
-                            HorizontalAlignment="Left"
-                            ValueChanged="OnPopupChanged"/>
-                    </controls:SettingsCard>
-
-                    <controls:SettingsCard x:Uid="AdaptiveColourPage_TabSelectedHeader">
-                        <controls:SettingsCard.HeaderIcon>
-                            <FontIcon Glyph="&#xE706;" />
-                        </controls:SettingsCard.HeaderIcon>
-                        <NumberBox
-                            x:Name="TabSelectedBox"
-                            Minimum="-100"
-                            Maximum="100"
-                            SmallChange="1"
-                            LargeChange="5"
-                            SpinButtonPlacementMode="Inline"
-                            HorizontalAlignment="Left"
-                            ValueChanged="OnTabSelectedChanged"/>
-                    </controls:SettingsCard>
+                    <!-- 亮度偏移目前只有「栏体」一项生效。
+                         ATBC 的 popup / tabSelected 是给浏览器浮层与选中态标签页用的，
+                         我们这里没有对应的浮层、选中态 UI，Build() 算出来的 Popup / Selected
+                         两个色没有任何消费点 —— 摆出来就是拖了没反应的假控件，先撤掉。 -->
 
                 </StackPanel>
 

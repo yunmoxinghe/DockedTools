@@ -1584,18 +1584,6 @@ Error Message: {1}</value>
   <data name="AdaptiveColourPage_TabBarHeader.Description" xml:space="preserve">
     <value>Brightness tweak for the bar background, default 0</value>
   </data>
-  <data name="AdaptiveColourPage_PopupHeader.Header" xml:space="preserve">
-    <value>Popup brightness offset</value>
-  </data>
-  <data name="AdaptiveColourPage_PopupHeader.Description" xml:space="preserve">
-    <value>Brightness delta of popups relative to the bar, default 5</value>
-  </data>
-  <data name="AdaptiveColourPage_TabSelectedHeader.Header" xml:space="preserve">
-    <value>Selected brightness offset</value>
-  </data>
-  <data name="AdaptiveColourPage_TabSelectedHeader.Description" xml:space="preserve">
-    <value>Brightness delta of the selected state, default 15</value>
-  </data>
   <data name="AdaptiveColourPage_MinContrastLightHeader.Header" xml:space="preserve">
     <value>Minimum contrast (light)</value>
   </data>

@@ -32,8 +32,6 @@ namespace DockedTools.Features.Pages.Settings
         private const string AllowDarkLightKey = "AdaptiveColour_AllowDarkLight";
 
         private const string TabBarKey = "AdaptiveColour_TabBar";
-        private const string PopupKey = "AdaptiveColour_Popup";
-        private const string TabSelectedKey = "AdaptiveColour_TabSelected";
 
         private const string MinContrastLightKey = "AdaptiveColour_MinContrastLight";
         private const string MinContrastDarkKey = "AdaptiveColour_MinContrastDark";
@@ -97,20 +95,6 @@ namespace DockedTools.Features.Pages.Settings
         {
             get => AotSafeSettingsHelper.GetDouble(LocalSettings, TabBarKey, 0d);
             set => SetDouble(TabBarKey, value);
-        }
-
-        /// <summary>浮层亮度偏移（ATBC: popup，默认 5）</summary>
-        public static double Popup
-        {
-            get => AotSafeSettingsHelper.GetDouble(LocalSettings, PopupKey, 5d);
-            set => SetDouble(PopupKey, value);
-        }
-
-        /// <summary>选中态亮度偏移（ATBC: tabSelected，默认 15）</summary>
-        public static double TabSelected
-        {
-            get => AotSafeSettingsHelper.GetDouble(LocalSettings, TabSelectedKey, 15d);
-            set => SetDouble(TabSelectedKey, value);
         }
 
         /// <summary>浅色方案最小对比度（ATBC: minContrast_light = 90，即 9.0。这里存真实比值）</summary>
@@ -217,8 +201,7 @@ namespace DockedTools.Features.Pages.Settings
                 AllowDarkLight = AllowDarkLight,
                 NoThemeColour = NoThemeColour,
                 TabBar = TabBar,
-                Popup = Popup,
-                TabSelected = TabSelected,
+                // Popup / TabSelected 保持 ATBC 默认值（Build() 仍会算，但目前无人消费）
                 Query = string.IsNullOrWhiteSpace(query) ? null : query.Trim()
             };
         }

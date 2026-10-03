@@ -22,9 +22,11 @@ namespace DockedTools.Features.Pages.WebApp.Browser
     /// 只按取到的亮暗切主题即可。写之前先用 IsWritingTarget 确认顶栏还归本页 ——
     /// 取色回调（常驻脚本回传、导航完成）完全可能在本页已经切走之后才到。
     ///
-    /// 取色时机对齐上游 dynamic 模式：注入常驻脚本，由 click / resize / scroll / visibilitychange、
-    /// transition 与 animation 结束事件、以及四个 MutationObserver 驱动，250ms trailing 节流后回传；
+    /// 取色时机对齐上游 dynamic 模式：注入常驻脚本，由 click / resize / scroll（捕获阶段）/ visibilitychange、
+    /// 五个 MutationObserver（换肤属性 / darkReader / meta theme-color 属性 / meta 增删 / STYLE 增删）
+    /// 与一个 ResizeObserver 驱动，250ms trailing 节流后回传；
     /// 页面 DOM 变化、SPA 切换、主题切换都能跟着更新。
+    /// （刻意不监听 transition / animation 结束事件，理由见 PageColourProbe 类注释差异第 6 条。）
     ///
     /// 作用范围：只写本页面自己的 WebPageTopAppBarBackground 色块和底部栏（都是 page 的一部分），
     /// 不触碰 TopAppBarService / TopAppBarControl —— 顶栏正在其他 worktree 大修。
@@ -352,6 +354,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 // 这次失败也不复位 —— 第一次已经给了个能用的结果，别把它清掉。
                 await Task.Delay(AdaptiveBarColourLateDelayMs, token);
                 await ProbeOnceAsync(token, resetOnFailure: false);
+
+                // 迟到采样之后页面已经稳定，这时把常驻脚本的触发埋点读出来 ——
+                // 能看到 load / fallback / 各类观察者各触发了几次、被去重还是真发出去了。
+                await DumpAdaptiveColourLogAsync();
             }
             catch (OperationCanceledException)
             {
@@ -360,6 +366,38 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 自适应栏色更新失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 把常驻脚本里那个触发埋点缓冲读出来，打进 Debug 日志。
+        ///
+        /// <para>脚本跑在网页里，<c>console</c> 输出不进托管侧的日志通道；托管侧原本又只在
+        /// 「颜色真的变了并写进画刷」之后才打一条，触发了但被去重 / 闸门挡掉的那些无声无息 ——
+        /// 于是「取色刷新到底频不频繁」只能靠猜。这里是唯一的观测口。</para>
+        ///
+        /// <para>每次导航最多读一次（在一次探测流水线的末尾），一次 ExecuteScript，
+        /// 不会影响取色本身的时序。</para>
+        /// </summary>
+        private async Task DumpAdaptiveColourLogAsync()
+        {
+            if (WebView?.CoreWebView2 is not { } core)
+            {
+                return;
+            }
+
+            try
+            {
+                string? raw = await core.ExecuteScriptAsync(PageColourProbe.BuildLogScript());
+
+                if (PageColourProbe.FormatLog(raw) is { } text)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 取色触发埋点: {text}");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 读取取色埋点失败: {ex.Message}");
             }
         }
 
@@ -642,9 +680,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
             // 去重：scroll / resize / click 会反复触发回传，色值和方案都没变时不必再写一次画刷，
             // 也不必再切一次底栏 RequestedTheme（它会让底栏整棵子树重新主题化）
+            // Bottom 必须一起比：顶栏底栏分别取色之后，完全可能出现「页面顶部没变、
+            // 底部换了一块」的情况 —— 只比 Frame 的话底栏就永远停在旧色上不更新了。
             if (_appliedAdaptiveBarColour is { } applied &&
                 applied.Scheme == result.Scheme &&
-                SameColor(applied.Frame, result.Frame))
+                applied.BottomScheme == result.BottomScheme &&
+                SameColor(applied.Frame, result.Frame) &&
+                SameColor(applied.Bottom, result.Bottom))
             {
                 return;
             }
@@ -692,13 +734,21 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
             if (IsBottomBarHostOwner())
             {
+                // 底栏两件事都按【自己那一发】来：背景取页面底端那一带的色，
+                // 前景（文字/图标）按那块背景的亮度独立选方案 —— 不能用 theme（顶栏那个），
+                // 否则「顶栏白 / 底栏近黑」时底栏会顶着 Light 主题的深色图标，黑底黑字。
+                ElementTheme bottomTheme = result.BottomScheme == AdaptiveScheme.Dark
+                    ? ElementTheme.Dark
+                    : ElementTheme.Light;
+
                 Services.BottomBarThemeService.SetBottomBar(
-                    BottomBarHost, theme, result.Frame, AdaptiveTransitionMs);
+                    BottomBarHost, bottomTheme, result.Bottom, AdaptiveTransitionMs);
             }
 
             System.Diagnostics.Debug.WriteLine(
-                $"[WebBrowserPage] 自适应栏色: 方案={result.Scheme}, 来源={result.Reason}, " +
-                $"色块={result.Frame}, 建议前景={result.Foreground}, 校正={result.Corrected}");
+                $"[WebBrowserPage] 自适应栏色: 来源={result.Reason}, " +
+                $"顶栏={result.Frame}({result.Scheme}), 底栏={result.Bottom}({result.BottomScheme}), " +
+                $"顶栏前景={result.Foreground}, 校正={result.Corrected}");
         }
 
         /// <summary>
