@@ -101,6 +101,45 @@ public sealed class WebAppCookieResult
 public static class WebAppCookieService
 {
     /// <summary>
+    /// 用户主动拉起来的临时内核（见 <see cref="RegisterTemporaryCore"/>）。
+    /// 一个网页应用都没开时，本来是无内核可借、只能提示用户先去打开；
+    /// 有了它就能就地读 Cookie，代价是后台常驻一个浏览器进程 —— 所以只由用户
+    /// 显式点击才创建，绝不自动拉起。
+    /// </summary>
+    private static CoreWebView2? _temporaryCore;
+
+    /// <summary>
+    /// 登记一个临时内核，供后续 Cookie 操作借用。
+    /// </summary>
+    public static void RegisterTemporaryCore(CoreWebView2 core)
+    {
+        _temporaryCore = core;
+    }
+
+    /// <summary>
+    /// 临时内核是否已就位且还能用。
+    /// 内核对象非 null 不代表底层 COM 还活着（浏览器进程可能已经崩了），
+    /// 所以探的时候顺手摸一下 CookieManager —— 拿不到就当没有。
+    /// </summary>
+    public static bool HasTemporaryCore()
+    {
+        if (_temporaryCore is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            return _temporaryCore.CookieManager is not null;
+        }
+        catch
+        {
+            _temporaryCore = null;
+            return false;
+        }
+    }
+
+    /// <summary>
     /// 枚举「访问某个 URL 时会带上」的 Cookie。
     /// </summary>
     /// <param name="url">网页应用的 URL</param>
@@ -291,6 +330,10 @@ public static class WebAppCookieService
             // 用谁的内核对结果没有任何影响。
             core = WebViewManager.TryPeekAnyCore();
         }
+
+        // 一个网页应用都没开（也就没有内核可借）时，退到用户主动拉起的临时内核。
+        // 排在最后：现成内核零成本，临时内核是要养一个浏览器进程的。
+        core ??= _temporaryCore;
 
         if (core is null)
         {

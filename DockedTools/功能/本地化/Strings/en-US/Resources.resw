@@ -1142,6 +1142,18 @@ Error Message: {1}</value>
   <data name="WebAppDetailPage_CookieClearAll.Content" xml:space="preserve">
     <value>Clear All</value>
   </data>
+  <data name="WebAppDetailPage_CookieCreateTempCore.Content" xml:space="preserve">
+    <value>Create temporary core to read</value>
+  </data>
+  <data name="WebAppDetail_CookieTempCoreReady" xml:space="preserve">
+    <value>Temporary core ready, reading cookies</value>
+  </data>
+  <data name="WebAppDetail_CookieLoading" xml:space="preserve">
+    <value>Reading cookies…</value>
+  </data>
+  <data name="WebAppDetail_CookieTempCoreFailed" xml:space="preserve">
+    <value>Failed to create temporary core. Please ensure the WebView2 runtime is installed, or open the web app once</value>
+  </data>
   <data name="WebAppDetailPage_CookieClearSiteTitle" xml:space="preserve">
     <value>Clear cookies for this site?</value>
   </data>
@@ -1671,5 +1683,14 @@ Error Message: {1}</value>
   </data>
   <data name="AdaptiveColourPage_RuleEmptyHint.Text" xml:space="preserve">
     <value>No rules yet — the ones above are the built-in site exceptions from early ATBC; delete one and that site falls back to the global settings.</value>
+  </data>
+  <data name="WebAppCookiePage_Title.Text" xml:space="preserve">
+    <value>Cookie Management</value>
+  </data>
+  <data name="WebAppCookiePage_Actions.Header" xml:space="preserve">
+    <value>Actions</value>
+  </data>
+  <data name="WebAppCookiePage_ListSection.Text" xml:space="preserve">
+    <value>Cookie List</value>
   </data>
 </root>

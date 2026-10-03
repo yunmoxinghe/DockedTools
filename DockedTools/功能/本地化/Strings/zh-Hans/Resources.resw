@@ -1142,6 +1142,18 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   <data name="WebAppDetailPage_CookieClearAll.Content" xml:space="preserve">
     <value>清除全部</value>
   </data>
+  <data name="WebAppDetailPage_CookieCreateTempCore.Content" xml:space="preserve">
+    <value>创建临时内核以读取</value>
+  </data>
+  <data name="WebAppDetail_CookieTempCoreReady" xml:space="preserve">
+    <value>临时内核已就绪，正在读取 Cookie</value>
+  </data>
+  <data name="WebAppDetail_CookieLoading" xml:space="preserve">
+    <value>正在读取 Cookie…</value>
+  </data>
+  <data name="WebAppDetail_CookieTempCoreFailed" xml:space="preserve">
+    <value>临时内核创建失败，请确认已安装 WebView2 运行时，或先打开一次该网页应用</value>
+  </data>
   <data name="WebAppDetailPage_CookieClearSiteTitle" xml:space="preserve">
     <value>清除站点的 Cookie？</value>
   </data>
@@ -1671,5 +1683,14 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   </data>
   <data name="AdaptiveColourPage_RuleEmptyHint.Text" xml:space="preserve">
     <value>还没有规则 —— 上面这些是 ATBC 早期版本内置的站点特例，删掉后该站点就按全局设置取色。</value>
+  </data>
+  <data name="WebAppCookiePage_Title.Text" xml:space="preserve">
+    <value>Cookie 管理</value>
+  </data>
+  <data name="WebAppCookiePage_Actions.Header" xml:space="preserve">
+    <value>操作</value>
+  </data>
+  <data name="WebAppCookiePage_ListSection.Text" xml:space="preserve">
+    <value>Cookie 列表</value>
   </data>
 </root>
