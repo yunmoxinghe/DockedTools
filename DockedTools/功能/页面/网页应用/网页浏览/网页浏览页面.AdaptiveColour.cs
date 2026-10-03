@@ -394,6 +394,19 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 {
                     System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 取色触发埋点: {text}");
                 }
+
+                // 采样链快照：看最终色块是从哪一层元素来的。
+                // 「页面看着是浅黄、栏色却是白」这类问题的唯一观测口 ——
+                // 可能是白色 header 盖在最上层（那取白是对的），也可能是渐变没解析（那是 bug）。
+                string? traceRaw = await core.ExecuteScriptAsync(PageColourProbe.BuildTraceScript());
+
+                if (PageColourProbe.FormatTrace(traceRaw) is { } traces)
+                {
+                    foreach (string line in traces)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 采样链: {line}");
+                    }
+                }
             }
             catch (Exception ex)
             {

@@ -225,6 +225,70 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
             => "JSON.stringify(window.__dockedToolsColourLog || []);";
 
         /// <summary>
+        /// 构建「读取采样链快照」的脚本。
+        ///
+        /// <para>触发埋点只能回答「取色触发了几次」，回答不了「为什么取到这个色」——
+        /// 最终色块是整条元素栈合成出来的，中间哪一层被过滤、哪一层盖在上面，托管侧全瞎。
+        /// 这份快照把中线那一列元素的 tag / 尺寸 / 背景色 / 是否通过过滤都带出来，
+        /// 是定位「页面明明是浅黄，栏色却是白」这类问题的唯一手段。</para>
+        /// </summary>
+        public static string BuildTraceScript()
+            => "JSON.stringify(window.__dockedToolsColourTraces || []);";
+
+        /// <summary>
+        /// 把采样链快照格式化成若干行可直接打印的文本（一条快照一行）。没有快照时返回 null。
+        /// </summary>
+        public static List<string>? FormatTrace(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return null;
+            }
+
+            try
+            {
+                using JsonDocument outer = JsonDocument.Parse(raw);
+                string json = outer.RootElement.ValueKind == JsonValueKind.String
+                    ? outer.RootElement.GetString() ?? string.Empty
+                    : raw;
+
+                if (string.IsNullOrWhiteSpace(json) || json == "[]")
+                {
+                    return null;
+                }
+
+                using JsonDocument document = JsonDocument.Parse(json);
+                if (document.RootElement.ValueKind != JsonValueKind.Array)
+                {
+                    return null;
+                }
+
+                var lines = new List<string>();
+
+                foreach (JsonElement item in document.RootElement.EnumerateArray())
+                {
+                    if (item.ValueKind != JsonValueKind.Object)
+                    {
+                        continue;
+                    }
+
+                    string source = item.TryGetProperty("src", out JsonElement src) ? src.ToString() : "?";
+                    string time = item.TryGetProperty("t", out JsonElement stamp) ? stamp.ToString() : "?";
+                    string stack = item.TryGetProperty("stack", out JsonElement chain) ? chain.ToString() : "?";
+
+                    lines.Add($"{source}@{time}: {stack}");
+                }
+
+                return lines.Count == 0 ? null : lines;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[PageColourProbe] 解析采样链快照失败: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
         /// 把触发埋点格式化成可直接打印的一行文本。没有埋点时返回 null（调用方据此不打日志）。
         /// </summary>
         public static string? FormatLog(string? raw)
@@ -547,11 +611,35 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
         } catch (e) { return null; }
     };
 
-    var __atbcElementColour = function (element) {
+    // backgroundColor 透明时退到 background-image。
+    // 现代站点的大片底色经常是 linear-gradient 而不是纯色 —— 浅黄、浅灰、米白这类
+    // 「明明有底色」的页面尤其常见。只读 backgroundColor 的话整条采样链会全空，
+    // 最后混上兜底色（Light 方案下是纯白）就变成「浅黄页面取到白」。
+    // 顶栏取第一个色标、底栏取最后一个：渐变是有方向的，取错一端等于取到页面另一头。
+    var __atbcGradientColour = function (style, last) {
+        var image = style.backgroundImage;
+        if (!image || image === 'none') { return null; }
+
+        // url(...) 里常塞着 svg data URI，内容里也会有 #rgb / rgb() 字样，
+        // 先把整段 url() 挖掉再找颜色，否则会取到一个跟页面外观毫无关系的字面色。
+        var stops = image.replace(/url\([^)]*\)/g, '')
+            .match(/rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}/g);
+        if (!stops || stops.length === 0) { return null; }
+
+        var value = __atbcNormalise(last ? stops[stops.length - 1] : stops[0]);
+        // 渐变本身也可能是透明的（rgba(0,0,0,0) 起步的遮罩层），那跟没取到一样
+        if (!value || value === 'rgba(0, 0, 0, 0)' || value === 'transparent') { return null; }
+        return value;
+    };
+
+    var __atbcElementColour = function (element, fromEnd) {
         if (!(element instanceof Element)) { return null; }
         var style = getComputedStyle(element);
         var background = style.backgroundColor;
-        if (!background || background === 'rgba(0, 0, 0, 0)' || background === 'transparent') { return null; }
+        if (!background || background === 'rgba(0, 0, 0, 0)' || background === 'transparent') {
+            background = __atbcGradientColour(style, fromEnd === true);
+            if (!background) { return null; }
+        }
         if (style.opacity === '0') { return null; }
         return { colour: background, opacity: style.opacity, filter: style.filter };
     };
@@ -569,27 +657,31 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
     // 采样点纵坐标参数化：顶栏取视口顶端（y=3），底栏取视口底端（y=innerHeight-3）。
     // 两处共用同一套过滤与回退规则，只有 y 不同 —— 底栏不该是顶栏的复制品，
     // 但也不该用另一套判定，否则同一个页面上下两栏会给出不可比的结果。
-    var __atbcPageColourAt = function (y) {
+    // fromEnd：渐变背景取哪个色标。顶栏（y=3）取第一个，底栏（y=innerHeight-3）取最后一个。
+    var __atbcPageColourAt = function (y, fromEnd) {
         return document.elementsFromPoint(window.innerWidth / 2, y)
             .filter(function (element) {
                 return element instanceof HTMLElement &&
                     element.offsetWidth >= window.innerWidth * 0.9 &&
                     element.offsetHeight >= 20;
             })
-            .map(function (element) { return __atbcElementColour(element); })
-            .concat([__atbcElementColour(document.body), __atbcElementColour(document.documentElement)])
+            .map(function (element) { return __atbcElementColour(element, fromEnd); })
+            .concat([
+                __atbcElementColour(document.body, fromEnd),
+                __atbcElementColour(document.documentElement, fromEnd)
+            ])
             .filter(function (data) { return data !== null; });
     };
 
     var __atbcPageColour = function () {
-        return __atbcPageColourAt(3);
+        return __atbcPageColourAt(3, false);
     };
 
     // 底栏专用：视口底端那一带的元素栈。
     // 页面极短（innerHeight < 3）时 elementsFromPoint 越界返回空数组，
     // 但下面 concat 的 body / html 仍在 —— 于是退化成「和顶栏同色」，正是想要的兜底。
     var __atbcPageBottomColour = function () {
-        return __atbcPageColourAt(window.innerHeight - 3);
+        return __atbcPageColourAt(window.innerHeight - 3, true);
     };
 
     var __atbcQueryColour = function (query) {
@@ -705,12 +797,59 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
     // 触发源包装：只多记一笔就转交 sendColour。
     // 返回值要留着做 removeEventListener —— 每次调用 trigger() 都是一个新的函数对象，
     // 现调现传的话卸载时摘不掉，脚本叠加会留下僵尸监听。
+    var pendingSource = '?';
     var trigger = function (source) {
         return function () {
+            pendingSource = source;
             log(source, 'hit');
             sendColour();
         };
     };
+
+    // ⭐ 采样链快照：回答「这个色是从哪一层元素来的」。
+    // 光看最终色块只知道结果，看不出路径 —— 「浅黄页面取到白」可能是白色 header 盖在上面
+    // （那时取白是对的，该改的是期望），也可能是渐变没解析（那是 bug）。两种的根治办法
+    // 完全不同，没这份快照就只能靠猜。
+    // 记下中线上那一列元素的 tag / 尺寸 / 背景色，以及它是否通过了宽高过滤，
+    // 末尾附上 body 与 html 的底色（采样链的无条件兜底项）。
+    // 只在真正发出消息时记：被 dedup 掉的说明颜色没变，没必要重复占缓冲。
+    var sampleTraces = [];
+    var sampleTraceLimit = 8;
+    var traceSample = function (source) {
+        try {
+            var minWidth = window.innerWidth * 0.9;
+            var parts = [];
+            document.elementsFromPoint(window.innerWidth / 2, 3).slice(0, 6).forEach(function (element) {
+                var style = null;
+                try { style = getComputedStyle(element); } catch (e) { }
+                var background = style ? style.backgroundColor : '?';
+                if (!background || background === 'rgba(0, 0, 0, 0)' || background === 'transparent') {
+                    background = style ? (__atbcGradientColour(style, false) || 'none') : '?';
+                }
+
+                var kept = element instanceof HTMLElement &&
+                    element.offsetWidth >= minWidth &&
+                    element.offsetHeight >= 20;
+
+                parts.push((element.tagName || '?').toLowerCase() +
+                    '[' + Math.round(element.offsetWidth) + 'x' + Math.round(element.offsetHeight) + ']' +
+                    ' ' + background + (kept ? ' KEEP' : ' SKIP'));
+            });
+
+            var bodyBg = '?';
+            var htmlBg = '?';
+            try { bodyBg = getComputedStyle(document.body).backgroundColor || 'none'; } catch (e) { }
+            try { htmlBg = getComputedStyle(document.documentElement).backgroundColor || 'none'; } catch (e) { }
+
+            sampleTraces.push({
+                t: Date.now() % 100000,
+                src: source,
+                stack: parts.join(' | ') + ' || body=' + bodyBg + ' html=' + htmlBg
+            });
+            if (sampleTraces.length > sampleTraceLimit) { sampleTraces.shift(); }
+        } catch (e) { }
+    };
+    window.__dockedToolsColourTraces = sampleTraces;
 " + ColourHelpers + @"
     var dispatch = function () {
         // 动态刷新（ATBC: dynamic）在 dispatch 里查，不在 start() 里查：
@@ -736,6 +875,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
             lastPayload = colourJson;
             window.chrome.webview.postMessage('{""header"":""" + MessageHeader + @""",""colour"":' + colourJson + '}');
             log('dispatch', 'sent');
+            traceSample(pendingSource);
         } catch (e) { log('dispatch', 'error'); }
     };
 
@@ -764,6 +904,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
             mutationList.forEach(function (mutation) {
                 mutation.addedNodes.forEach(function (node) {
                     if (node instanceof HTMLMetaElement && node.name === 'theme-color') {
+                        pendingSource = 'meta-add';
                         log('meta-add', 'hit');
                         sendColour();
                         metaThemeColourObserver.observe(node, { attributes: true });
@@ -778,7 +919,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
                 mutation.removedNodes.forEach(function (n) { nodes.push(n); });
                 return nodes.some(function (n) { return n.nodeName === 'STYLE'; });
             });
-            if (touched) { log('style-tag', 'hit'); sendColour(); }
+            if (touched) { pendingSource = 'style-tag'; log('style-tag', 'hit'); sendColour(); }
         });
 
         // passive：这几个监听不会 preventDefault，声明成 passive 让滚动不必等我们的回调
