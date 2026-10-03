@@ -1,7 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <!-- 10.0.22621 已于 2025-11-12 EOS（微软官方停止支持），且本机未安装该版本 SDK，
+         导致 Native AOT 链接阶段找不到 advapi32.lib（LNK1181）。
+         为什么不选更新的 10.0.28000（Win11 26H1，Stable 通道当前版本）：本机虽已安装，
+         但 .NET SDK 10.0.401 的 TargetFrameworkInference 白名单最高只到 10.0.26100，
+         用 28000 会报 NETSDK1140「不是有效的 TargetPlatformVersion」。
+         故取 26100：本机已装 + 在 .NET SDK 白名单内 + WindowsAppSDK 2.5.1 支持。
+         TargetPlatformMinVersion 仍为 17763，能安装的最低系统版本不受影响。 -->
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>DockedTools</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
@@ -102,12 +109,23 @@
 
   <!-- Publish Properties -->
   <PropertyGroup>
-    <!-- ⚠️ 不要改回 true。WinUI 3 官方不支持 Native AOT（XAML 依赖运行时反射与元数据），
-         且实测开启后 ILC 编译会 OOM，正式版根本打不出包。2026-10-03 关闭。 -->
-    <PublishAot>false</PublishAot>
+    <!-- Native AOT：WinUI 3 自 WindowsAppSDK 1.6 起官方支持（官方实测启动 -50%）。
+         本机 2026-10-03 实测通过：ILC 编译 0 条 IL2xxx/IL3xxx 告警，AOT + MSIX 打包
+         产出 32 MB 签名包，exe 30.2 MB 且无 BSJB 托管元数据头（确为原生）。
+         硬性前提：本机必须装有 TFM 对应版本的 Windows SDK（本项目为 10.0.26100）。
+         若报 LNK1181「无法打开输入文件 xxx.lib」：链接器没解析到 Windows Kits 的
+         LIBPATH —— 先确认该版本 SDK 已安装，必要时用 LIB 环境变量补上
+         Windows Kits\10\Lib\<版本>\um\x64 与 ucrt\x64。 -->
+    <PublishAot>true</PublishAot>
+    <!-- PublishTrimmed 在 AOT 下是冗余的（AOT 隐含裁剪），只在非 AOT 的 publish 中起作用 -->
     <PublishTrimmed>true</PublishTrimmed>
   <PublishReadyToRun>false</PublishReadyToRun>
-  <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- Native AOT 下这一项很关键：false 会把整份 ICU 全球化数据编进产物，
+         既放大 ILC 的内存峰值（实测会 OOM）也放大体积。Reactor 官方对 Native AOT
+         形态明确推荐 true。
+         影响范围：只影响 CultureInfo 相关行为（日期/排序/数字/时区），
+         不影响 resw 的 zh-Hans / en-US 多语言资源切换。 -->
+    <InvariantGlobalization>true</InvariantGlobalization>
   <GenerateAppInstallerFile>False</GenerateAppInstallerFile>
   <AppxPackageSigningEnabled>True</AppxPackageSigningEnabled>
   <PackageCertificateKeyFile>Docked AI_StoreKey.pfx</PackageCertificateKeyFile>
