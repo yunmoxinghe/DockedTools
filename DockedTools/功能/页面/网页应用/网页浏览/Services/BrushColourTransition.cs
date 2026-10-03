@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using System;
@@ -45,12 +46,13 @@ public static class BrushColourTransition
     /// <summary>
     /// 把画刷平滑地变到目标色。已经在这个色上就什么都不做（连 Storyboard 都不建）。
     /// </summary>
-    /// <param name="brush">被驱动的常驻画刷。必须已经挂在 UI 上，动画才看得到。</param>
+    /// <param name="host">承载画刷的视觉元素（Border），动画要挂在它身上才跑得起来。</param>
+    /// <param name="brush">被驱动的常驻画刷，必须已经挂在 <paramref name="host"/> 的 Background 上。</param>
     /// <param name="target">目标颜色</param>
     /// <param name="durationMs">时长；&lt;= 0 时退化为立即赋值</param>
-    public static void AnimateTo(SolidColorBrush brush, Windows.UI.Color target, int durationMs = DefaultDurationMs)
+    public static void AnimateTo(Border host, SolidColorBrush brush, Windows.UI.Color target, int durationMs = DefaultDurationMs)
     {
-        if (brush is null)
+        if (host is null || brush is null)
         {
             return;
         }
@@ -93,8 +95,15 @@ public static class BrushColourTransition
 
         var storyboard = new Storyboard();
         storyboard.Children.Add(animation);
-        Storyboard.SetTarget(animation, brush);
-        Storyboard.SetTargetProperty(animation, "Color");
+
+        // ⭐ 关键：动画必须挂在【视觉元素】上、用【间接属性路径】寻址到画刷的 Color 子属性。
+        // 之前的写法 Storyboard.SetTarget(animation, brush) + "Color" 直接把游离的
+        // SolidColorBrush 当 target —— 画刷不在视觉树里，动画系统找不到对应的合成视觉节点，
+        // 动画被静默丢弃（不报错、不过渡），颜色变成瞬间跳变，这正是「切色没淡入」的根因。
+        // 正确姿势是 target 指向 Border，路径写成 (Background).(SolidColorBrush.Color)，
+        // 让动画沿着视觉元素的 Background 属性找到那支画刷再去动它的 Color。
+        Storyboard.SetTarget(animation, host);
+        Storyboard.SetTargetProperty(animation, "(Background).(SolidColorBrush.Color)");
 
         Running running = _running.GetValue(brush, _factory);
         running.Storyboard = storyboard;
@@ -109,6 +118,12 @@ public static class BrushColourTransition
                 running.Storyboard = null;
             }
         };
+
+        // 探针：颜色过渡是肉眼才能确认的效果，日志里留一条「动画真的起了」的凭据，
+        // 排查「切色没淡入」时一眼能分清是没走到这里、还是动画起了但被别处覆盖了。
+        System.Diagnostics.Debug.WriteLine(
+            $"[BrushColourTransition] 🎨 淡入开始: {from} → {target}, {durationMs}ms, " +
+            $"host={host.GetType().Name}");
 
         storyboard.Begin();
     }

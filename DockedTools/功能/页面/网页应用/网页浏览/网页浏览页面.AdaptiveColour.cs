@@ -388,7 +388,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             {
                 if (resetOnFailure)
                 {
-                    DispatcherQueue.TryEnqueue(ResetAdaptiveBarColour);
+                    DispatcherQueue.TryEnqueue(() => ResetAdaptiveBarColour());
                 }
 
                 return;
@@ -656,15 +656,30 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // 只改本页面的顶部色块，顶栏控件本身的背景一律不动。
             // 色块是 Border，XAML 的 BackgroundTransition 不支持 Border（只支持
             // Grid / StackPanel / ContentPresenter），所以这里自己驱动常驻画刷做淡入。
-            // transitionMs=0 的场景（复位后的首次上色）退化为立即赋值。
+            // 两个分支都走过渡：已有常驻画刷就直接滚过去；Background 还停在 ThemeResource 上
+            // 就先接住当前可见色、挂上画刷再滚。时长为 0 时 AnimateTo 内部自行退化为立即赋值。
             if (ReferenceEquals(WebPageTopAppBarBackground.Background, _adaptiveTopBarBrush))
             {
-                BrushColourTransition.AnimateTo(_adaptiveTopBarBrush, result.Frame, AdaptiveTransitionMs);
+                BrushColourTransition.AnimateTo(
+                    WebPageTopAppBarBackground, _adaptiveTopBarBrush, result.Frame, AdaptiveTransitionMs);
             }
             else
             {
-                BrushColourTransition.SnapTo(_adaptiveTopBarBrush, result.Frame);
+                // 首次挂载：先让常驻画刷接住【当前可见的背景色】，挂上去之后再滚到目标色。
+                // 直接把一支全透明的新画刷换上去会先闪一下（白 → 透明 → 网页色），
+                // 从当前色起步则是一次干净的淡入，首次上色也就不用退化成硬跳了。
+                Windows.UI.Color start = WebPageTopAppBarBackground.Background is SolidColorBrush current
+                    ? current.Color
+                    : Microsoft.UI.Colors.Transparent;
+
+                BrushColourTransition.SnapTo(_adaptiveTopBarBrush, start);
                 WebPageTopAppBarBackground.Background = _adaptiveTopBarBrush;
+
+                // AdaptiveTransitionMs 是编译期常量（> 0），这里不用再判一次 —— 判了 else 分支
+                // 恒不可达，编译器会报 CS0162。真要走「无过渡」路径是 AnimateTo 内部按
+                // durationMs <= 0 自行退化成立即赋值，那条路留给以后把它改成可配置时用。
+                BrushColourTransition.AnimateTo(
+                    WebPageTopAppBarBackground, _adaptiveTopBarBrush, result.Frame, AdaptiveTransitionMs);
             }
 
             // 顶栏文字/图标：按取到的亮暗切顶栏局部主题，前景色由主题资源自动跟上。
@@ -687,9 +702,27 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         }
 
         /// <summary>
-        /// 恢复系统默认栏色（页面关闭或开关关闭时调用）
+        /// 恢复系统默认栏色（页面离开或开关关闭时调用）。
         /// </summary>
-        private void ResetAdaptiveBarColour()
+        /// <param name="detachMonitor">
+        /// 是否拆掉内核级取色状态（常驻脚本订阅 + _adaptiveMonitorInstalled 标记）。
+        ///
+        /// <para><b>页面离开（切走 / Unloaded）时传 false</b>：脚本和 <see cref="OnAdaptiveColourMessageReceived"/>
+        /// 订阅都挂在 CoreWebView2 内核上，而页面被 LRU 缓存、内核不重建 —— 拆掉的话切回时
+        /// 就得重新 <c>AddScriptToExecuteOnDocumentCreatedAsync</c>，而那个 API 对【已经存在的文档】
+        /// 不生效，补一次一次性探测又和 <c>Loaded</c> 里的初始化竞态，结果栏色停在默认色，
+        /// 要等下一次导航才恢复 —— 这正是「切换 page 后颜色丢失」的根因。</para>
+        ///
+        /// <para>保留订阅是安全的：切走时 WebView 已不在前台，常驻脚本因
+        /// <c>document.visibilityState !== 'visible'</c> 停止回传；即便少数路径回了，
+        /// 写的也是本页自己的 <c>WebPageTopAppBarBackground</c>，用户看不到、无害。
+        /// 切回后由常驻脚本的 visibilitychange / 事件监听自动恢复颜色。</para>
+        ///
+        /// <para><b>关闭总开关时传 true</b>：此时要真正停止取色，退订
+        /// <see cref="OnAdaptiveColourMessageReceived"/> 让回传无人处理，脚本侧则靠
+        /// <see cref="PushRuntimeOptionsAsync"/> 推的 runtime 变量停发。</para>
+        /// </param>
+        private void ResetAdaptiveBarColour(bool detachMonitor = false)
         {
             _adaptiveBarColourCts?.Cancel();
             _adaptiveBarColourCts?.Dispose();
@@ -700,35 +733,60 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             _appliedAdaptiveBarColour = null;
             _adaptiveRule = null;
             _adaptiveSuspended = false;
-            _adaptiveMonitorCore = null;
-            _adaptiveInjectedQuery = null;
             _adaptiveLastUrl = null;
 
-            if (WebView?.CoreWebView2 is { } core)
-            {
-                core.WebMessageReceived -= OnAdaptiveColourMessageReceived;
-            }
+            // 文档代次闸门的状态也要复位：切走时若恰好「正在等新文档」
+            // （_adaptiveAwaitingNewDocument=true，比如导航刚发起就切走了），切回后补探测
+            // 取的是同一份文档的 timeOrigin，会被 IsStaleDocument 误判成「旧文档迟到回传」丢弃，
+            // 颜色要等 1500ms 自愈才恢复。这里一并清掉，切回后的第一发回传直接放行。
+            _adaptiveDocOrigin = 0;
+            _adaptiveStaleDocOrigin = 0;
+            _adaptiveStaleMarkedTicks = 0;
+            _adaptiveAwaitingNewDocument = false;
 
-            // 常驻脚本挂在 CoreWebView2 上，随内核一起走；这里只清标记，
-            // 之后再导航会重新注入（脚本内部有 __dockedToolsColourMonitor 去重）。
-            _adaptiveMonitorInstalled = false;
+            // 页面离开（切走/Unloaded）时保留内核级取色状态，切回后自动恢复；只有真正关开关才拆。
+            if (detachMonitor)
+            {
+                _adaptiveMonitorCore = null;
+                _adaptiveInjectedQuery = null;
+
+                if (WebView?.CoreWebView2 is { } core)
+                {
+                    core.WebMessageReceived -= OnAdaptiveColourMessageReceived;
+                }
+
+                // 常驻脚本挂在 CoreWebView2 上，随内核一起走；这里只清标记，
+                // 之后再导航会重新注入（脚本内部有 __dockedToolsColourMonitor 去重）。
+                _adaptiveMonitorInstalled = false;
+            }
 
             // 开关可能是页面开着的时候被关掉的，画刷上还留着网页色，动画也可能还在滚 ——
             // 先停掉动画，否则正在跑的 Storyboard 会在赋值之后继续插值，把复位色又拽回网页色。
             BrushColourTransition.Stop(_adaptiveTopBarBrush);
 
             // 所以不按当前开关状态提前返回，一律走完整复位（幂等，重复调用无副作用）。
-            // 覆盖 Background 会切断 XAML 的 ThemeResource 绑定，而 ClearValue 同样回不到
-            // ThemeResource（它也是本地值），所以显式取一次当前主题下的默认画刷重新赋值。
+            //
+            // ⭐ 复位时【保持 Background 指向 _adaptiveTopBarBrush】，只把画刷颜色设成主题默认色。
+            // 不换成 ThemeResource 画刷的原因：ApplyAdaptiveBarColour 靠
+            // ReferenceEquals(Background, _adaptiveTopBarBrush) 判断「该淡入还是硬跳」——
+            // 一旦换成别的画刷，切回后的首次上色就落进 SnapTo 分支，颜色直接硬跳、没有淡入动画
+            // （这正是「切换 page 后颜色没淡入」的根因）。保持常驻画刷，切回时走 AnimateTo，
+            // 由 firstPaint 特判保证从默认色淡入到网页色时不会先闪一下黑。
+            //
+            // 失去 ThemeResource 跟随的代价可以接受：切走时页面不在前台，色块颜色用户看不到；
+            // 系统主题切换（页面在前台时）走 OnSystemThemeChanged → ReapplyAdaptiveBarColourForThemeChange，
+            // 不经这里，不受影响。
             if (Application.Current.Resources.TryGetValue(TopBarBackgroundResourceKey, out object? resource)
-                && resource is Brush defaultBrush)
+                && resource is SolidColorBrush defaultBrush)
             {
-                WebPageTopAppBarBackground.Background = defaultBrush;
+                _adaptiveTopBarBrush.Color = defaultBrush.Color;
             }
             else
             {
-                WebPageTopAppBarBackground.ClearValue(Border.BackgroundProperty);
+                _adaptiveTopBarBrush.Color = Microsoft.UI.Colors.Transparent;
             }
+
+            WebPageTopAppBarBackground.Background = _adaptiveTopBarBrush;
 
             // 顶栏主题复位：不复位的话退出网页页后顶栏会一直顶着上一个网页的亮/暗。
             // 走 ScopeFor(this) 而不是 SetTheme —— 后者写的是【当前写入目标】，
@@ -774,10 +832,12 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         {
             DispatcherQueue.TryEnqueue(() =>
             {
-                // 关掉总开关：立刻复位栏色（含顶栏局部主题、底栏），不留上一个网页的亮/暗
+                // 关掉总开关：立刻复位栏色（含顶栏局部主题、底栏），不留上一个网页的亮/暗。
+                // detachMonitor: true —— 真正停止取色：退订回传订阅、清注入标记，
+                // 脚本侧由 EnsureAdaptiveColourSourceAsync 推的 runtime 变量停发。
                 if (!AdaptiveColourSettings.Enabled)
                 {
-                    ResetAdaptiveBarColour();
+                    ResetAdaptiveBarColour(detachMonitor: true);
                     return;
                 }
 

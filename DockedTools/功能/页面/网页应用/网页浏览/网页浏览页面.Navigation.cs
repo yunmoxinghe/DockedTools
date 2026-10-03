@@ -123,7 +123,15 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         void INavigationAware.OnNavigatedTo(object? parameter)
         {
             System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] INavigationAware.OnNavigatedTo called");
-            
+
+            // ⭐ 认领底栏：这条路径是【从 LRU 缓存切回来】走的（override 的 OnNavigatedTo 不走）。
+            // 切走时 Unloaded → Unregister 已经把本页的底栏宿主从服务里摘掉了，
+            // 而缓存页切回来不会重新构造 ⇒ 构造函数里那次 Register 不会再跑。
+            // 不在这里补认领的话 IsHostRegistered 恒为 false，IsBottomBarHostOwner() 也就恒 false，
+            // 底栏自适应色【整个写不进去】—— 表现不是没淡入，是切回来底栏压根没颜色。
+            // 实测印证：切回后日志只有「底部栏容器已注销」，没有重新注册，底栏全程不上色。
+            Services.BottomBarThemeService.ClaimForeground(BottomBarHost);
+
             // ⭐ 订阅窗口状态完成事件，当窗口恢复显示动画完成后给 WebView 焦点
             DockedTools.Features.UnifiedCalls.MainWindow.MainWindowService.StateCompleted += OnMainWindowStateCompleted;
 
@@ -225,6 +233,17 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             else
             {
                 System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] WebView 状态正常，当前 URL: {WebView.Source}");
+
+                // ⭐ 切回页面补一次取色兜底。
+                // 切走时 ResetAdaptiveBarColour(detachMonitor: false) 保留了常驻脚本订阅，正常情况
+                // 切回后由脚本的 visibilitychange 事件自动恢复颜色；但「普通」省电模式下切走时
+                // WebView 并不折叠、文档 visibilityState 一直 visible，切回不会触发 visibilitychange，
+                // 颜色就停在复位后的默认色上。这里主动补一次一次性探测，把页面外观色立刻拉回来。
+                // 先重算站点规则（切走时被 Reset 清成 null，COLOUR 定色规则要重新命中），
+                // 再强制探测 —— ProbeOnceAsync 里的 Evaluate 会按规则分派，COLOUR 规则下探测白跑但结果正确。
+                // RestartOneShotProbeAsync 内部会取消上一次未完成的探测，幂等安全。
+                _adaptiveRule = ResolveAdaptiveRule();
+                _ = RestartOneShotProbeAsync();
             }
         }
 

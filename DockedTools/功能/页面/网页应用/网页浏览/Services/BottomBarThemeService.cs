@@ -69,6 +69,22 @@ public static class BottomBarThemeService
     private static readonly ConditionalWeakTable<Border, BottomBarState> _hosts = new();
 
     /// <summary>
+    /// 宿主 → 常驻自定义画刷。
+    ///
+    /// <para>为什么画刷不能只存在 <see cref="BottomBarState"/> 里：
+    /// <see cref="Unregister(Border?)"/> 会把 state 从 <see cref="_hosts"/> 整个摘掉，
+    /// 而页面从 LRU 缓存切回来时不会重新构造 ⇒ <see cref="ClaimForeground"/> 只能补注册一个
+    /// <b>全新的</b> state，里面 <c>CustomBrush</c> 必然是 null。于是切回后第一次上色
+    /// 又变成「new 一支新画刷 + 直接赋值」，<see cref="BrushColourTransition.AnimateTo"/>
+    /// 根本没有能滚的常驻画刷 —— 这就是底栏「切回来颜色硬跳、没有淡入」的根因。</para>
+    ///
+    /// <para>把画刷挂到 Border 自己的生命周期上（同样是弱键表，Border 回收即自动释放），
+    /// 无论 state 被摘掉重建多少次，画刷始终跟着这块 Border 存活，
+    /// 切回来复用同一支 ⇒ 动画有得滚 ⇒ 淡入回来。</para>
+    /// </summary>
+    private static readonly ConditionalWeakTable<Border, SolidColorBrush> _brushes = new();
+
+    /// <summary>
     /// 最近一次注册/认领的宿主。只为兼容「不传宿主」的旧调用而保留 ——
     /// 新代码请一律显式传自己的 Border。
     /// </summary>
@@ -337,18 +353,39 @@ public static class BottomBarThemeService
     /// </summary>
     private static void SetCustomBackground(Border host, BottomBarState state, Color colour, int transitionMs)
     {
-        if (state.CustomBrush is null)
+        // ⭐ 常驻画刷挂在 Border 上（见 _brushes 的注释）：state 可能被 Unregister 摘掉后重建，
+        // 但画刷不会。切回来复用同一支，动画才有得滚。
+        SolidColorBrush brush = _brushes.GetValue(host, static _ => new SolidColorBrush());
+        state.CustomBrush = brush;
+
+        if (!ReferenceEquals(host.Background, brush))
         {
-            state.CustomBrush = new SolidColorBrush(colour);
-            host.Background = state.CustomBrush;
+            // 首次挂载（背景还停在 ThemeResource 上）：先让常驻画刷接住【当前可见的背景色】，
+            // 挂上去之后再滚到目标色 —— 直接换一支透明画刷上去会先闪一下。
+            // 这样首次上色也是一次干净的淡入，不必退化成硬跳。
+            Color start = host.Background is SolidColorBrush current
+                ? current.Color
+                : Microsoft.UI.Colors.Transparent;
+
+            BrushColourTransition.SnapTo(brush, start);
+            host.Background = brush;
+
+            if (transitionMs > 0)
+            {
+                BrushColourTransition.AnimateTo(host, brush, colour, transitionMs);
+            }
+            else
+            {
+                BrushColourTransition.SnapTo(brush, colour);
+            }
         }
         else if (transitionMs > 0)
         {
-            BrushColourTransition.AnimateTo(state.CustomBrush, colour, transitionMs);
+            BrushColourTransition.AnimateTo(host, brush, colour, transitionMs);
         }
         else
         {
-            BrushColourTransition.SnapTo(state.CustomBrush, colour);
+            BrushColourTransition.SnapTo(brush, colour);
         }
 
         state.CustomColor = colour;
@@ -361,7 +398,9 @@ public static class BottomBarThemeService
     {
         // 还有动画在跑就停掉：动画依赖属性那条链是按画刷实例走的，
         // 换Background 之后它仍在后台改一支没人看的 brush，虽然无害但是白烧 CPU，也污染下一次 SnapTo。
-        if (state.CustomBrush is { } brush)
+        // 从 _brushes 取而不是 state.CustomBrush —— 后者在「Unregister 摘掉 state、切回补注册」
+        // 这条路上是新 state，恒为 null，会漏停上一支画刷上还在滚的动画。
+        if (_brushes.TryGetValue(host, out SolidColorBrush? brush))
         {
             BrushColourTransition.Stop(brush);
         }
@@ -369,6 +408,8 @@ public static class BottomBarThemeService
         state.CustomBrush = null;
         state.CustomColor = null;
 
+        // 这里要真正换回 ThemeResource：语义是「跟随系统」，
+        // 系统主题切换时底栏得跟着变，不能留一支固定色的画刷在上面。
         ApplyDefaultBackground(host, state);
     }
 
@@ -389,13 +430,32 @@ public static class BottomBarThemeService
             changed = true;
         }
 
-        // 只有铺过自定义画刷才需要把背景换回 ThemeResource；本来就在默认态就别动它。
-        if (state.CustomBrush is { } brush)
+        // ⭐ 复位时【保持 host.Background 指向常驻画刷】，只把画刷颜色设成默认色，
+        // 而不是换回 ThemeResource 画刷。
+        // SetCustomBackground 靠 ReferenceEquals(host.Background, brush) 区分
+        // 「首次挂载（直接落色）」与「已有常驻画刷（滚一个过渡过去）」——
+        // 换成别的画刷的话，页面从 LRU 缓存切回来时这一句判定成 false，
+        // 于是走首次分支直接赋值，颜色硬跳、没有淡入。
+        // 代价是切走期间这块底栏不再跟随 ThemeResource，但它此刻不在前台、用户看不见；
+        // 系统主题切换走的是自适应重算路径，不经这里，不受影响。
+        if (_brushes.TryGetValue(host, out SolidColorBrush? brush)
+            && ReferenceEquals(host.Background, brush))
         {
             BrushColourTransition.Stop(brush);
+
+            if (!string.IsNullOrEmpty(state.BackgroundResourceKey)
+                && Application.Current.Resources.TryGetValue(state.BackgroundResourceKey, out object? resource)
+                && resource is SolidColorBrush defaultBrush)
+            {
+                brush.Color = defaultBrush.Color;
+            }
+            else
+            {
+                brush.Color = Microsoft.UI.Colors.Transparent;
+            }
+
             state.CustomBrush = null;
             state.CustomColor = null;
-            ApplyDefaultBackground(host, state);
             changed = true;
         }
 
