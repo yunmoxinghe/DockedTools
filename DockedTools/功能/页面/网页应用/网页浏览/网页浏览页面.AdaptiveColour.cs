@@ -682,7 +682,19 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 _ => ActualTheme == ElementTheme.Dark ? AdaptiveScheme.Dark : AdaptiveScheme.Light
             };
 
-        private void ApplyAdaptiveBarColour(AdaptiveBarColourResult result, AdaptiveTabColourData? data = null)
+        /// <summary>
+        /// 把一次取色结果写到 UI 上。
+        /// </summary>
+        /// <param name="result">取色结果</param>
+        /// <param name="data">这次取色的原始数据（主题切换时用它重算，不必重新探测）</param>
+        /// <param name="immediate">
+        /// true 时不做淡入，直接落色。只用于「切换 page 时用记忆色预热」——
+        /// 那一帧必须立刻是对的，带着 300ms 尾巴等于没预热。
+        /// </param>
+        private void ApplyAdaptiveBarColour(
+            AdaptiveBarColourResult result,
+            AdaptiveTabColourData? data = null,
+            bool immediate = false)
         {
             if (data is not null)
             {
@@ -706,6 +718,12 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
             _appliedAdaptiveBarColour = result;
 
+            // 记进站点记忆：下次切回这个站点（哪怕页面实例已被 LRU 淘汰重建）能立刻预热。
+            // 放在真正落色之后 —— 去重 return 的那些说明颜色没变，记忆里本来就是这个值。
+            AdaptiveBarColourMemory.Remember(CurrentAdaptiveUrl(), result);
+
+            int transitionMs = immediate ? 0 : AdaptiveTransitionMs;
+
             var theme = result.Scheme == AdaptiveScheme.Dark ? ElementTheme.Dark : ElementTheme.Light;
 
             // 只改本页面的顶部色块，顶栏控件本身的背景一律不动。
@@ -716,7 +734,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             if (ReferenceEquals(WebPageTopAppBarBackground.Background, _adaptiveTopBarBrush))
             {
                 BrushColourTransition.AnimateTo(
-                    WebPageTopAppBarBackground, _adaptiveTopBarBrush, result.Frame, AdaptiveTransitionMs);
+                    WebPageTopAppBarBackground, _adaptiveTopBarBrush, result.Frame, transitionMs);
             }
             else
             {
@@ -730,11 +748,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 BrushColourTransition.SnapTo(_adaptiveTopBarBrush, start);
                 WebPageTopAppBarBackground.Background = _adaptiveTopBarBrush;
 
-                // AdaptiveTransitionMs 是编译期常量（> 0），这里不用再判一次 —— 判了 else 分支
-                // 恒不可达，编译器会报 CS0162。真要走「无过渡」路径是 AnimateTo 内部按
-                // durationMs <= 0 自行退化成立即赋值，那条路留给以后把它改成可配置时用。
+                // transitionMs 为 0（预热）时 AnimateTo 内部自行退化成立即赋值，
+                // 首帧也就不会有「透明 → 目标色」那一段多余的淡入。
                 BrushColourTransition.AnimateTo(
-                    WebPageTopAppBarBackground, _adaptiveTopBarBrush, result.Frame, AdaptiveTransitionMs);
+                    WebPageTopAppBarBackground, _adaptiveTopBarBrush, result.Frame, transitionMs);
             }
 
             // 顶栏文字/图标：按取到的亮暗切顶栏局部主题，前景色由主题资源自动跟上。
@@ -755,13 +772,50 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     : ElementTheme.Light;
 
                 Services.BottomBarThemeService.SetBottomBar(
-                    BottomBarHost, bottomTheme, result.Bottom, AdaptiveTransitionMs);
+                    BottomBarHost, bottomTheme, result.Bottom, transitionMs);
             }
 
             System.Diagnostics.Debug.WriteLine(
-                $"[WebBrowserPage] 自适应栏色: 来源={result.Reason}, " +
+                $"[WebBrowserPage] 自适应栏色: 来源={result.Reason}{(immediate ? "（记忆预热）" : string.Empty)}, " +
                 $"顶栏={result.Frame}({result.Scheme}), 底栏={result.Bottom}({result.BottomScheme}), " +
                 $"顶栏前景={result.Foreground}, 校正={result.Corrected}");
+        }
+
+        /// <summary>
+        /// 当前应当参与取色 / 记忆的 URL。
+        /// 内核还没就绪（刚开页、还没导航）时退回快捷方式地址 —— 那时
+        /// <c>WebView.Source</c> 是 null，而预热恰恰要在内核就绪之前就把色顶上。
+        /// </summary>
+        private string? CurrentAdaptiveUrl()
+            => WebView?.CoreWebView2?.Source ?? _currentShortcut?.Url;
+
+        /// <summary>
+        /// 切换 page 时先把这个站点上次的栏色顶上去（页面切换动画期间就会显示它）。
+        ///
+        /// <para>取色的真实节奏是：常驻脚本注入 → 首屏等 250ms 采样 → 再等 750ms 补一次迟到采样。
+        /// 而页面切换动画只有几百毫秒 —— 动画播完了色还没算出来，顶栏/底栏就得露一段系统默认色，
+        /// 等真值到了再淡入一次，观感是「先白一下再跳成网页色」。</para>
+        ///
+        /// <para>这里先用<see cref="AdaptiveBarColourMemory"/>里的上次的色把那一帧填上，
+        /// 真值到了自然覆盖：色一样就被上面的去重吃掉（一次多余的写入都没有），
+        /// 不一样就淡入过去。没访问过 / 非 http(s) 站点则直接返回，行为与改动前完全一致。</para>
+        ///
+        /// <para>调用点必须在 <c>TopAppBarService.EnterPage(this)</c> 之后 ——
+        /// 顶栏是全局共享控件，没认领就写会被判成「写了别人的顶栏」而跳过。</para>
+        /// </summary>
+        private void PrefillAdaptiveBarColourFromMemory()
+        {
+            if (!AdaptiveColourSettings.Enabled)
+            {
+                return;
+            }
+
+            if (AdaptiveBarColourMemory.TryGet(CurrentAdaptiveUrl()) is not { } remembered)
+            {
+                return;
+            }
+
+            ApplyAdaptiveBarColour(remembered, immediate: true);
         }
 
         /// <summary>

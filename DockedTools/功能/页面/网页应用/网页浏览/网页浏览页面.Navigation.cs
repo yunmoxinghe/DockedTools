@@ -46,6 +46,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // 设置页改取色参数后要即时重算栏色（页面被缓存时也要跟着改，所以订阅放在最前）
             SubscribeAdaptiveColourSettings();
 
+            // 先用这个站点上次的栏色把切换动画那一帧填上，别让默认色露出来。
+            // 新开的页面没有记忆（内核还没导航、快捷方式也还没绑），这里会自动空转。
+            PrefillAdaptiveBarColourFromMemory();
+
             // ⭐ 订阅窗口状态完成事件
             DockedTools.Features.UnifiedCalls.MainWindow.MainWindowService.StateCompleted += OnMainWindowStateCompleted;
             System.Diagnostics.Debug.WriteLine("[WebBrowserPage] 已订阅主窗口状态完成事件 (OnNavigatedTo)");
@@ -132,13 +136,25 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // 实测印证：切回后日志只有「底部栏容器已注销」，没有重新注册，底栏全程不上色。
             Services.BottomBarThemeService.ClaimForeground(BottomBarHost);
 
+            // ⭐ 认领顶栏：与 override 那条路径同理（理由见那边的注释）。
+            // 这条路径是导航层直调的、不走 Frame.Navigate ⇒ Frame.Navigated 不触发
+            // ⇒ 顶栏的前台身份不会自动切到本页，而下面的 SetupTopBar() 会往顶栏写标题和按钮 ——
+            // 不认领这些就全记到上一个页面的作用域上。
+            // 取色也要靠它：IsWritingTarget 为 false 时顶栏主题写不进去，
+            // 会出现「色块按网页色变深了、前景图标还是深色」这种黑底黑字。
+            TopAppBarService.EnterPage(this);
+
             // ⭐ 订阅窗口状态完成事件，当窗口恢复显示动画完成后给 WebView 焦点
             DockedTools.Features.UnifiedCalls.MainWindow.MainWindowService.StateCompleted += OnMainWindowStateCompleted;
 
             // 页面可能没走 override（导航层直调 INavigationAware），这里补一次订阅
             SubscribeAdaptiveColourSettings();
             System.Diagnostics.Debug.WriteLine("[WebBrowserPage] 已订阅主窗口状态完成事件");
-            
+
+            // 切回缓存页：先把这个站点上次的栏色顶上，切换动画期间就是网页色而不是默认色。
+            // 真值到了自然覆盖（同色被去重吃掉，异色淡入过去）。
+            PrefillAdaptiveBarColourFromMemory();
+
             // ⭐ 如果页面被 LRU 清理过，需要重置 _isDisposed 标志以允许重新初始化
             if (_isDisposed)
             {
