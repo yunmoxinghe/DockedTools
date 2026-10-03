@@ -724,14 +724,22 @@ namespace DockedTools
                 }
 
                 // ── 硬兜底 ────────────────────────────────────────────
-                // 正常情况下走到这之前进程就已经退了，后面的代码不会被执行。
+                // 【走到这里不是异常，而是预期的正常收尾路径】
+                // WinUI 3 的 Application.Exit() 本来就不退出进程（只关窗口、退消息泵，
+                // 上面注释已引官方原话确认）。所以 Exit() 之后进程「还活着」是必然的，
+                // 真正让进程退出的就是下面这句 Environment.Exit(0)。它一定会执行。
                 await Task.Delay(ForcedExitGraceMs).ConfigureAwait(false);
 
-                // 兜底触发说明 Exit() 没能带走进程。记下线程数，方便以后定位是谁吊着。
+                // 记一条 Info 而非 Warning：这不是故障，是每次退出都会走的正常路径。
+                // 之前这里打 Warning，导致每次正常退出都留一条「进程未退出」的告警，
+                // 和代码注释「Exit() 不保证退进程」自相矛盾，纯属噪音。
+                // 线程数只是留痕参考，退出瞬间读到的值不代表泄漏（Native AOT + Kestrel
+                // 桥接 + 托盘独立 UI 线程 + 看门狗 + Composition 线程叠加，几十个是基线）。
                 var threadCount = System.Diagnostics.Process.GetCurrentProcess().Threads.Count;
-                LogService.Warning(
+                LogService.Info(
                     "应用入口",
-                    $"Exit() 调用后 {ForcedExitGraceMs}ms 仍未退出（进程线程数={threadCount}），强制终止进程");
+                    $"Application.Exit() 已完成优雅收尾（WinUI 3 不负责退进程），" +
+                    $"等待 {ForcedExitGraceMs}ms 后由 Environment.Exit(0) 收尾（当前线程数={threadCount}）");
 
                 // Environment.Exit 也可能被 finalizer 拖住，再挂一道 Kill 保险。
                 // 这个线程是后台线程，不会阻止进程退出；只有进程真的赖着不走时才起作用。
