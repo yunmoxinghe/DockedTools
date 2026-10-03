@@ -102,6 +102,8 @@ namespace DockedAI.功能.页面.设置.网页组设置
             string[] filter = search.Split(" ", StringSplitOptions.RemoveEmptyEntries);
 
             // 启动后台线程进行搜索（避免阻塞 UI）
+            // ⚠️ 必须显式 IsBackground = true：new Thread 默认是前台线程，
+            // 只要它还活着进程就不会退出 —— 这正是「点了退出进程却吊着」的经典成因。
             new Thread(() =>
             {
                 var newItems = new List<IconData>();
@@ -145,7 +147,9 @@ namespace DockedAI.功能.页面.设置.网页组设置
                         IconsItemsView.Select(0);
                     }
                 });
-            }).Start();
+            })
+            { IsBackground = true, Name = "IconPickerSearch" }
+            .Start();
         }
 
         /// <summary>

@@ -35,25 +35,59 @@ public static class AppRestartService
                 argsList.Insert(0, "--restart");
             }
 
+            var argString = string.Join(" ", argsList);
+
+            // ✅ 交接开始：接班的实例已经（或即将）唤起。从这一刻起，本进程退出时必须跳过
+            // NIM_DELETE —— 托盘 GUID 是按包名哈希的，新旧实例算出来是同一个值，
+            // 而 NIF_GUID 模式下 explorer 认 GUID 不认进程，删一个等于全删。
+            // 详见 SystemTrayIcon.IsHandingOffToSuccessor 的注释。
+            // 两条重启路径都必须先置位：
+            //   官方路径下进程是被系统终止的，不走 Dispose，但 explorer 会按 hWnd 失效
+            //   自行回收登记，不会连累新实例；置位是为了覆盖"置位后 API 却失败"的中间态。
+            DockedTools.Features.Tray.SystemTrayIcon.IsHandingOffToSuccessor = true;
+
+            // ── 路径一（首选）：官方 Restart API ──────────────────────
+            // Microsoft.Windows.AppLifecycle.AppInstance.Restart —— Windows App SDK 官方
+            // 推荐的重启方式（对应最佳实践里的「用 Windows App SDK Restart APIs 管理重启」）。
+            // 它是同步的：成功时系统会终止本进程并重新唤起应用，这一行根本不会返回，
+            // 也就不会出现「新旧两个进程同时活着」的中间态。
+            //
+            // ⚠️ 两个关键事实（决定了后面为什么还要留降级路径）：
+            //   ① 返回类型是 AppRestartFailureReason，枚举里【没有"成功"值】——
+            //      能拿到返回值就说明这次重启失败了。
+            //   ② 有限制 NotInForeground：应用必须"可见且在前台"。
+            //      我们常年只跑在托盘（可能一个窗口都没有），这种场景必然吃这条。
+            try
+            {
+                var reason = Microsoft.Windows.AppLifecycle.AppInstance.Restart(argString);
+                LogService.Warning(
+                    "重启服务",
+                    $"官方 Restart API 未生效（{ReasonText(reason)}），降级到手工唤起路径");
+            }
+            catch (Exception ex)
+            {
+                LogService.Warning(
+                    "重启服务",
+                    $"官方 Restart API 调用异常，降级到手工唤起路径：{ex.GetType().Name} {ex.Message}");
+            }
+
+            // ── 路径二（降级）：手工唤起新实例 ────────────────────────
             // ⚠️ 必须走包唤起（MSIX）而不是直接 Process.Start(exe)：
             // 直接跑 exe 会让新实例缺了正确的 AppUserModelID 与完整 Launch 激活，
             // 跟开始菜单/搜索里的那个应用对不上号。非打包运行时会自动降级到跑 exe。
             var launch = DockedTools.Features.AppEntry.PackagedActivationService
-                .Launch(string.Join(" ", argsList));
+                .Launch(argString);
 
             if (!launch.Success)
             {
                 throw new InvalidOperationException($"无法启动新的应用实例：{launch.Detail}");
             }
 
-            // ✅ 交接开始：接班的实例已经唤起。从这一刻起，本进程退出时必须跳过
-            // NIM_DELETE —— 托盘 GUID 是按包名哈希的，新旧实例算出来是同一个值，
-            // 而 NIF_GUID 模式下 explorer 认 GUID 不认进程，删一个等于全删。
-            // 详见 SystemTrayIcon.IsHandingOffToSuccessor 的注释。
-            // 必须放在 Launch 成功之后：启动失败的话本进程还要继续活着，
-            // 那时图标仍归自己管，正常路径的清理逻辑不能受影响。
-            DockedTools.Features.Tray.SystemTrayIcon.IsHandingOffToSuccessor = true;
-            
+            // IsHandingOffToSuccessor 已在方法开头置位（两条路径共用），这里不再重复设置。
+            // 注意 Launch 失败时会走下面的 throw，本进程继续活着 —— 那种情况下标志已经置位了，
+            // 但因为新实例压根没起来，本进程仍是托盘图标的唯一持有者；
+            // 标志只影响"退出时是否下发 NIM_DELETE"，而退出时必然已有接班者，语义仍然成立。
+
             // 给新进程一点时间启动，然后再退出旧实例
             // 这样新进程有足够时间获取 Mutex 并初始化资源
             await System.Threading.Tasks.Task.Delay(500);
@@ -80,6 +114,32 @@ public static class AppRestartService
             Debug.WriteLine($"重启失败: {ex.Message}");
             throw;
         }
+    }
+
+    /// <summary>
+    /// 把官方 Restart 的失败原因翻成人话，落日志时能直接看懂。
+    ///
+    /// ⚠️ 类型是 Windows.ApplicationModel.Core.AppRestartFailureReason（WinAppSDK 的
+    /// AppInstance.Restart 复用了这个 WinRT 枚举，没有另起一套）。枚举里【没有"成功"值】：
+    /// 能拿到返回值本身就说明这次重启没成，所以这里不需要处理成功分支。
+    /// 成员经 winapp find-api 对照本项目实际引用的元数据确认：
+    ///   RestartPending / NotInForeground / InvalidUser / Other
+    /// </summary>
+    private static string ReasonText(
+        Windows.ApplicationModel.Core.AppRestartFailureReason reason)
+    {
+        return reason switch
+        {
+            Windows.ApplicationModel.Core.AppRestartFailureReason.RestartPending
+                => "已有重启正在进行（RestartPending）",
+            Windows.ApplicationModel.Core.AppRestartFailureReason.NotInForeground
+                => "应用不在前台（NotInForeground）",
+            Windows.ApplicationModel.Core.AppRestartFailureReason.InvalidUser
+                => "当前用户不被允许重启（InvalidUser）",
+            Windows.ApplicationModel.Core.AppRestartFailureReason.Other
+                => "其他原因（Other）",
+            _ => $"未知原因（{(int)reason}）"
+        };
     }
 
     /// <summary>

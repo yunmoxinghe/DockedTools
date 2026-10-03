@@ -178,7 +178,11 @@ namespace DockedTools.Features.Tray
 
             if (_thread != null && !_thread.Join(TimeSpan.FromSeconds(3)))
             {
-                System.Diagnostics.Debug.WriteLine("[TrayUIThreadHost] WARNING: tray thread did not exit in time");
+                // ⚠️ 用 LogService 而不是 Debug.WriteLine：这条信息只在退出路径上出现，
+                // 落不了盘的话事后根本无从判断「进程退不干净」是不是托盘线程没停造成的。
+                DockedTools.Features.UnifiedCalls.Logging.LogService.Warning(
+                    "托盘线程宿主",
+                    "托盘独立 UI 线程在 3 秒内未退出，已进入强制阶段（该线程为后台线程，不阻止进程退出）");
             }
         }
 

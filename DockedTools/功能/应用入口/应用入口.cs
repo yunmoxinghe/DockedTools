@@ -169,13 +169,19 @@ namespace DockedTools
                 if (isRestart)
                 {
                     System.Diagnostics.Debug.WriteLine("[App] Restart detected, waiting for old instance to exit...");
-                    
-                    // 等待旧实例释放 Mutex（最多等待 3 秒）
+
+                    // 等待旧实例释放 Mutex。
+                    //
+                    // ⚠️ 这里是「重启后有两个进程」的另一半：原来只等 30 × 100ms = 3 秒，
+                    // 而旧实例那边把 Mutex 排在了三个后台清理步骤（每步上限 1.5s）之后，
+                    // 最坏 4.5 秒才释放。等不到就走下面的"强制主实例"分支，两个进程同时活。
+                    // 旧实例那边已经改成进入退出链就立刻放 Mutex，这里把上限一并放宽，
+                    // 两边一起收窄这个窗口。8 秒足够覆盖所有正常清理耗时，且只是启动期一次。
                     _singleInstanceMutex?.Dispose();
                     _singleInstanceMutex = null;
-                    
+
                     // ⭐ 优化：使用 Thread.Sleep 代替 SpinWait，避免 CPU 占用过高
-                    for (int i = 0; i < 30; i++)
+                    for (int i = 0; i < RestartMutexWaitIterations; i++)
                     {
                         try
                         {
@@ -189,7 +195,7 @@ namespace DockedTools
                             _singleInstanceMutex = null;
                             
                             // 使用 Thread.Sleep，避免阻塞 UI 线程（此时 UI 尚未初始化）
-                            Thread.Sleep(100);
+                            Thread.Sleep(RestartMutexWaitStepMs);
                         }
                         catch (Exception ex)
                         {
@@ -197,10 +203,20 @@ namespace DockedTools
                         }
                     }
                     
-                    // 如果还是拿不到 Mutex，强制成为主实例
+                    // 如果还是拿不到 Mutex，强制成为主实例。
+                    // 走到这里意味着旧实例没能按时交出 Mutex —— 它会继续走自己的硬兜底
+                    // （Exit → 800ms → Environment.Exit → 3s 后 Kill），所以我们仍把自己
+                    // 当主实例起，宁可短暂重叠也不要卡在启动上。但必须留痕，方便事后判断
+                    // 「用户看到的第二个进程」到底是重叠窗口还是真的退不掉。
                     if (!_isMainInstance)
                     {
-                        System.Diagnostics.Debug.WriteLine("[App] Timeout waiting for old instance, forcing restart");
+                        var waitedMs = RestartMutexWaitIterations * RestartMutexWaitStepMs;
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[App] Timeout waiting for old instance ({waitedMs}ms), forcing restart");
+                        LogService.Warning(
+                            "应用入口",
+                            $"重启等待旧实例释放单实例 Mutex 超时（{waitedMs}ms），已强制作为主实例启动；" +
+                            "旧实例将走自己的强制退出兜底，短时间内可能看到两个进程");
                         _isMainInstance = true;
                     }
                 }
@@ -605,10 +621,35 @@ namespace DockedTools
         private const int CleanupStepTimeoutMs = 1500;
 
         /// <summary>
-        /// 调用 Exit() 后留给 XAML 收尾的时间（毫秒）。
-        /// 超过这个时间进程还活着，说明 UI 线程已经泵不动消息了，强制收尾。
+        /// 重启场景下，新实例等待旧实例交出单实例 Mutex 的轮询参数。
+        /// 80 × 100ms = 8 秒。
+        ///
+        /// 为什么从原来的 3 秒放宽到 8 秒：旧实例那边的后台清理最多有 3 步 × 1.5s，
+        /// 3 秒的窗口装不下。虽然退出链现在已经改成"一进退出就放 Mutex"（绝大多数情况
+        /// 几十毫秒内就能拿到），但保留一个宽松上限，能让极端情况下少一次无谓的双开。
+        /// 这只是启动期一次性的等待，不会拖慢正常运行。
         /// </summary>
-        private const int ForcedExitGraceMs = 3000;
+        private const int RestartMutexWaitIterations = 80;
+
+        /// <summary>
+        /// 重启场景下每轮等待旧实例释放 Mutex 的间隔（毫秒）。
+        /// </summary>
+        private const int RestartMutexWaitStepMs = 100;
+
+        /// <summary>
+        /// 调用 Exit() 后留给 XAML 收尾的时间（毫秒）。
+        ///
+        /// 刻意压得很短（800ms）。原因见下方退出链的说明：WinUI 3 的 Application.Exit()
+        /// 本来就不保证进程退出，等太久只会拉长「重启后新旧两个进程同时存在」的窗口，
+        /// 而这段时间内用户是能看到两个进程的。
+        /// </summary>
+        private const int ForcedExitGraceMs = 800;
+
+        /// <summary>
+        /// Environment.Exit 也可能被 finalizer 拖住时的最后一道保险（毫秒）。
+        /// 到点直接 Kill 进程 —— 模式沿用 UI 线程看门狗里已有的 WatchdogExitGuard。
+        /// </summary>
+        private const int KillGuardDelayMs = 3000;
 
         // 【为什么 ExitApplication 不再是 async void】
         // 原先它是 async void，并且在 UI 线程上按顺序做了两件事：
@@ -639,6 +680,21 @@ namespace DockedTools
                 LogService.Error("应用入口", "UI 收尾阶段异常，已强制继续退出流程", ex);
             }
 
+            // ── 尽早交出单实例 Mutex ─────────────────────────────────
+            // 【这是「重启后有两个进程」的真因，别再挪回去了】
+            // 重启时序是：本进程先 Launch 新实例，然后自己才走退出链。
+            // 新实例起来后第一件事就是抢这个 Mutex；抢不到就每 100ms 轮询一次，
+            // 超时后【强制把自己当成主实例】继续初始化 —— 那一刻起两个进程同时活着。
+            //
+            // 而 Mutex 原先是在 CleanupBackgroundServicesAsync 的最后一步才释放的，
+            // 前面还排着三个 WithTimeoutAsync（看门狗 / 单实例通信 / 浏览器扩展桥接），
+            // 每步上限 CleanupStepTimeoutMs = 1500ms，最坏要 4.5s 才轮到释放；
+            // 新实例那边只肯等 3s。于是新实例必然先超时、先"强制主实例"。
+            //
+            // 一旦进了退出流程，本进程不可能再回到正常运行态，Mutex 攥着没有任何意义。
+            // 放在这里（UI 收尾刚完成、后台清理还没开始）就能让新实例几乎是立刻拿到。
+            ReleaseSingleInstanceMutex();
+
             // ── 阶段二/三：线程池上做异步清理并收尾 ──────────────────
             // 刻意 fire-and-forget：这里不需要调用方等待，
             // 内部的超时和硬兜底会保证进程一定收尾。
@@ -646,6 +702,17 @@ namespace DockedTools
             {
                 await CleanupBackgroundServicesAsync().ConfigureAwait(false);
 
+                // 【为什么不能只靠 Exit()】
+                // 微软 WinUI 团队（MikeHillberg，microsoft-ui-xaml#7078）原话：
+                //   "Application.Exit doesn't force the process to exit. It closes open
+                //    Windows and quits the message pump that runs in Application.Start."
+                // 官方文档也确认 DispatcherShutdownMode 是 per-thread 的：Application.Start
+                // 只把「当前线程」设成 OnLastWindowClose，其他线程（比如托盘的独立 UI 线程）
+                // 默认仍是 OnExplicitShutdown，必须各自显式 EnqueueEventLoopExit 才会退。
+                // 官方单实例样例干脆直接写 Process.GetCurrentProcess().Kill()，
+                // 注释就一句「the WinUI 3 Exit() method doesn't work」。
+                //
+                // 所以这里的策略是：Exit() 只负责"优雅收尾"，进程退出由我们自己保证。
                 try
                 {
                     Exit();
@@ -657,13 +724,25 @@ namespace DockedTools
                 }
 
                 // ── 硬兜底 ────────────────────────────────────────────
-                // 正常情况下走到这之前进程就已经退了，这行代码不会被执行。
-                // 如果 Exit() 因为 UI 线程泵不动消息而没生效，这里最终接住：
-                // 宁可丢掉尚未落盘的状态，也不能让进程永久挂着。
+                // 正常情况下走到这之前进程就已经退了，后面的代码不会被执行。
                 await Task.Delay(ForcedExitGraceMs).ConfigureAwait(false);
+
+                // 兜底触发说明 Exit() 没能带走进程。记下线程数，方便以后定位是谁吊着。
+                var threadCount = System.Diagnostics.Process.GetCurrentProcess().Threads.Count;
                 LogService.Warning(
                     "应用入口",
-                    $"Exit() 调用后 {ForcedExitGraceMs}ms 仍未退出，判定 UI 线程已无法处理消息，强制终止进程");
+                    $"Exit() 调用后 {ForcedExitGraceMs}ms 仍未退出（进程线程数={threadCount}），强制终止进程");
+
+                // Environment.Exit 也可能被 finalizer 拖住，再挂一道 Kill 保险。
+                // 这个线程是后台线程，不会阻止进程退出；只有进程真的赖着不走时才起作用。
+                var killGuard = new System.Threading.Thread(() =>
+                {
+                    System.Threading.Thread.Sleep(KillGuardDelayMs);
+                    try { System.Diagnostics.Process.GetCurrentProcess().Kill(); } catch { }
+                })
+                { IsBackground = true, Name = "AppExitGuard" };
+                killGuard.Start();
+
                 Environment.Exit(0);
             });
         }
@@ -777,10 +856,60 @@ namespace DockedTools
                 () => DockedTools.Features.BrowserExtension.BridgeService.StopAsync(),
                 "浏览器扩展桥接停止");
 
-            // 释放 Mutex
-            _singleInstanceMutex?.ReleaseMutex();
-            _singleInstanceMutex?.Dispose();
+            // 释放 Mutex。
+            // 正常情况下 ExitApplication 阶段一之后就已经放掉了，这里只是兜第二道：
+            // 直接调 ExitApplication 以外的路径（比如别的清理入口）走到这时也要保证释放。
+            // ReleaseSingleInstanceMutex 内部是幂等的，重复调用无害。
+            ReleaseSingleInstanceMutex();
+        }
+
+        /// <summary>
+        /// 释放单实例 Mutex（幂等，可重复调用）。
+        ///
+        /// 之所以单独封一层：释放动作现在有两个调用点（退出链早期 + 后台清理收尾），
+        /// 而 Mutex 一旦 Dispose 再碰就会抛 ObjectDisposedException —— 退出阶段这种
+        /// 噪音异常最容易把整条链打断，所以统一在这里吞掉并置 null。
+        /// </summary>
+        private static void ReleaseSingleInstanceMutex()
+        {
+            var mutex = _singleInstanceMutex;
             _singleInstanceMutex = null;
+            if (mutex == null)
+            {
+                return;
+            }
+
+            try
+            {
+                mutex.ReleaseMutex();
+            }
+            catch (Exception ex)
+            {
+                // 【实测：这条异常以前是真会发生的，不是理论风险】
+                // 释放动作原先写在 CleanupBackgroundServicesAsync 里，而那个方法跑在
+                // ExitApplication 的 Task.Run 上（线程池线程）；Mutex 却是在 App 构造函数
+                // 里由主线程创建的。Windows 的 Mutex 是线程相关的 —— 不是拥有者线程调
+                // ReleaseMutex 就抛 ApplicationException("Object synchronization method
+                // was called from an unsynchronized block of code")。
+                // error.log 里就有这条堆栈（TaskScheduler_UnobservedTaskException 接住的）。
+                //
+                // 后果比"抛个异常"严重得多：异常一抛，紧跟其后的 Dispose() 和置 null
+                // 全部被跳过，Mutex 从头到尾没能交出去 —— 新实例等到超时只能强行双开。
+                // 所以这里必须 catch 住并继续走 Dispose：Dispose 会关掉内核句柄，
+                // 同样能让等待方拿到 Mutex，这才是真正可靠的"交出"方式。
+                LogService.Warning(
+                    "应用入口",
+                    $"释放单实例 Mutex 失败，改为直接 Dispose：{ex.GetType().Name} {ex.Message}");
+            }
+
+            try
+            {
+                mutex.Dispose();
+            }
+            catch (Exception ex)
+            {
+                LogService.Warning("应用入口", $"释放单实例 Mutex 时 Dispose 失败：{ex.GetType().Name} {ex.Message}");
+            }
         }
 
         /// <summary>
