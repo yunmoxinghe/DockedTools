@@ -174,6 +174,58 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
         }
 
         /// <summary>
+        /// 进 Cookie 管理子页面。
+        ///
+        /// <para>Cookie 管理是独立页面而不是就地展开的 SettingsExpander：展开器内部的
+        /// ItemsRepeater 在本项目（PublishAot + CsWinRT）上只能吃 WinRT 容器，而 Cookie
+        /// 项是纯 CLR 类型，动态列表做不出来。独立成页后列表就是普通 ListView。</para>
+        ///
+        /// <para>只传 appId（跟进本页时一致），URL 由子页面按 appId 自己反查 ——
+        /// 详情页的 _originalUrl 会被用户编辑，传它反而可能拿到还没保存的值。</para>
+        /// </summary>
+        private void OnCookieCardClick(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrEmpty(_appId))
+            {
+                return;
+            }
+
+            // ⚠️ 必须带上实验设置里的子页面动画：Frame.Navigate 不传 transitionInfo 时
+            // 走的是 Frame 自己的默认转场（内容区配的 DrillIn），用户在设置里选的
+            // SlideFromRight / None 等全被忽略，看起来就像「没有动画 / 动画不对」。
+            var animationType = ExperimentalSettings.SubPageNavigationAnimation;
+            var transitionInfo = GetNavigationTransitionInfo(animationType);
+            Frame.Navigate(typeof(WebAppCookiePage), _appId, transitionInfo);
+        }
+
+        /// <summary>
+        /// 按实验设置里选的类型生成导航动画。
+        /// 与设置页 / 网页应用管理页保持一致 —— 子页面之间的转场观感必须统一。
+        /// </summary>
+        private Microsoft.UI.Xaml.Media.Animation.NavigationTransitionInfo GetNavigationTransitionInfo(FrameAnimationType animationType)
+        {
+            return animationType switch
+            {
+                FrameAnimationType.None => new Microsoft.UI.Xaml.Media.Animation.SuppressNavigationTransitionInfo(),
+                FrameAnimationType.EntranceTransition => new Microsoft.UI.Xaml.Media.Animation.EntranceNavigationTransitionInfo(),
+                FrameAnimationType.SlideFromRight => new Microsoft.UI.Xaml.Media.Animation.SlideNavigationTransitionInfo
+                {
+                    Effect = Microsoft.UI.Xaml.Media.Animation.SlideNavigationTransitionEffect.FromRight
+                },
+                FrameAnimationType.SlideFromLeft => new Microsoft.UI.Xaml.Media.Animation.SlideNavigationTransitionInfo
+                {
+                    Effect = Microsoft.UI.Xaml.Media.Animation.SlideNavigationTransitionEffect.FromLeft
+                },
+                FrameAnimationType.SlideFromBottom => new Microsoft.UI.Xaml.Media.Animation.SlideNavigationTransitionInfo
+                {
+                    Effect = Microsoft.UI.Xaml.Media.Animation.SlideNavigationTransitionEffect.FromBottom
+                },
+                FrameAnimationType.DrillIn => new Microsoft.UI.Xaml.Media.Animation.DrillInNavigationTransitionInfo(),
+                _ => new Microsoft.UI.Xaml.Media.Animation.EntranceNavigationTransitionInfo()
+            };
+        }
+
+        /// <summary>
         /// 左侧按钮图标类型变更事件（XAML 绑定）
         /// ✅ AOT 友好：使用 SelectedIndex 而不是 Tag 转换
         /// </summary>
