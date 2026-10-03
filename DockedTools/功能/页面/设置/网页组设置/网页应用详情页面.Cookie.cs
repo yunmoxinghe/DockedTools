@@ -41,8 +41,7 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
 
             try
             {
-                WebAppCookieResult result = await WebAppCookieService.DeleteAsync(
-                    _originalUrl ?? string.Empty, _appId, item);
+                WebAppCookieResult result = await WebAppCookieService.DeleteAsync(_appId, item);
 
                 ShowCookieHint(result.Ok
                     ? string.Format(

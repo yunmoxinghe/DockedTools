@@ -123,6 +123,10 @@ public static class WebAppCookieService
         {
             // GetCookiesAsync 本身就按 URL 做匹配（含 Domain 规则，.foo.com / foo.com 是不同域），
             // 拿回来的就是「这个站点真正会用上的那些」，不需要本地再按域名过滤一遍。
+            //
+            // ⚠️ 这个 await 期间借来的内核有可能正好被 LRU 淘汰（淘汰是异步低优先级执行的）。
+            // 恢复时 COM 对象已废，抛出来的会是看不懂的 HRESULT —— 由 <see cref="TranslateFailure"/>
+            // 统一翻译成「没有可用的内核」。
             IReadOnlyList<CoreWebView2Cookie> cookies = await manager!.GetCookiesAsync(url);
 
             var items = cookies
@@ -135,8 +139,7 @@ public static class WebAppCookieService
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[WebAppCookieService] 枚举 Cookie 失败: {ex.Message}");
-            return WebAppCookieResult.Fail(ex.Message);
+            return TranslateFailure(ex, instanceId, "枚举 Cookie");
         }
     }
 
@@ -144,9 +147,20 @@ public static class WebAppCookieService
     /// 删除单条 Cookie。
     /// 用 <c>DeleteCookiesWithDomainAndPath</c> 而不是 <c>DeleteCookies(name, uri)</c>：
     /// 后者靠 uri 反推域与路径，遇到跨域共享的父域 Cookie（.example.com）会漏删。
+    ///
+    /// <para>⚠️ 这里返回 <c>Task</c> 但<b>刻意不 Task.Run</b>，别「顺手优化」成后台线程：
+    /// <c>CoreWebView2CookieManager</c> 是 CoreWebView2 的子对象，WebView2 并没有承诺它是
+    /// agile object，跨线程调用没有官方保证（典型失败是 <c>RPC_E_WRONG_THREAD</c>）。
+    /// 而删除是毫秒级的同步 COM 调用，留在调用方线程上做完既安全又简单。
+    /// 方法因此不带 <c>async</c> —— 带上是假签名（CS1998），会误导调用方以为不会占用当前线程。</para>
     /// </summary>
-    public static async Task<WebAppCookieResult> DeleteAsync(
-        string url, string? instanceId, WebAppCookieItem item)
+    public static Task<WebAppCookieResult> DeleteAsync(
+        string? instanceId, WebAppCookieItem item)
+    {
+        return Task.FromResult(DeleteCore(instanceId, item));
+    }
+
+    private static WebAppCookieResult DeleteCore(string? instanceId, WebAppCookieItem item)
     {
         if (!TryResolveManager(instanceId, out CoreWebView2CookieManager? manager, out string? error))
         {
@@ -160,8 +174,7 @@ public static class WebAppCookieService
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[WebAppCookieService] 删除 Cookie 失败: {ex.Message}");
-            return WebAppCookieResult.Fail(ex.Message);
+            return TranslateFailure(ex, instanceId, "删除 Cookie");
         }
     }
 
@@ -195,8 +208,7 @@ public static class WebAppCookieService
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[WebAppCookieService] 清空站点 Cookie 失败: {ex.Message}");
-            return WebAppCookieResult.Fail(ex.Message);
+            return TranslateFailure(ex, instanceId, "清空站点 Cookie");
         }
     }
 
@@ -219,9 +231,36 @@ public static class WebAppCookieService
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[WebAppCookieService] 清空全部 Cookie 失败: {ex.Message}");
-            return WebAppCookieResult.Fail(ex.Message);
+            return TranslateFailure(ex, instanceId, "清空全部 Cookie");
         }
+    }
+
+    /// <summary>
+    /// 把一次 Cookie 操作失败翻译成能给用户看的话。
+    ///
+    /// <para>关键在于区分两种失败：
+    /// ① <b>借来的内核在操作期间被淘汰了</b> —— 抛出来的是 HRESULT / COMException，
+    ///    直接显示成「未指定的错误 (0x8000FFFF)」对用户毫无意义；
+    /// ② <b>真的失败了</b>（比如 URL 不合法、磁盘写不进去）。
+    ///
+    /// 判据很朴素：失败后再探一次有没有活着的内核。探不到就是 ①，
+    /// 回报「先打开一次网页应用」那条文案；还探得到就是 ②，如实显示原始消息。</para>
+    ///
+    /// <para>为什么不在操作前把内核「顶到 LRU 最近使用端」来防这个：
+    /// 借用走的是 <c>TryPeekCore</c> 而不是 <c>TryGet</c>，刻意不去动 LRU 顺序 ——
+    /// 一次 Cookie 查询不配把某个实例顶成「最近使用」，那可能把真正该保住的页面挤掉。</para>
+    /// </summary>
+    private static WebAppCookieResult TranslateFailure(Exception ex, string? instanceId, string what)
+    {
+        System.Diagnostics.Debug.WriteLine($"[WebAppCookieService] {what}失败: {ex.Message}");
+
+        bool stillAlive =
+            (!string.IsNullOrEmpty(instanceId) && WebViewManager.TryPeekCore(instanceId!, out _)) ||
+            WebViewManager.TryPeekAnyCore() is not null;
+
+        return WebAppCookieResult.Fail(stillAlive
+            ? ex.Message
+            : Localization.LocalizationHelper.GetString("WebAppDetail_CookieNoWebView"));
     }
 
     /// <summary>
