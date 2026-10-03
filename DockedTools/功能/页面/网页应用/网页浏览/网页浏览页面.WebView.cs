@@ -638,6 +638,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     // ⭐ 任务 3.2：取消订阅 ProcessFailed 事件
                     webView.CoreWebView2.ProcessFailed -= CoreWebView2_ProcessFailed;
 
+                    // ⭐ 摘掉网页通知桥接。这一步漏了的话，LRU 淘汰是异步低优先级执行的，
+                    // 从「决定淘汰」到 Close() 之间还有一段窗口，期间该内核仍会进
+                    // OnNotificationReceived → 先置 Handled=true 再 Show → 抛 COMException
+                    // 被 catch 吞掉。结果是系统通知没弹、WebView2 侧却已被标记为已处理，
+                    // 通知静默丢失。Detach 同时会把这个内核挂着的 deferral 收掉。
+                    Services.WebNotificationBridge.Detach(webView.CoreWebView2);
+
                     // 停止当前导航
                     webView.CoreWebView2.Stop();
                 }

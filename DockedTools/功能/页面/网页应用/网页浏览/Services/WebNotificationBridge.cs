@@ -3,6 +3,7 @@ using Microsoft.Web.WebView2.Core;
 using Microsoft.Windows.AppNotifications;
 using Microsoft.Windows.AppNotifications.Builder;
 using System;
+using System.Collections.Generic;
 
 namespace DockedTools.Features.Pages.WebApp.Browser.Services;
 
@@ -52,9 +53,49 @@ public static class WebNotificationBridge
 
     private const string OriginKey = "origin";
 
+    /// <summary>
+    /// arguments 里携带的「回执单号」。每一条通知一个，用来在点击时找回它对应的
+    /// <see cref="CoreWebView2Notification"/> 与 deferral。
+    ///
+    /// <para>为什么不用 tag 反查：tag 是网页给的、可以为空、也可以重复
+    /// （同一站点连发三条无 tag 通知，键就撞在一起了，第三条会把前两条的回执顶掉）。
+    /// 回执单号是我们自己发的，天然唯一。</para>
+    /// </summary>
+    private const string ReceiptKey = "receipt";
+
+    /// <summary>
+    /// 回执的最长等待时间。超过就当作「用户没理会」上报 <c>ReportClosed</c> 并把 deferral 放掉。
+    ///
+    /// <para>为什么必须有这条兜底：<see cref="Windows.Foundation.Deferral"/> 不 Complete 的话
+    /// WebView2 会一直把这起事件挂在未完成状态，属于**泄漏**，不是「晚一点再报」。
+    /// 而系统通知被用户划掉 / 过期清除时，宿主这边收不到任何回调
+    /// （WindowsAppSDK 没有提供 dismissed 事件），只靠点击回执是清不干净的。</para>
+    /// </summary>
+    private static readonly TimeSpan ReceiptTimeout = TimeSpan.FromMinutes(10);
+
     private static readonly object _registerLock = new();
 
     private static bool _platformRegistered;
+
+    private static readonly object _pendingLock = new();
+
+    /// <summary>已展示、还在等回执的通知。key 是回执单号。</summary>
+    private static readonly Dictionary<string, PendingReceipt> _pending = new();
+
+    /// <summary>
+    /// 一条已展示通知的回执上下文。
+    /// </summary>
+    private sealed class PendingReceipt
+    {
+        /// <summary>发出这条通知的内核。内核被弃用（Detach）时要连带收尾。</summary>
+        public CoreWebView2 Core { get; init; } = null!;
+
+        public CoreWebView2Notification Notification { get; init; } = null!;
+
+        public Windows.Foundation.Deferral Deferral { get; init; } = null!;
+
+        public long ShownTicks { get; init; }
+    }
 
     /// <summary>
     /// 通知被点击（应用已经在跑的那条路径）。
@@ -135,7 +176,119 @@ public static class WebNotificationBridge
         System.Diagnostics.Debug.WriteLine(
             $"[WebNotificationBridge] 通知被点击: {string.Join(", ", args.Arguments)}");
 
-        Activated?.Invoke(args);
+        // ⭐ 先把回执做掉，再交给订阅方。
+        // 顺序反了的话，订阅方里任何一个异常都会让网页永远收不到 click 事件 ——
+        // 而这里是 COM 回调边界，异常跨出去有终止进程的风险，所以两边都各包一层。
+        try
+        {
+            if (args.Arguments is not null &&
+                args.Arguments.TryGetValue(ReceiptKey, out string? receipt) &&
+                !string.IsNullOrEmpty(receipt))
+            {
+                CompleteReceipt(receipt, clicked: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[WebNotificationBridge] 回执失败: {ex.Message}");
+        }
+
+        try
+        {
+            Activated?.Invoke(args);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[WebNotificationBridge] 通知订阅方抛异常: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 给一条已展示的通知下回执：点开了就 <c>ReportClicked</c>，否则 <c>ReportClosed</c>。
+    /// 两条都会把 deferral 放掉（<see cref="Windows.Foundation.Deferral.Complete"/>）。
+    ///
+    /// <para>调用约束（来自 WebView2 IDL，不是猜的）：<c>ReportClicked</c> /
+    /// <c>ReportClosed</c> 要求 <c>Handled</c> 为 TRUE <b>且</b> <c>ReportShown</c> 已经跑过。
+    /// 本桥里这两个前置都在 <see cref="OnNotificationReceived"/> 里同步满足了。</para>
+    ///
+    /// <para>⚠️ 只有「应用本来就在跑」这条路径能回执点击：应用没在跑时系统靠 COM 激活
+    /// 重启进程，新进程里 <see cref="_pending"/> 是空的（那是另一个进程），
+    /// <see cref="CoreWebView2Notification"/> 对象也不存在了。这条是跨平台通知的固有边界，
+    /// 不是实现偷懒 —— 真要覆盖就得靠 Service Worker 的 notificationclick，那是持久通知的事。</para>
+    /// </summary>
+    private static void CompleteReceipt(string receipt, bool clicked)
+    {
+        PendingReceipt? item;
+
+        lock (_pendingLock)
+        {
+            if (!_pending.Remove(receipt, out item))
+            {
+                return;
+            }
+        }
+
+        try
+        {
+            if (clicked)
+            {
+                item.Notification.ReportClicked();
+            }
+            else
+            {
+                item.Notification.ReportClosed();
+            }
+        }
+        catch (Exception ex)
+        {
+            // 内核已经关掉（页面被淘汰 / 进程退出）时 Report* 会抛。
+            // 这时网页侧本来也收不到事件了，记一笔就够，不能让它冒出去。
+            System.Diagnostics.Debug.WriteLine(
+                $"[WebNotificationBridge] Report{(clicked ? "Clicked" : "Closed")} 失败: {ex.Message}");
+        }
+        finally
+        {
+            // ⭐ 无论 Report 成功与否都必须 Complete：deferral 不释放就是泄漏，
+            // WebView2 会一直把这起事件挂在那里。
+            try
+            {
+                item.Deferral.Complete();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[WebNotificationBridge] deferral Complete 失败: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// 收掉已经超时的回执，顺带把对应 deferral 放掉。见 <see cref="ReceiptTimeout"/>。
+    /// </summary>
+    private static void SweepExpiredReceipts()
+    {
+        List<string>? expired = null;
+        long now = Environment.TickCount64;
+
+        lock (_pendingLock)
+        {
+            foreach (KeyValuePair<string, PendingReceipt> pair in _pending)
+            {
+                if (now - pair.Value.ShownTicks >= ReceiptTimeout.TotalMilliseconds)
+                {
+                    (expired ??= new List<string>()).Add(pair.Key);
+                }
+            }
+        }
+
+        if (expired is null)
+        {
+            return;
+        }
+
+        foreach (string receipt in expired)
+        {
+            CompleteReceipt(receipt, clicked: false);
+        }
     }
 
     /// <summary>
@@ -168,6 +321,30 @@ public static class WebNotificationBridge
             return;
         }
 
+        // ⚠️ 顺序有讲究：先把这个内核还没回执的通知收掉，再摘事件。
+        // 反过来的话，LRU 淘汰内核的那一小段窗口里进来的通知会挂在已弃用的对象上，
+        // 而 Detach 之后它们连被清理的机会都没有 —— deferral 就此泄漏。
+        List<string>? owned = null;
+
+        lock (_pendingLock)
+        {
+            foreach (KeyValuePair<string, PendingReceipt> pair in _pending)
+            {
+                if (ReferenceEquals(pair.Value.Core, core))
+                {
+                    (owned ??= new List<string>()).Add(pair.Key);
+                }
+            }
+        }
+
+        if (owned is not null)
+        {
+            foreach (string receipt in owned)
+            {
+                CompleteReceipt(receipt, clicked: false);
+            }
+        }
+
         core.PermissionRequested -= OnPermissionRequested;
         core.NotificationReceived -= OnNotificationReceived;
     }
@@ -187,9 +364,15 @@ public static class WebNotificationBridge
             return;
         }
 
+        // ⚠️ 开关关闭时必须是 Default，**不能写成 Deny**。
+        // WebView2 的 profile 里只持久化「非 Default」的权限决策（IDL 对 PermissionSetting
+        // 集合的措辞就是 "nondefault permission settings ... persisted across sessions"）。
+        // 写成 Deny 的话「这个站点被拒绝」会落盘，用户之后在设置里把开关打开也救不回来 ——
+        // 站点权限已经是 denied，不会再问第二次，通知永久静默。
+        // 而 Default 在通知这条上本身就等同拒绝，效果一样但不留痕。
         args.State = ExperimentalSettings.WebNotificationsEnabled
             ? CoreWebView2PermissionState.Allow
-            : CoreWebView2PermissionState.Deny;
+            : CoreWebView2PermissionState.Default;
 
         System.Diagnostics.Debug.WriteLine(
             $"[WebNotificationBridge] 通知权限 {args.Uri} → {args.State}");
@@ -206,28 +389,68 @@ public static class WebNotificationBridge
 
         CoreWebView2Notification notification = args.Notification;
 
+        // ⭐ deferral 必须在这里就取：ReportClicked / ReportClosed 是**异步**发生的
+        // （用户可能几分钟后才点），而 IDL 要求 Report* 只能在处理本次事件的过程中调用。
+        // 不取 deferral 的话事件在 handler 返回时就结束了，之后补的 Report* 全部
+        // 抛 ERROR_INVALID_STATE —— 网页的 onclick / onclose 永远收不到。
+        Windows.Foundation.Deferral? deferral = null;
+
         try
         {
+            deferral = args.GetDeferral();
+
             // ⭐ 必须在调用任何 Report* 之前置 true，否则 Report 抛 ERROR_INVALID_STATE。
             // 而且这个值一经置 true 就撤不回来了。
             args.Handled = true;
 
+            string receipt = Guid.NewGuid().ToString("N");
+
             // 先把宿主这次处理的「tag 归属」和 Build 的组串在前，和 ApplyAdaptiveBarColour 那道
             // URL 闸门不是一个层面：这里是防止站点 A 的 tag="chat" 顶掉站点 B 的同名 tag。
-            AppNotification appNotification = Build(notification, args.SenderOrigin);
+            AppNotification appNotification = Build(notification, args.SenderOrigin, receipt);
 
             AppNotificationManager.Default.Show(appNotification);
 
             // 网页侧的 notification.show 事件靠这个才触发；漏了会让等 show 的页面逻辑卡住。
             notification.ReportShown();
+
+            lock (_pendingLock)
+            {
+                _pending[receipt] = new PendingReceipt
+                {
+                    Core = sender,
+                    Notification = notification,
+                    Deferral = deferral,
+                    ShownTicks = Environment.TickCount64
+                };
+            }
+
+            // 走到这里 deferral 的 ownership 已经交给 _pending，别在 finally 里重复 Complete。
+            deferral = null;
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[WebNotificationBridge] 转发网页通知失败: {ex.Message}");
+
+            // 失败时必须把 deferral 放掉，否则这起事件永远挂着。
+            // 注意：Handled 已经是 true（置了就撤不回来），所以这条通知对网页来说
+            // 既没弹出去也没回执 —— 属于最坏情况，宁可记清楚也不要假装成功。
+            try
+            {
+                deferral?.Complete();
+            }
+            catch (Exception completeEx)
+            {
+                System.Diagnostics.Debug.WriteLine($"[WebNotificationBridge] deferral Complete 失败: {completeEx.Message}");
+            }
         }
+
+        // 顺手清理超时的回执。放在这里而不是起一个定时器：
+        // 通知本来就是低频事件，每来一条扫一次够用了，不必为一个兜底动作常驻一个计时器。
+        SweepExpiredReceipts();
     }
 
-    private static AppNotification Build(CoreWebView2Notification notification, string origin)
+    private static AppNotification Build(CoreWebView2Notification notification, string origin, string receipt)
     {
         // 网页完全不给标题时拿主机名顶上 —— 系统通知没有「无标题」这种形态，
         // 留空会让用户在通知中心里看到一条不知道来自哪里的空白。
@@ -238,6 +461,7 @@ public static class WebNotificationBridge
         var builder = new AppNotificationBuilder()
             .AddArgument(ActionKey, ActionValue)
             .AddArgument(OriginKey, origin ?? string.Empty)
+            .AddArgument(ReceiptKey, receipt)
             .AddText(title);
 
         if (!string.IsNullOrWhiteSpace(notification.Body))
