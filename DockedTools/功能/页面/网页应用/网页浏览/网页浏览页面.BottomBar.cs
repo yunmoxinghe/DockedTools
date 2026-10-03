@@ -74,6 +74,57 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         }
 
         /// <summary>
+        /// 入场动画播放前先把底栏按钮宽度测出来。
+        ///
+        /// <para>为什么需要它：宽度计算的唯一入口是 <c>BottomBarHost.SizeChanged</c>，
+        /// 而 SizeChanged 是<b>布局 pass 完成之后</b>才发的 —— 也就是说新建的页面
+        /// 必然先用组件构造时那个拍脑袋的 48px 画出第一帧，动画都播了一半才收到通知。
+        /// 观众看到的就是「底栏按钮先挤在一块（或撑得很开），动画结束时啪地跳到正确位置」。</para>
+        ///
+        /// <para>这里在 Loaded 里补一次同步测量：元素此时已在视觉树中，
+        /// 若布局还没跑过（<c>ActualWidth</c> 仍为 0）就 <c>UpdateLayout()</c> 强制跑一次，
+        /// 于是入场动画的第一帧底栏已经是真宽度。</para>
+        ///
+        /// <para>已经算过（<c>_lastAppliedButtonWidth</c> 不是 NaN）就什么都不做 ——
+        /// 切回缓存页时宽度没变、不该重算。</para>
+        /// </summary>
+        private void MeasureBottomBarBeforeFirstFrame()
+        {
+            if (_bottomButtonBarComponent is null || !double.IsNaN(_lastAppliedButtonWidth))
+            {
+                return;
+            }
+
+            // 布局已经跑过（比如页面是复用挂回来的）就不必强制 UpdateLayout，
+            // 那会让整棵子树再走一遍 measure/arrange，白烧一次。
+            if (BottomBarHost.ActualWidth <= 0)
+            {
+                // Loaded 有可能正处在某次布局 pass 中间，这时的 UpdateLayout 属于自找麻烦；
+                // 失败了不算问题 —— 宽度随后会由 SizeChanged 补上，只是那一发会走动画。
+                try
+                {
+                    BottomBarHost.UpdateLayout();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[WebBrowserPage] 首帧前测量底栏宽度失败，交给 SizeChanged 兜底: {ex.Message}");
+                    return;
+                }
+            }
+
+            UpdateBottomBarLayout();
+        }
+
+        /// <summary>
+        /// 标记「页面已经画出来了」。此后才测到的首个宽度要走动画，不能直接落值。
+        /// </summary>
+        private void MarkBottomBarFirstFrameRendered()
+        {
+            _bottomBarFirstFrameRendered = true;
+        }
+
+        /// <summary>
         /// 按宿主可用宽度重算按钮宽度并下发。
         ///
         /// ⭐ 入口挂着 BottomBarHost.SizeChanged，而 SizeChanged 在**布局动画、窗口拖拽、
@@ -145,17 +196,25 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             {
                 return;
             }
-            // ④ 下发宽度。
-            //    首帧（_lastAppliedButtonWidth 还是 NaN）一律直接落值：从组件构造时那个拍脑袋的
-            //    48 滑到算出来的真实宽度，观感是「页面刚出现、底栏自己抖一下」—— 那是 bug 的观感，
-            //    不是动画。之后才交给驱动去判断「该滑还是该跟」（判据见 BottomBarWidthTransition）。
             // ⚠️ 这里刻意【不】把 buttonWidth 记进 _lastAppliedButtonWidth ——
             // 那条记录由 _apply 回调回填实际下发值（见 InitializeBottomBarReactor）。
             // 在此处记目标值的话，动画中途被掐断时记录会和目标值不一致，
             // 去抖③就会误判「没变化」而把真正需要补的那一发吞掉。
             bool firstApply = double.IsNaN(_lastAppliedButtonWidth);
 
-            if (firstApply)
+            // ④-a 首帧 + 还没画出来（Loaded 里那次同步测量）：直接落值。
+            //     入场动画一帧未渲染，落真值等于「底栏一直就是这个宽度」，没有任何跳变可见 ——
+            //     这是理想路径，也是 MeasureBottomBarBeforeFirstFrame 存在的全部意义。
+            //
+            // ④-b 首帧 + 已经画出来了（SizeChanged 迟到的兜底路径）：
+            //     观众此刻看到的是组件构造时那个 48px，直接落值会在动画收尾时硬跳一下 ——
+            //     「没创建过的 page 首次动画时底栏间距不对，动画结束才啪地跳好」就是它。
+            //     这种时序改走动画：让按钮从旧位置平滑滑到新位置，跳变被展开成一段位移。
+            //
+            // ④-c 非首帧：交给驱动判断「该滑还是该跟」（判据见 BottomBarWidthTransition）。
+            bool animateFirstApply = firstApply && _bottomBarFirstFrameRendered;
+
+            if (firstApply && !animateFirstApply)
             {
                 _bottomBarWidthTransition?.Set(buttonWidth);
             }
@@ -164,7 +223,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 _bottomBarWidthTransition?.AnimateTo(buttonWidth);
             }
 
-            System.Diagnostics.Debug.WriteLine($"[UpdateBottomBarLayout] buttonWidth={buttonWidth:F2} (间距固定4px)");
+            System.Diagnostics.Debug.WriteLine(
+                $"[UpdateBottomBarLayout] buttonWidth={buttonWidth:F2} (间距固定4px) " +
+                $"{(firstApply ? (animateFirstApply ? "首帧→动画补" : "首帧→直接落") : "跟随")}");
         }
 
         /// <summary>

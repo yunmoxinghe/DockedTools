@@ -23,6 +23,19 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         /// </summary>
         private async void WebBrowserPage_Loaded(object sender, RoutedEventArgs e)
         {
+            // ⭐ 入场动画开始前先把底栏按钮宽度测出来。
+            //    宽度计算的唯一入口是 BottomBarHost.SizeChanged，而它在布局 pass 完成之后才发 ——
+            //    不补这一次的话，新建的页面会先用构造时的 48px 画出第一帧，
+            //    入场动画播到一半底栏才「啪」地跳到正确间距。
+            //    这里页面刚进树、一帧未渲染，测到即落值，观众全程看到的就是正确宽度。
+            MeasureBottomBarBeforeFirstFrame();
+
+            // 这一帧渲染出去之后，才测到的首个宽度就必须走动画补过去（不能直接落值，
+            // 否则就是一次硬跳）。放在 Loaded 之后的下一个队列循环，此时首帧已提交。
+            DispatcherQueue.TryEnqueue(
+                Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal,
+                () => MarkBottomBarFirstFrameRendered());
+
             AsyncSafety.Run(
                 async () => await WebBrowserPageLoadedAsync(sender, e),
                 "WebBrowserPage",

@@ -58,6 +58,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         private double _lastAppliedButtonWidth = double.NaN;
 
         /// <summary>
+        /// 页面是否已经渲染出第一帧。
+        /// 用来区分首次下发的两种时序：还没画出来时测到的宽度可以直接落值（观众看不到跳变），
+        /// 已经画出来了才测到的必须走动画补过去（否则底栏会在入场动画结束时硬跳一下）。
+        /// </summary>
+        private bool _bottomBarFirstFrameRendered;
+
+        /// <summary>
         /// 底部栏按钮宽度的平滑驱动（离散跳变时才滑，连续拖拽直接跟）。
         /// 在构造函数里随底栏一起建，页面被 LRU 淘汰时随页面一起回收 ——
         /// 停着的 DispatcherQueueTimer 不会被队列持有，不需要显式 Dispose。
