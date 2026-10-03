@@ -598,70 +598,169 @@ namespace DockedTools
             }
         }
 
-        private async void ExitApplication()
+        /// <summary>
+        /// 单个清理步骤的超时上限（毫秒）。
+        /// 退出阶段任何一个子系统卡住都不该拖死整个进程。
+        /// </summary>
+        private const int CleanupStepTimeoutMs = 1500;
+
+        /// <summary>
+        /// 调用 Exit() 后留给 XAML 收尾的时间（毫秒）。
+        /// 超过这个时间进程还活着，说明 UI 线程已经泵不动消息了，强制收尾。
+        /// </summary>
+        private const int ForcedExitGraceMs = 3000;
+
+        // 【为什么 ExitApplication 不再是 async void】
+        // 原先它是 async void，并且在 UI 线程上按顺序做了两件事：
+        //   ① _window.Close() / _keepAliveWindow.Close() —— UI 线程开始拆卸 XAML
+        //   ② await _uiThreadWatchdog.StopAsync() 等一串异步清理
+        // 第 ② 步每个 await 之后，continuation 都要排回 UI 线程的 DispatcherQueue。
+        // 可第 ① 步已经把窗口全关了、XAML 正在拆，排不回去的话整条链会静默停在第一个
+        // await 上 —— 没有异常、没有日志，finally 里的 Exit() 永远执行不到，
+        // 进程就那么吊着。async void 又导致没人能 await 它、也没人接得住它的异常。
+        // 表现就是「点了重启，旧进程不退出」。
+        //
+        // 修法：把 UI 相关清理（必须在本线程同步做）与后台服务清理（不需要 UI 线程）
+        // 彻底切开，后者整体挪到线程池执行，并给每一步加超时，最后加一道硬兜底。
+        private void ExitApplication()
         {
-            // 设置退出标志，防止 keep-alive 窗口自愈重新创建
             _isExiting = true;
-            
-            try
+
+            // ── 阶段一：UI 线程同步收尾 ──────────────────────────────
+            // 这些调用本身是同步的，不存在 continuation 排不回的问题。
+            ShutdownUiResources();
+
+            // ── 阶段二/三：线程池上做异步清理并收尾 ──────────────────
+            // 刻意 fire-and-forget：这里不需要调用方等待，
+            // 内部的超时和硬兜底会保证进程一定收尾。
+            _ = Task.Run(async () =>
             {
-                // 先关闭主窗口
-                if (_window != null)
-                {
-                    _window.Close();
-                    _window = null;
-                }
+                await CleanupBackgroundServicesAsync().ConfigureAwait(false);
 
-                // 关闭保持窗口
-                if (_keepAliveWindow != null)
-                {
-                    // 取消订阅 Closed 事件，避免在退出时触发自愈逻辑
-                    _keepAliveWindow.Closed -= OnKeepAliveWindowClosed;
-                    _keepAliveWindow.Close();
-                    _keepAliveWindow = null;
-                }
-
-                // 清理托盘图标
-                _trayIconManager?.Dispose();
-                _trayIconManager = null;
-
-                // 停掉 UI 线程看门狗。
-                // 退出流程本身会阻塞主线程，不停的话它会把"正在退出"误判成卡死。
-                if (_uiThreadWatchdog != null)
-                {
-                    await _uiThreadWatchdog.StopAsync();
-                    _uiThreadWatchdog.Dispose();
-                    _uiThreadWatchdog = null;
-                }
-
-                // 异步停止单实例通信
-                if (_singleInstanceCommunication != null)
-                {
-                    await _singleInstanceCommunication.StopListeningAsync();
-                    _singleInstanceCommunication.Dispose();
-                    _singleInstanceCommunication = null;
-                }
-                
-                // 停掉浏览器扩展桥接（本机回环 WebSocket）。
-                // 不停的话 Kestrel 的监听线程会一直吊着，托盘退出后进程可能退不干净、
-                // 端口也还占着，下次启动会顺着端口段往后挪。
                 try
                 {
-                    await DockedTools.Features.BrowserExtension.BridgeService.StopAsync();
+                    Exit();
                 }
                 catch (Exception ex)
                 {
-                    LogService.Error("应用入口", "停止桥接服务失败", ex);
+                    // Exit() 本身炸了也不能让进程吊住
+                    LogService.Error("应用入口", "调用 Exit 失败", ex);
                 }
 
-                // 释放 Mutex
-                _singleInstanceMutex?.ReleaseMutex();
-                _singleInstanceMutex?.Dispose();
-                _singleInstanceMutex = null;
-            }
-            finally
+                // ── 硬兜底 ────────────────────────────────────────────
+                // 正常情况下走到这之前进程就已经退了，这行代码不会被执行。
+                // 如果 Exit() 因为 UI 线程泵不动消息而没生效，这里最终接住：
+                // 宁可丢掉尚未落盘的状态，也不能让进程永久挂着。
+                await Task.Delay(ForcedExitGraceMs).ConfigureAwait(false);
+                LogService.Warning(
+                    "应用入口",
+                    $"Exit() 调用后 {ForcedExitGraceMs}ms 仍未退出，判定 UI 线程已无法处理消息，强制终止进程");
+                Environment.Exit(0);
+            });
+        }
+
+        /// <summary>
+        /// 阶段一：关闭窗口并释放托盘资源。必须在 UI 线程同步执行。
+        /// </summary>
+        private void ShutdownUiResources()
+        {
+            // 先关闭主窗口
+            if (_window != null)
             {
-                Exit();
+                _window.Close();
+                _window = null;
+            }
+
+            // 关闭保持窗口
+            if (_keepAliveWindow != null)
+            {
+                // 取消订阅 Closed 事件，避免在退出时触发自愈逻辑
+                _keepAliveWindow.Closed -= OnKeepAliveWindowClosed;
+                _keepAliveWindow.Close();
+                _keepAliveWindow = null;
+            }
+
+            // 清理托盘图标
+            _trayIconManager?.Dispose();
+            _trayIconManager = null;
+        }
+
+        /// <summary>
+        /// 阶段二：停止后台子系统。每一步独立超时，互不拖累。
+        /// </summary>
+        private async Task CleanupBackgroundServicesAsync()
+        {
+            // 停掉 UI 线程看门狗。
+            // 退出流程本身会阻塞主线程，不停的话它会把"正在退出"误判成卡死。
+            if (_uiThreadWatchdog != null)
+            {
+                await WithTimeoutAsync(
+                    () => _uiThreadWatchdog.StopAsync(),
+                    "UI 线程看门狗停止");
+                try
+                {
+                    _uiThreadWatchdog.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    LogService.Error("应用入口", "释放 UI 线程看门狗失败", ex);
+                }
+                _uiThreadWatchdog = null;
+            }
+
+            // 停止单实例通信
+            if (_singleInstanceCommunication != null)
+            {
+                await WithTimeoutAsync(
+                    () => _singleInstanceCommunication.StopListeningAsync(),
+                    "单实例通信停止");
+                try
+                {
+                    _singleInstanceCommunication.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    LogService.Error("应用入口", "释放单实例通信失败", ex);
+                }
+                _singleInstanceCommunication = null;
+            }
+
+            // 停掉浏览器扩展桥接（本机回环 WebSocket）。
+            // 不停的话 Kestrel 的监听线程会一直吊着，托盘退出后进程可能退不干净、
+            // 端口也还占着，下次启动会顺着端口段往后挪。
+            await WithTimeoutAsync(
+                () => DockedTools.Features.BrowserExtension.BridgeService.StopAsync(),
+                "浏览器扩展桥接停止");
+
+            // 释放 Mutex
+            _singleInstanceMutex?.ReleaseMutex();
+            _singleInstanceMutex?.Dispose();
+            _singleInstanceMutex = null;
+        }
+
+        /// <summary>
+        /// 执行单个清理步骤并限制最长耗时。超时就跳过，不让一个卡住的子系统拖死退出流程。
+        /// </summary>
+        private static async Task WithTimeoutAsync(Func<Task> action, string stepName)
+        {
+            try
+            {
+                var task = action();
+                if (await Task.WhenAny(task, Task.Delay(CleanupStepTimeoutMs)).ConfigureAwait(false) == task)
+                {
+                    // 已跑完，await 一次让异常能冒出来被下面接住
+                    await task.ConfigureAwait(false);
+                }
+                else
+                {
+                    LogService.Warning(
+                        "应用入口",
+                        $"退出清理步骤「{stepName}」超过 {CleanupStepTimeoutMs}ms 未返回，已跳过");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogService.Error("应用入口", $"退出清理步骤「{stepName}」失败", ex);
             }
         }
 

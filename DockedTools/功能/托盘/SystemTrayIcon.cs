@@ -24,6 +24,26 @@ namespace DockedTools.Features.Tray
         // 这样开发版和正式版使用不同的 GUID，不会相互冲突
         private static readonly Guid TRAY_ICON_GUID = GenerateTrayIconGuid();
 
+        /// <summary>
+        /// 重启交接中：置位后 <see cref="Dispose()"/> 不再下发 NIM_DELETE。
+        ///
+        /// 【为什么需要它】
+        /// TRAY_ICON_GUID 是按包名哈希出来的，同一个包的**所有实例算出来完全相同**。
+        /// NIF_GUID 模式下 explorer 用 GUID 而非 hWnd 标识图标 —— 换句话说它认图标不认进程。
+        /// 于是重启时序撞车：
+        ///   t=0      旧实例 Launch 唤起新实例
+        ///   t≈400ms  新实例 AddToTray（NIM_ADD）→ 图标出现
+        ///   t=500ms  旧实例退出 → Dispose → NIM_DELETE 同一个 GUID → 把接班人的图标删了 💥
+        /// 旧实例卡得越久撞上的概率越高，表现为「有时候图标会丢」。
+        ///
+        /// 【为什么可以直接跳过删除】
+        /// 进程退出后 explorer 会检测到 hWnd 失效并自行回收该进程的图标登记，
+        /// 本来也不需要手动删。只有「本进程继续存活但要收起图标」的场景才必须 NIM_DELETE。
+        ///
+        /// 【注意】这是进程内标志，不需要跨进程同步 —— 要保护的正是本进程退出这一步。
+        /// </summary>
+        public static bool IsHandingOffToSuccessor { get; set; }
+
         private static Guid GenerateTrayIconGuid()
         {
             try
@@ -142,7 +162,14 @@ namespace DockedTools.Features.Tray
             // 1️⃣ 从托盘删除图标
             try
             {
-                if (_isVisible)
+                // ⚠️ 重启交接期间必须跳过 NIM_DELETE，否则会把新实例刚注册的图标连带删掉。
+                // 详见 <see cref="IsHandingOffToSuccessor"/> 的说明。
+                if (IsHandingOffToSuccessor)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        "[SystemTrayIcon] 处于重启交接流程，跳过 NIM_DELETE（图标由新实例接管，进程退出后 explorer 自行回收）");
+                }
+                else if (_isVisible)
                 {
                     RemoveFromTray();
                 }

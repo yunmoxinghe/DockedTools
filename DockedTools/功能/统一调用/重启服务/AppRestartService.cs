@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Linq;
 using Microsoft.UI.Xaml;
+using DockedTools.Features.UnifiedCalls.Logging;
 
 namespace DockedTools.功能.统一调用;
 
@@ -44,6 +45,14 @@ public static class AppRestartService
             {
                 throw new InvalidOperationException($"无法启动新的应用实例：{launch.Detail}");
             }
+
+            // ✅ 交接开始：接班的实例已经唤起。从这一刻起，本进程退出时必须跳过
+            // NIM_DELETE —— 托盘 GUID 是按包名哈希的，新旧实例算出来是同一个值，
+            // 而 NIF_GUID 模式下 explorer 认 GUID 不认进程，删一个等于全删。
+            // 详见 SystemTrayIcon.IsHandingOffToSuccessor 的注释。
+            // 必须放在 Launch 成功之后：启动失败的话本进程还要继续活着，
+            // 那时图标仍归自己管，正常路径的清理逻辑不能受影响。
+            DockedTools.Features.Tray.SystemTrayIcon.IsHandingOffToSuccessor = true;
             
             // 给新进程一点时间启动，然后再退出旧实例
             // 这样新进程有足够时间获取 Mutex 并初始化资源
@@ -64,6 +73,10 @@ public static class AppRestartService
         }
         catch (Exception ex)
         {
+            // ⚠️ 本方法是 async void：这里的 throw 不会有人接得住，会被 ExceptionPolicy
+            // 兜底吞掉（策略里未分类异常默认 handled）。落日志是唯一能事后追溯的线索，
+            // 否则「点了重启没反应」这类问题查不到任何痕迹。
+            LogService.Error("重启服务", "重启失败", ex);
             Debug.WriteLine($"重启失败: {ex.Message}");
             throw;
         }
