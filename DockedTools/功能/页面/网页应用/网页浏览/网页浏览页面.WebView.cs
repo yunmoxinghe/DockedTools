@@ -593,6 +593,14 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // 页面都要拆了，没理由再让宽度动画继续写组件
             StopBottomBarWidthAnimation();
 
+            // ⭐ 必须显式注销底栏宿主，而且要排在「摘掉 Unloaded 处理器」之前。
+            // Unregister 平时只在 Unloaded 里被调；但 DisposeWebView 会先把 Unloaded 摘掉，
+            // 于是「LRU 淘汰 / 删除当前展示中的网页应用」这两条路根本不走 Unloaded ——
+            // 宿主条目就再也没人摘了。BottomBarThemeService 内部现在换成了弱键表，
+            // Border 被回收后条目会自动消失，所以这不会漏内存；
+            // 这里显式注销是为了【立刻复位底栏颜色】，别让被淘汰页面的网页色留在那里。
+            Services.BottomBarThemeService.Unregister(BottomBarHost);
+
             Loaded -= WebBrowserPage_Loaded;
             Unloaded -= WebBrowserPage_Unloaded;
             Pages.Settings.SettingsPage.WinUIContextMenuSettingsChanged -= OnWinUIContextMenuSettingsChanged;

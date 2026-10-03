@@ -56,6 +56,26 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
         /// null 表示拿不到（老版本脚本 / 一次性探测），此时不做这道校验。
         /// </summary>
         public string? Url { get; set; }
+
+        /// <summary>
+        /// 这份数据所属文档的 <c>performance.timeOrigin</c>。
+        ///
+        /// <para><b>光比 URL 是不够的。</b>刷新（F5）或再次导航到同一个地址时，
+        /// 新旧两个文档的 <c>location.href</c> <b>完全一致</b>，URL 闸门必然放行 ——
+        /// 于是旧文档 250ms 节流窗口里那一发迟到回传会先刷一次旧色，
+        /// 紧接着才被新文档自己的采样纠正，观感是「栏子闪一下」。</para>
+        ///
+        /// <para><c>performance.timeOrigin</c> 是文档创建时刻，同一台机器上单调递增，
+        /// 既能区分「同一 URL 的两次文档」，也能区分「不同 URL 的两个文档」。
+        /// 托管侧记下最近接受过的那个值，比它小的就是过期文档。</para>
+        ///
+        /// <para>为什么不用脚本自己生成的随机 id：随机值之间无法比较先后，
+        /// 而这里恰恰需要「谁更新」。为什么不用 Date.now()：精度只到毫秒，
+        /// 连续两次导航落在同一毫秒内就分不出来了（虽然概率极低，但没必要冒险）。</para>
+        ///
+        /// <para>0 表示拿不到（老版本脚本），此时不做这道校验。</para>
+        /// </summary>
+        public double DocOrigin { get; set; }
     }
 
     /// <summary>
@@ -293,6 +313,14 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
 
             data.Url = StripFragment(ReadString(root, "url"));
 
+            // 老版本脚本没有 doc 字段，保持 0 —— 那时代次闸门自动让位给 URL 闸门。
+            if (root.TryGetProperty("doc", out JsonElement doc) &&
+                doc.ValueKind == JsonValueKind.Number &&
+                doc.TryGetDouble(out double docOrigin))
+            {
+                data.DocOrigin = docOrigin;
+            }
+
             return data;
         }
 
@@ -472,7 +500,11 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
             special: page.length > 0 ? 'none' : __atbcSpecial(),
             // 带上当前 href：托管侧靠它识别「这份颜色属于哪个文档」。
             // 少了它，常驻脚本的迟到回传就没法和新文档的回传区分，会互相覆盖。
-            url: location.href
+            url: location.href,
+            // 文档代次：performance.timeOrigin 是本文档的创建时刻，单调递增。
+            // 刷新 / 重新导航到同一地址时 href 完全一致，光靠 url 分不出新旧，
+            // 靠它才能把旧文档那一发迟到的回传挡在门外。
+            doc: (typeof performance !== 'undefined' && performance.timeOrigin) || 0
         };
     };
 ";

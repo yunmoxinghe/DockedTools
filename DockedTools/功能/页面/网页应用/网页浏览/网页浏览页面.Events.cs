@@ -175,6 +175,14 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
         private void CoreWebView2_NavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
         {
+            // ⭐ 把当前文档代次标记为过期。
+            // 常驻脚本是异步的：旧文档 250ms 节流窗口里的回传可能晚于导航开始才到。
+            // 刷新 / 重新进入同一地址时新旧文档的 location.href 完全一致，
+            // URL 闸门挡不住，只能靠文档代次（performance.timeOrigin）区分 ——
+            // 而代次的「当前值」要等新文档第一发回传才会更新，那之前旧回传会一路放行。
+            // 这里提前把门槛架上，把那段空窗补掉（门槛带自愈超时，见 IsStaleDocument）。
+            MarkAdaptiveDocumentStale();
+
             // 显示加载条
             DispatcherQueue.TryEnqueue(() =>
             {

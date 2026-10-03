@@ -3,6 +3,8 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Runtime.CompilerServices;
 using Windows.UI;
 
 namespace DockedTools.Features.Pages.WebApp.Browser.Services;
@@ -48,11 +50,23 @@ public static class BottomBarThemeService
     public const int DefaultColourTransitionMs = 300;
 
     /// <summary>
-    /// 宿主 → 状态。用 Dictionary 而非 ConditionalWeakTable：宿主是 XAML 里的 Border，
-    /// 由 <see cref="Unregister(Border)"/> 显式注销（页面 Unloaded 一定会走到），
-    /// 字典也能在诊断时枚举出来。
+    /// 宿主 → 状态。
+    ///
+    /// <para>⚠️ 必须是 <see cref="ConditionalWeakTable{TKey,TValue}"/>，不能用 Dictionary：
+    /// 「页面 Unloaded 一定会走到」是个想当然 —— <see cref="Unregister(Border?)"/> 只在
+    /// Unloaded 里被调一次，而 <c>DisposeWebView</c>（LRU 淘汰 / 删除当前网页应用）会把
+    /// Unloaded 处理器先摘掉再关内核，那条路根本不走 Unloaded。</para>
+    ///
+    /// <para>于是 Dictionary 有一条必然泄漏的路径：
+    /// <c>_hosts → Border → SizeChanged lambda → WebBrowserPage → WebView2</c>
+    /// （<c>BottomBarHost.SizeChanged += (s,e) => UpdateBottomBarLayout()</c> 捕获了 this），
+    /// 整张页面连着它的浏览器进程一起永远驻留。换成弱键表之后，Border 被回收条目就自动消失，
+    /// 谁忘了显式注销都不会漏。</para>
+    ///
+    /// <para>BottomBarState 里刻意不放 Border 引用 —— 弱键表的 value 若反过来强引用 key，
+    /// 条目就永远不会被回收，等于白换。</para>
     /// </summary>
-    private static readonly Dictionary<Border, BottomBarState> _hosts = new();
+    private static readonly ConditionalWeakTable<Border, BottomBarState> _hosts = new();
 
     /// <summary>
     /// 最近一次注册/认领的宿主。只为兼容「不传宿主」的旧调用而保留 ——
@@ -66,11 +80,15 @@ public static class BottomBarThemeService
     /// </summary>
     public static Border? RegisteredHost => _activeHost;
 
-    /// <summary>是否已经注册了至少一个底栏宿主</summary>
-    public static bool IsRegistered => _hosts.Count > 0;
+    /// <summary>
+    /// 是否已经注册了至少一个底栏宿主。
+    /// 弱键表没有 Count，这里只能枚举判空 —— 它只用在诊断路径上，不值得为它另记一个计数
+    /// （多记一个计数就要和弱键表的自动回收保持同步，反而更容易错）。
+    /// </summary>
+    public static bool IsRegistered => _hosts.Any();
 
     /// <summary>某个具体的 Border 是否已经注册为底栏宿主（幂等：空/null 一律 false）</summary>
-    public static bool IsHostRegistered(Border? host) => host is not null && _hosts.ContainsKey(host);
+    public static bool IsHostRegistered(Border? host) => host is not null && _hosts.TryGetValue(host, out _);
 
     /// <summary>
     /// 注册底部栏容器实例（幂等，重复调用只更新资源键与「最近活跃」身份）。
@@ -90,11 +108,10 @@ public static class BottomBarThemeService
             return;
         }
 
-        if (!_hosts.TryGetValue(bottomBarHost, out BottomBarState? state))
-        {
-            state = new BottomBarState();
-            _hosts[bottomBarHost] = state;
-        }
+        // GetValue 是原子的 get-or-add。用 TryGetValue + Add 的话两步之间不是原子的，
+        // 而现在 ClaimForeground 也会补注册（缓存页复用路径），调用点变多了，
+        // 万一将来有一条落到后台线程上就会撞出重复 Add。
+        BottomBarState state = _hosts.GetValue(bottomBarHost, static _ => new BottomBarState());
 
         state.BackgroundResourceKey = defaultBackgroundResourceKey;
         _activeHost = bottomBarHost;
@@ -111,10 +128,24 @@ public static class BottomBarThemeService
     /// </summary>
     public static void ClaimForeground(Border? bottomBarHost)
     {
-        if (bottomBarHost is not null && _hosts.ContainsKey(bottomBarHost))
+        if (bottomBarHost is null)
         {
-            _activeHost = bottomBarHost;
+            return;
         }
+
+        // ⭐ 没注册就顺手补注册 —— 这是缓存页复用路径的救命绳。
+        // 页面从 LRU 缓存被切回来时【不会重新构造】，所以构造函数里那次 Register 不会再跑；
+        // 而它上次离开前台时 Unloaded 已经调过 Unregister 把它摘掉了。
+        // 只认领不补注册的话，这个宿主的 IsHostRegistered 恒为 false，
+        // 于是 IsBottomBarHostOwner() 恒 false，底栏自适应色【永久写不进去】——
+        // 表现不是串色，是「这张页面完全没有取色」，而且没有任何报错。
+        if (!_hosts.TryGetValue(bottomBarHost, out _))
+        {
+            Register(bottomBarHost);
+            return;
+        }
+
+        _activeHost = bottomBarHost;
     }
 
     /// <summary>

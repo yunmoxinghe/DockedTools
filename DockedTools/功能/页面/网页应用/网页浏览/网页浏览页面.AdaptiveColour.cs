@@ -413,6 +413,11 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 return;
             }
 
+            if (IsStaleDocument(data.DocOrigin))
+            {
+                return;
+            }
+
             var result = AdaptiveBarColourService.Evaluate(
                 data,
                 ResolveAdaptiveScheme(),
@@ -421,6 +426,89 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 _adaptiveRule);
 
             DispatcherQueue.TryEnqueue(() => ApplyAdaptiveBarColour(result, data));
+        }
+
+        /// <summary>最近一次接受的文档代次（<c>performance.timeOrigin</c>）。0 = 还没见过。</summary>
+        private double _adaptiveDocOrigin;
+
+        /// <summary>导航发起时被判为过期的那个代次；新文档的第一发回传必须比它更新。</summary>
+        private double _adaptiveStaleDocOrigin;
+
+        private long _adaptiveStaleMarkedTicks;
+
+        private bool _adaptiveAwaitingNewDocument;
+
+        /// <summary>
+        /// 「等新文档」状态的最长维持时间。超时就放弃拦截 —— 见 <see cref="IsStaleDocument(double)"/>。
+        /// </summary>
+        private const int AwaitingNewDocumentTimeoutMs = 1500;
+
+        /// <summary>
+        /// 导航开始时调用：把当前代次标记为「已过期」。
+        /// 由 <c>CoreWebView2.NavigationStarting</c> 触发。
+        /// </summary>
+        private void MarkAdaptiveDocumentStale()
+        {
+            _adaptiveStaleDocOrigin = _adaptiveDocOrigin;
+            _adaptiveStaleMarkedTicks = Environment.TickCount64;
+            _adaptiveAwaitingNewDocument = true;
+        }
+
+        /// <summary>
+        /// 文档代次闸门：这份回传是否来自一个<b>比当前已接受的文档更旧</b>的文档。
+        /// 与 URL 闸门（<see cref="PageColourProbe.SameLocation"/>）是两道不同的闸：
+        /// URL 挡「换到别的站点」，代次挡「同一站点刷新 / 重新进入」。
+        /// </summary>
+        /// <param name="docOrigin">回传里带的 <c>performance.timeOrigin</c></param>
+        private bool IsStaleDocument(double docOrigin)
+        {
+            // 老版本脚本没有 doc 字段（保持 0）：拿不到就不拦，让位给 URL 闸门。
+            // 误扣一份本质正常的回传会让自适应彻底不生效，比偶尔串色更难排查。
+            if (docOrigin <= 0)
+            {
+                return false;
+            }
+
+            if (_adaptiveAwaitingNewDocument)
+            {
+                // ⭐ 自愈：等太久还没等到「更新的文档」，说明这次 NavigationStarting
+                // 根本没换文档（同文档锚点跳转也会发 NavigationStarting）。
+                // 再拦下去就是永久失效 —— 宁可放过一次可能的串色，也不能让取色彻底哑掉。
+                if (Environment.TickCount64 - _adaptiveStaleMarkedTicks > AwaitingNewDocumentTimeoutMs)
+                {
+                    _adaptiveAwaitingNewDocument = false;
+                }
+                else if (docOrigin > _adaptiveStaleDocOrigin)
+                {
+                    // 新文档的第一发到了，解除等待
+                    _adaptiveAwaitingNewDocument = false;
+                    _adaptiveDocOrigin = docOrigin;
+                    return false;
+                }
+                else
+                {
+                    return true;
+                }
+            }
+
+            if (_adaptiveDocOrigin <= 0)
+            {
+                _adaptiveDocOrigin = docOrigin;
+                return false;
+            }
+
+            // 比已接受的最新的那个还小 ⇒ 旧文档的迟到回传
+            if (docOrigin < _adaptiveDocOrigin)
+            {
+                return true;
+            }
+
+            if (docOrigin > _adaptiveDocOrigin)
+            {
+                _adaptiveDocOrigin = docOrigin;
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -455,6 +543,15 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             {
                 System.Diagnostics.Debug.WriteLine(
                     "[WebBrowserPage] 丢弃过期文档的取色回传（URL 不匹配）");
+                return;
+            }
+
+            // 第二道闸：文档代次。刷新 / 重新进入同一地址时 URL 完全相同，
+            // 旧文档 250ms 节流窗口里那一发会先刷一次旧色再被纠正，观感是「栏子闪一下」。
+            if (IsStaleDocument(data.DocOrigin))
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    "[WebBrowserPage] 丢弃过期文档的取色回传（文档代次更旧）");
                 return;
             }
 

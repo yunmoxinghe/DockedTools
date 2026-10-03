@@ -63,6 +63,12 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
                     _bottomButtonBarComponent.ButtonWidth = width;
                     _reactorHostControl?.Mount(_bottomButtonBarComponent);
+
+                    // ⭐ 回填【实际下发】的宽度，而不是「上次想给的宽度」。
+                    // 动画中途被 Stop()（页面被淘汰）时真正生效的是插值到的那个中间值，
+                    // 若这里记的是目标值，下次布局的去抖就会以为「已经下发过了」而跳过，
+                    // 六个按钮的宽度从此永久卡在一个非法的中间值上，再也纠正不回来。
+                    _lastAppliedButtonWidth = width;
                 },
                 _bottomButtonBarComponent.ButtonWidth);
         }
@@ -143,8 +149,11 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             //    首帧（_lastAppliedButtonWidth 还是 NaN）一律直接落值：从组件构造时那个拍脑袋的
             //    48 滑到算出来的真实宽度，观感是「页面刚出现、底栏自己抖一下」—— 那是 bug 的观感，
             //    不是动画。之后才交给驱动去判断「该滑还是该跟」（判据见 BottomBarWidthTransition）。
+            // ⚠️ 这里刻意【不】把 buttonWidth 记进 _lastAppliedButtonWidth ——
+            // 那条记录由 _apply 回调回填实际下发值（见 InitializeBottomBarReactor）。
+            // 在此处记目标值的话，动画中途被掐断时记录会和目标值不一致，
+            // 去抖③就会误判「没变化」而把真正需要补的那一发吞掉。
             bool firstApply = double.IsNaN(_lastAppliedButtonWidth);
-            _lastAppliedButtonWidth = buttonWidth;
 
             if (firstApply)
             {
