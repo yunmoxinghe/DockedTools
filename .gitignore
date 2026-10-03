@@ -29,6 +29,15 @@ bld/
 # Build artifacts
 BundleArtifacts/
 
+# MSIX 打包产物（AppPackages 单个包目录可达 170MB，绝对不能入库）
+DockedTools/AppPackages/
+*.msix
+*.msixbundle
+*.msixupload
+*.appxsym
+*.appx
+*.appxbundle
+
 # XAML compiler output
 xaml_compiler_*.txt
 xaml_list.txt
