@@ -160,16 +160,11 @@ namespace DockedTools.Features.Tray
             // 🔧 按正确顺序清理资源，每个步骤都有 try-catch 保护
             
             // 1️⃣ 从托盘删除图标
+            //    交接闸门的判定在 RemoveFromTray() 内部统一处理（那里是所有删除路径的
+            //    唯一汇聚点），这里只需照常调用。
             try
             {
-                // ⚠️ 重启交接期间必须跳过 NIM_DELETE，否则会把新实例刚注册的图标连带删掉。
-                // 详见 <see cref="IsHandingOffToSuccessor"/> 的说明。
-                if (IsHandingOffToSuccessor)
-                {
-                    System.Diagnostics.Debug.WriteLine(
-                        "[SystemTrayIcon] 处于重启交接流程，跳过 NIM_DELETE（图标由新实例接管，进程退出后 explorer 自行回收）");
-                }
-                else if (_isVisible)
+                if (_isVisible)
                 {
                     RemoveFromTray();
                 }
@@ -328,6 +323,20 @@ namespace DockedTools.Features.Tray
 
         private void RemoveFromTray()
         {
+            // ⚠️ 重启交接闸门。闸门必须落在这里 —— 本方法是所有 NIM_DELETE 的唯一汇聚点：
+            //   · IsVisible = false  → RemoveFromTray()
+            //   · Dispose(bool)      → RemoveFromTray()
+            // 挡在调用侧会漏掉前者，而真实调用链走的就是前者：
+            // 托盘图标管理器.Dispose() 先 icon.IsVisible = false（这一步已经把图标删了），
+            // 之后 icon.Dispose() 里 _isVisible 已是 false，反而不会再删。
+            if (IsHandingOffToSuccessor)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    "[SystemTrayIcon] 处于重启交接流程，跳过 NIM_DELETE" +
+                    "（图标已由新实例接管，本进程退出后 explorer 自行回收登记）");
+                return;
+            }
+
             var data = new NOTIFYICONDATAW
             {
                 cbSize = (uint)Marshal.SizeOf<NOTIFYICONDATAW>(),
