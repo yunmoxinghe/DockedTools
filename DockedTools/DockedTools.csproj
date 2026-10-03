@@ -102,8 +102,10 @@
 
   <!-- Publish Properties -->
   <PropertyGroup>
-    <PublishAot>true</PublishAot>
-  <PublishTrimmed>true</PublishTrimmed>
+    <!-- ⚠️ 不要改回 true。WinUI 3 官方不支持 Native AOT（XAML 依赖运行时反射与元数据），
+         且实测开启后 ILC 编译会 OOM，正式版根本打不出包。2026-10-03 关闭。 -->
+    <PublishAot>false</PublishAot>
+    <PublishTrimmed>true</PublishTrimmed>
   <PublishReadyToRun>false</PublishReadyToRun>
   <InvariantGlobalization>false</InvariantGlobalization>
   <GenerateAppInstallerFile>False</GenerateAppInstallerFile>

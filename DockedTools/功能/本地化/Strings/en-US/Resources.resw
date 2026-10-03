@@ -818,12 +818,6 @@ Error Message: {1}</value>
   <data name="SettingsPage_MemoryModeHeader.Description" xml:space="preserve">
     <value>Select memory usage strategy</value>
   </data>
-  <data name="SettingsPage_MemoryModeNormal.Content" xml:space="preserve">
-    <value>Normal</value>
-  </data>
-  <data name="SettingsPage_MemoryModeLow.Content" xml:space="preserve">
-    <value>Low Memory</value>
-  </data>
   <data name="SettingsPage_AutoClearCacheHeader.Header" xml:space="preserve">
     <value>Auto Clear Cache</value>
   </data>

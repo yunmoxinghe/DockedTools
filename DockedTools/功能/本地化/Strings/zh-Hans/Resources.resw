@@ -136,12 +136,6 @@
   <data name="SettingsPage_BackdropAcrylic.Content" xml:space="preserve">
     <value>亚克力</value>
   </data>
-  <data name="SettingsPage_TrayCloseWindowBehaviorHeader.Header" xml:space="preserve">
-    <value>托盘关闭窗口行为</value>
-  </data>
-  <data name="SettingsPage_TrayCloseWindowBehaviorHeader.Description" xml:space="preserve">
-    <value>选择点击托盘"关闭窗口"按钮时的行为</value>
-  </data>
   <data name="SettingsPage_AlipayScanHint.Text" xml:space="preserve">
     <value>扫码支付宝赞助</value>
   </data>
@@ -847,12 +841,6 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   </data>
   <data name="SettingsPage_MemoryModeHeader.Description" xml:space="preserve">
     <value>选择内存占用策略</value>
-  </data>
-  <data name="SettingsPage_MemoryModeNormal.Content" xml:space="preserve">
-    <value>正常</value>
-  </data>
-  <data name="SettingsPage_MemoryModeLow.Content" xml:space="preserve">
-    <value>低内存</value>
   </data>
   <data name="SettingsPage_AutoClearCacheHeader.Header" xml:space="preserve">
     <value>自动清理缓存</value>
