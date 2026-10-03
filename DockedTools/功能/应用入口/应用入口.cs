@@ -628,7 +628,16 @@ namespace DockedTools
 
             // ── 阶段一：UI 线程同步收尾 ──────────────────────────────
             // 这些调用本身是同步的，不存在 continuation 排不回的问题。
-            ShutdownUiResources();
+            // ShutdownUiResources 内部已逐步兜错，这里再包一层只为绝对保证：
+            // 无论 UI 收尾发生什么，下面的退出链都必须启动，否则进程会永久挂着。
+            try
+            {
+                ShutdownUiResources();
+            }
+            catch (Exception ex)
+            {
+                LogService.Error("应用入口", "UI 收尾阶段异常，已强制继续退出流程", ex);
+            }
 
             // ── 阶段二/三：线程池上做异步清理并收尾 ──────────────────
             // 刻意 fire-and-forget：这里不需要调用方等待，
@@ -661,28 +670,64 @@ namespace DockedTools
 
         /// <summary>
         /// 阶段一：关闭窗口并释放托盘资源。必须在 UI 线程同步执行。
+        ///
+        /// ⚠️ 这里的每一步都必须独立兜错，绝不能让异常往外冒。
+        /// 实测到的真事：_keepAliveWindow.Close() 抛 COMException（WinUI 3 在窗口
+        /// 已经/正在关闭时会这样），异常直接从这里窜出 ExitApplication，导致后面
+        /// 的托盘释放与整个退出链全部被跳过 —— 托盘跑在独立 UI 线程上，那个线程
+        /// 不停，Application.Exit() 就带不动进程，最终表现成「重启后两个进程都在」。
         /// </summary>
         private void ShutdownUiResources()
         {
             // 先关闭主窗口
-            if (_window != null)
+            var window = _window;
+            _window = null;
+            SafeShutdownStep("关闭主窗口", () =>
             {
-                _window.Close();
-                _window = null;
-            }
+                window?.Close();
+            });
 
             // 关闭保持窗口
-            if (_keepAliveWindow != null)
+            var keepAlive = _keepAliveWindow;
+            _keepAliveWindow = null;
+            SafeShutdownStep("关闭保持窗口", () =>
             {
+                if (keepAlive == null)
+                {
+                    return;
+                }
                 // 取消订阅 Closed 事件，避免在退出时触发自愈逻辑
-                _keepAliveWindow.Closed -= OnKeepAliveWindowClosed;
-                _keepAliveWindow.Close();
-                _keepAliveWindow = null;
-            }
+                keepAlive.Closed -= OnKeepAliveWindowClosed;
+                keepAlive.Close();
+            });
 
-            // 清理托盘图标
-            _trayIconManager?.Dispose();
+            // 清理托盘图标。
+            // 这是整个退出流程里最关键的一步：托盘宿主跑在独立 UI 线程上，
+            // 只有 Dispose 才会 Shutdown 那个线程。它不做，进程就退不干净。
+            var trayManager = _trayIconManager;
             _trayIconManager = null;
+            SafeShutdownStep("释放托盘图标与独立托盘线程", () =>
+            {
+                trayManager?.Dispose();
+            });
+        }
+
+        /// <summary>
+        /// 执行单个 UI 收尾步骤，把异常就地吞掉并记录。
+        /// 退出阶段任何一步失败都不该影响后续步骤 —— 尤其是不能挡住托盘线程的停止。
+        /// </summary>
+        private static void SafeShutdownStep(string stepName, Action step)
+        {
+            try
+            {
+                step();
+            }
+            catch (Exception ex)
+            {
+                // WinUI 3 的 Window.Close() 在窗口已关闭/正在关闭时会抛 COMException，
+                // 属于可预期的收尾噪音，记录即可，不能让它中断退出流程。
+                LogService.Warning("应用入口", $"UI 收尾步骤「{stepName}」失败，已跳过继续后续清理：{ex.GetType().Name} {ex.Message}");
+            }
         }
 
         /// <summary>
