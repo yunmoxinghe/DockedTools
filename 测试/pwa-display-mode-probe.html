@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PWA 模式探针</title>
+<style>
+  body { font: 14px/1.6 system-ui, sans-serif; margin: 0; padding: 20px; background: #fff; color: #111; }
+
+  /* ===== 纯 CSS 判断：这一段是 CSSOM 改写的验证目标 ===== */
+  #cssBox {
+    padding: 16px; border-radius: 8px;
+    background: #d92b2b; color: #fff; font-weight: 600;
+  }
+  @media (display-mode: standalone) {
+    #cssBox { background: #0d8a2a; }
+  }
+  @media (display-mode: browser) {
+    #cssBox::after { content: "  ← browser 分支没被压成恒假"; }
+  }
+
+  /* 汇总横幅：所有 JS 结果压成一串 0/1，配合 title 一眼看全 */
+  #summary {
+    margin: 12px 0; padding: 10px 12px; border-radius: 8px;
+    background: #f2f2f2; font-family: ui-monospace, Consolas, monospace;
+    font-size: 13px; white-space: pre-wrap; word-break: break-all;
+  }
+  #err { margin: 12px 0; padding: 10px 12px; border-radius: 8px;
+         background: #fff4f4; border: 1px solid #d92b2b; color: #a11; display: none; }
+
+  table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+  td, th { border: 1px solid #ccc; padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: #f2f2f2; width: 40%; }
+  .t { color: #0d8a2a; font-weight: 700; }
+  .f { color: #999; }
+  code { background: #f2f2f2; padding: 1px 4px; border-radius: 3px; word-break: break-all; }
+</style>
+</head>
+<body>
+
+<h2>PWA 模式探针</h2>
+<div id="cssBox">CSS 判断：@media (display-mode: standalone)</div>
+<div id="err"></div>
+<div id="summary">（计算中）</div>
+
+<table>
+  <tr><th>伪装脚本是否进来了<br><small>window.__dockedToolsPwaShim —— 直接验而不是靠现象反推</small></th><td id="k0"></td></tr>
+  <tr><th>navigator.standalone</th><td id="k1"></td></tr>
+  <tr><th>matchMedia standalone</th><td id="k2"></td></tr>
+  <tr><th>matchMedia browser<br><small>伪装后应为 false</small></th><td id="k3"></td></tr>
+  <tr><th>matchMedia minimal-ui</th><td id="k4"></td></tr>
+  <tr><th>matchMedia fullscreen</th><td id="k5"></td></tr>
+  <tr><th>matchMedia NOT browser<br><small>伪装成 standalone 时应为 true</small></th><td id="k6"></td></tr>
+  <tr><th>userAgentData.mobile</th><td id="k7"></td></tr>
+  <tr><th>maxTouchPoints / platform</th><td id="k8"></td></tr>
+  <tr><th>navigator.userAgent<br><small>网页读到的值 —— 由注入脚本接管，不依赖 CDP</small></th><td><code id="k9"></code></td></tr>
+  <tr><th>浏览器层面真实 UA<br><small>window.__pwaRealUserAgent —— 脚本在改写前记下的原值。<br>
+    仍含「Windows NT」说明 CDP 那条 override 没落到新文档上；网页侧不受影响，因为已被脚本改写</small></th><td><code id="k10"></code></td></tr>
+  <tr><th>userAgentData.platform / brands</th><td><code id="k11"></code></td></tr>
+</table>
+
+<script>
+  // 任何一个脚本异常都摊到页面上，别让它悄悄改变结果。
+  // 伪装脚本（宿主注入）万一在这之后崩掉，也能从这里看出来。
+  window.addEventListener('error', function (e) {
+    var box = document.getElementById('err');
+    box.style.display = 'block';
+    box.textContent = '脚本异常：' + (e.message || e.error) + ' @ ' +
+      (e.filename || '') + ':' + (e.lineno || 0);
+  });
+
+  function q(sel, val) {
+    var el = document.querySelector(sel);
+    el.textContent = String(val);
+    el.className = (val === true || val === 'true') ? 't'
+                 : (val === false || val === 'false') ? 'f' : '';
+  }
+  function mm(qs) { try { return window.matchMedia(qs).matches; } catch (e) { return 'ERR:' + e.message; } }
+
+  // ⭐ 直接验「脚本有没有进这个文档」，而不是靠 UA 有没有变去反推。
+  //    新版伪装脚本不再自己读 UA 判断要不要干活，所以 UA 不同步≠脚本没到 —— 两件事彻底解耦了。
+  var v0 = window.__dockedToolsPwaShim === true;
+  var v1 = window.navigator.standalone;
+  var v2 = mm('(display-mode: standalone)');
+  var v3 = mm('(display-mode: browser)');
+  var v4 = mm('(display-mode: minimal-ui)');
+  var v5 = mm('(display-mode: fullscreen)');
+  var v6 = mm('not (display-mode: browser)');
+  var v7 = navigator.userAgentData ? navigator.userAgentData.mobile : 'n/a';
+
+  q('#k0', v0); q('#k1', v1); q('#k2', v2); q('#k3', v3);
+  q('#k4', v4); q('#k5', v5); q('#k6', v6); q('#k7', v7);
+  q('#k8', navigator.maxTouchPoints + ' / ' + navigator.platform);
+  document.querySelector('#k9').textContent = navigator.userAgent;
+
+  // 「CDP 到底生效了吗」的唯一探针：伪装脚本改写 navigator.userAgent 之前存下的原值。
+  // 三种结果各对应一种故障：
+  //   undefined → 脚本压根没进来
+  //   含 Windows NT → 脚本进了（所以网页侧 OK），但 CDP 那条 per-frame override 没落地
+  //   已是移动 UA → 两条通道都到位
+  var real = window.__pwaRealUserAgent;
+  document.querySelector('#k10').textContent = real === undefined ? 'undefined' : real;
+  document.querySelector('#k11').textContent = navigator.userAgentData
+    ? navigator.userAgentData.platform + ' / ' +
+      JSON.stringify(navigator.userAgentData.brands)
+    : 'n/a（iOS 档位下 Safari 本来就没有这个对象）';
+
+  // 一串 0/1，复制出来就是全部结论；同时塞进标题，窗口标签直接能读。
+  function bit(v) { return v === true ? '1' : v === false ? '0' : '?'; }
+  var uaRealIsDesktop = typeof real === 'string' && /Windows NT/i.test(real);
+  var line = 'shim=' + bit(v0) +
+             ' standalone=' + bit(v1) +
+             ' mmStd=' + bit(v2) +
+             ' mmBrowser=' + bit(v3) +
+             ' mmMinUi=' + bit(v4) +
+             ' mmFull=' + bit(v5) +
+             ' notBrowser=' + bit(v6) +
+             ' chMobile=' + bit(v7) +
+             ' cdpUA=' + (real === undefined ? '?' : uaRealIsDesktop ? '0' : '1');
+  document.getElementById('summary').textContent = line;
+  document.title = line;
+</script>
+</body>
+</html>

@@ -35,6 +35,10 @@ namespace DockedTools.Features.Pages.Settings
         private const string WebViewAutoClearCacheKey = "WebSettings_AutoClearCache";
         private const string WebViewSuspendInactiveKey = "WebSettings_SuspendInactive";
         private const string WebViewIdlePowerModeKey = "WebSettings_IdlePowerMode";
+
+        // PWA 模式（让网页认为自己运行在手机 PWA 宿主里）
+        private const string WebViewPwaModeKey = "WebSettings_PwaMode";
+        private const string WebViewPwaDeviceProfileKey = "WebSettings_PwaDeviceProfile";
         private const string WebViewDisableBackgroundNetworkKey = "WebSettings_DisableBackgroundNetwork";
         private const string WebViewDisableExtensionsKey = "WebSettings_DisableExtensions";
         private const string WebViewDisablePluginsKey = "WebSettings_DisablePlugins";
@@ -258,6 +262,38 @@ namespace DockedTools.Features.Pages.Settings
         }
 
         /// <summary>
+        /// 获取或设置是否启用 PWA 模式
+        ///
+        /// <para>开启后向网页下发移动端 User-Agent 与 Client Hints，并让
+        /// <c>navigator.standalone</c> / <c>matchMedia('(display-mode: standalone)')</c>
+        /// 都返回「已安装为 PWA」的结果。</para>
+        ///
+        /// <para><b>刻意不动视口</b>：这个开关只改网页看到的「身份」，不碰窗口尺寸。
+        /// 曾经试过用 CDP <c>Emulation.setDeviceMetricsOverride</c> 把视口压成 412×915，
+        /// 实测会把宿主控件里的页面内容裁掉 —— 宿主是一个尺寸由用户拖拽决定的停靠栏，
+        /// 硬塞一个手机比例进去，多出来的部分就没了。视口该多大多由用户自己拉窗口决定，
+        /// 伪装不该替他做这个决定。</para>
+        /// </summary>
+        public static bool EnablePwaMode
+        {
+            get => AotSafeSettingsHelper.GetBool(_localSettings, WebViewPwaModeKey, defaultValue: false);
+            set => AotSafeSettingsHelper.SetBool(_localSettings, WebViewPwaModeKey, value);
+        }
+
+        /// <summary>
+        /// 获取或设置 PWA 模式伪装成的手机类型
+        /// </summary>
+        public static PwaDeviceProfile PwaProfile
+        {
+            get => AotSafeSettingsHelper.GetEnum(
+                _localSettings,
+                WebViewPwaDeviceProfileKey,
+                PwaDeviceProfile.Android
+            );
+            set => AotSafeSettingsHelper.SetEnum(_localSettings, WebViewPwaDeviceProfileKey, value);
+        }
+
+        /// <summary>
         /// 循环切换到下一个省电模式（普通 → 高效 → 挂起 → 普通）
         /// </summary>
         public static WebViewIdlePowerMode CycleIdlePowerMode()
@@ -475,6 +511,27 @@ namespace DockedTools.Features.Pages.Settings
         /// 低内存模式（推荐后台标签页）
         /// </summary>
         Low = 1
+    }
+
+    /// <summary>
+    /// <summary>
+    /// PWA 模式伪装成哪种手机
+    ///
+    /// <para>只影响下发给网页的 User-Agent 与 Client Hints（<c>navigator.userAgentData</c>），
+    /// 不改变窗口本身的尺寸。</para>
+    /// </summary>
+    public enum PwaDeviceProfile
+    {
+        /// <summary>
+        /// Android + Chrome：绝大多数站点走这条分支，移动端适配最完整
+        /// </summary>
+        Android = 0,
+
+        /// <summary>
+        /// iOS + Safari：<c>navigator.standalone</c> 是这条分支的判断依据，
+        /// 少数站点对 iOS 与 Android 的处理不同（尤其是安装引导横幅）
+        /// </summary>
+        IOS = 1
     }
 
     /// <summary>

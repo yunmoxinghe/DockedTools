@@ -75,5 +75,19 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         // 换行/省略号/换字动画这些渲染细节都在 AppTopBar 那一侧。
         private string _topBarTitleText = string.Empty;
         private string? _topBarIconPath;
+
+        // PWA 模式
+        // ⚠️ 本页刻意【不】保留任何 per-core 记账（脚本 id、是否已注册请求头钩子、默认 UA）——
+        //    那些都是「内核的属性」而不是「页面的属性」，CoreWebView2 一旦重建就全部失真
+        //    （新内核没脚本、没钩子，页面级标志却还是 true → 半伪装态）。
+        //    统一在 PwaModeService 里用弱键表按内核实例记账。
+
+        /// <summary>
+        /// 本页内核上的 PWA 伪装是否<b>真的到位</b>（脚本已注入 + CDP 全成功 + 设置是开的）。
+        ///
+        /// 底栏图标读它，而不是读设置 —— 「设置开了」和「内核已经照做」是两件事，
+        /// 中间隔着脚本注入和三次 CDP 调用，任何一步掉链子它都是 false。
+        /// </summary>
+        private bool _pwaModeEffective;
     }
 }

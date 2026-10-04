@@ -41,7 +41,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 OnCopyUrlClick = () => CopyUrlButton_Click(null!, null!),
                 OnOpenExternalClick = () => OpenExternalButton_Click(null!, null!),
                 IdleMode = ExperimentalSettings.IdlePowerMode,
-                OnCycleIdleModeClick = OnCycleIdleModeClick
+                OnCycleIdleModeClick = OnCycleIdleModeClick,
+                // 初始值刻意这样写：设置可能已经是开的（上次存的），但此刻内核一行都还没下发，
+                // 「生效」必须是 false —— 按钮会先显示成待生效那一档，等 EnsurePwaModeAsync
+                // 真正跑完再转绿。反过来就回到「首次进 Page 显示已开启、其实没开」的老毛病了。
+                PwaMode = ExperimentalSettings.EnablePwaMode,
+                PwaModeEffective = false,
+                OnPwaModeClick = OnPwaModeButtonClick
             };
 
             // 挂载组件到 ReactorHostControl
@@ -71,6 +77,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     _lastAppliedButtonWidth = width;
                 },
                 _bottomButtonBarComponent.ButtonWidth);
+
+            // ⭐ 建好立刻对齐一次 PWA 状态。
+            //    下发挂在 WebView 初始化那条链上，通常比底栏更早跑完 —— 彼时
+            //    SetPwaModeEffective 会因为组件还是 null 而整个空转。
+            //    不补这一枪，图标就一直停在上面写的「待生效」那一档，
+            //    要等下一次导航事件碰巧把它刷绿。
+            UpdateBottomBarPwaMode();
         }
 
         /// <summary>
@@ -143,7 +156,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 return;
             }
 
-            const int buttonCount = 6;  // 5 个功能按钮 + 1 个「收起时模式」按钮
+            const int buttonCount = 7;  // 5 个功能按钮 + 1 个「收起时模式」+ 1 个「PWA 模式」
             const double minButtonWidth = 40.0;
             const double maxButtonWidth = 68.0;
             const double fixedHorizontalSpacing = 4.0;  // 固定左右和按钮间距
@@ -251,12 +264,18 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             bool canGoBack = WebView?.CanGoBack ?? false;
             bool canGoForward = WebView?.CanGoForward ?? false;
             WebViewIdlePowerMode currentMode = ExperimentalSettings.IdlePowerMode;
+            bool pwaMode = ExperimentalSettings.EnablePwaMode;
+            bool pwaEffective = pwaMode && _pwaModeEffective;
 
             // ⭐ 脏值比对：这个函数在导航事件里会被频繁调用（HistoryChanged 等），
-            //    而 props 大多没变。三个值都没变就不必走一次完整 reconcile。
+            //    而 props 大多没变。全部值都没变就不必走一次完整 reconcile。
+            //    ⚠️ PwaMode / PwaModeEffective 必须一起比 —— 只比前者的话，
+            //    「设置开、生效假」这一档会在下一次导航事件里被判成「没变化」而丢掉。
             if (_bottomButtonBarComponent.CanGoBack == canGoBack &&
                 _bottomButtonBarComponent.CanGoForward == canGoForward &&
-                _bottomButtonBarComponent.IdleMode == currentMode)
+                _bottomButtonBarComponent.IdleMode == currentMode &&
+                _bottomButtonBarComponent.PwaMode == pwaMode &&
+                _bottomButtonBarComponent.PwaModeEffective == pwaEffective)
             {
                 return;
             }
@@ -265,11 +284,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             _bottomButtonBarComponent.CanGoBack = canGoBack;
             _bottomButtonBarComponent.CanGoForward = canGoForward;
             _bottomButtonBarComponent.IdleMode = currentMode;
+            _bottomButtonBarComponent.PwaMode = pwaMode;
+            _bottomButtonBarComponent.PwaModeEffective = pwaEffective;
 
             // 触发重新渲染
             _reactorHostControl.Mount(_bottomButtonBarComponent);
 
-            System.Diagnostics.Debug.WriteLine($"[UpdateNavigationButtonStates] CanGoBack={canGoBack}, CanGoForward={canGoForward}");
+            System.Diagnostics.Debug.WriteLine($"[UpdateNavigationButtonStates] CanGoBack={canGoBack}, CanGoForward={canGoForward}, PwaMode={pwaMode}/{pwaEffective}");
         }
 
         /// <summary>

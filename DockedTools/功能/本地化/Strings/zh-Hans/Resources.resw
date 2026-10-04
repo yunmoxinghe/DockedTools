@@ -1310,6 +1310,21 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   <data name="BottomButtonBar_IdleModeButton" xml:space="preserve">
     <value>窗口收起时的省电模式</value>
   </data>
+  <data name="BottomButtonBar_PwaModeButton" xml:space="preserve">
+    <value>PWA 模式</value>
+  </data>
+  <data name="PwaMode_On" xml:space="preserve">
+    <value>已开启</value>
+  </data>
+  <data name="PwaMode_Off" xml:space="preserve">
+    <value>已关闭</value>
+  </data>
+  <data name="PwaMode_Pending" xml:space="preserve">
+    <value>待生效</value>
+  </data>
+  <data name="BottomButtonBar_PwaModeHint" xml:space="preserve">
+    <value>点击切换，开启后网页会认为自己在手机 PWA 里</value>
+  </data>
   <data name="WebViewIdleMode_Normal" xml:space="preserve">
     <value>普通</value>
   </data>

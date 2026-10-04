@@ -1310,6 +1310,21 @@ Error Message: {1}</value>
   <data name="BottomButtonBar_IdleModeButton" xml:space="preserve">
     <value>Power saving mode when collapsed</value>
   </data>
+  <data name="BottomButtonBar_PwaModeButton" xml:space="preserve">
+    <value>PWA mode</value>
+  </data>
+  <data name="PwaMode_On" xml:space="preserve">
+    <value>On</value>
+  </data>
+  <data name="PwaMode_Off" xml:space="preserve">
+    <value>Off</value>
+  </data>
+  <data name="PwaMode_Pending" xml:space="preserve">
+    <value>Pending</value>
+  </data>
+  <data name="BottomButtonBar_PwaModeHint" xml:space="preserve">
+    <value>Click to toggle: when on, pages see a mobile PWA host</value>
+  </data>
   <data name="WebViewIdleMode_Normal" xml:space="preserve">
     <value>Normal</value>
   </data>

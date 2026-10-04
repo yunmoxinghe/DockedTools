@@ -96,6 +96,14 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 // 注入对它无效，交给下面的一次性探测补。
                 _ = EnsureAdaptiveColourSourceAsync(probeCurrentDocument: false);
 
+                // PWA 模式：三条通道（请求头钩子 / CDP UA 覆盖 / 常驻脚本）全部必须在导航之前就位。
+                // ⚠️ 这里是 await 而不是 _ = xxx discarded —— 下面紧跟着就要
+                //    TryNavigatePendingUri 发车，一旦让导航抢先，首屏拿到的就是桌面 UA；
+                //    WebResourceRequested 改不到已发出的请求、CDP override 洗不掉已加载的文档，
+                //    注入脚本也只对后续文档生效。三条路都追不回来，只能再 reload 一次。
+                //    EnsurePwaModeAsync 内部自带 3s 超时，卡住也不会拖垮初始化。
+                await EnsurePwaModeAsync();
+
                 _isWebViewReady = true;
                 
                 // ⭐ 透明背景实验室：即使走重新配置路径也要同步背景色与探针
@@ -209,6 +217,12 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     // probeCurrentDocument: false —— 这里还没导航，探测只会取到空白页；
                     // 第一次导航的 NavigationCompleted 会补上探测。
                     _ = EnsureAdaptiveColourSourceAsync(probeCurrentDocument: false);
+
+                    // PWA 模式：同上，必须 await —— 这条路径跑完紧接着就是
+                    // Navigation.cs 里的 ContinueWith → TryNavigatePendingUri。
+                    // 让后者抢先 = 首屏仍是桌面 UA（standalone / display-mode 也一并缺席），
+                    // 而彼时用户看到的还是「开关已经打开了」。
+                    await EnsurePwaModeAsync();
 
                     // 只有在 CoreWebView2 成功初始化后才设置为 ready
                     _isWebViewReady = true;
@@ -606,6 +620,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             Pages.Settings.SettingsPage.WinUIContextMenuSettingsChanged -= OnWinUIContextMenuSettingsChanged;
             Pages.Settings.SettingsPage.WebViewPerformanceSettingsChanged -= OnWebViewPerformanceSettingsChanged;
             Pages.Lab.LabPage.WebViewTransparencySettingsChanged -= OnWebViewTransparencySettingsChanged;
+            Services.PwaModeService.Changed -= OnPwaModeSettingsChanged;
             
             // 清理 WebView 实例
             CleanupAndCloseWebView(WebView);

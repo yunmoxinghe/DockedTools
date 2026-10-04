@@ -41,6 +41,26 @@ public class BottomButtonBar : Component
     /// </summary>
     public Action? OnCycleIdleModeClick { get; set; }
 
+    /// <summary>
+    /// 当前 PWA 模式是否开启（设置值）
+    /// </summary>
+    public bool PwaMode { get; set; }
+
+    /// <summary>
+    /// PWA 伪装在本页内核上是否已经<b>真正生效</b>（伪装脚本已注入到本页内核）。
+    ///
+    /// <para>和 <see cref="PwaMode"/> 的区别是它反映内核结果而不是用户意图：
+    /// 只有 <see cref="PwaMode"/> 为真而它为假时，说明设置已经写下去了但内核没跟上
+    /// （内核还没就绪、脚本注入失败、CDP 被拒、CoreWebView2 刚重建过……），
+    /// 此时按钮渲染成「待生效」那一档的警示色 —— 绝不能装作已经开了。</para>
+    /// </summary>
+    public bool PwaModeEffective { get; set; }
+
+    /// <summary>
+    /// 点击 PWA 模式按钮（由宿主负责切换与持久化）
+    /// </summary>
+    public Action? OnPwaModeClick { get; set; }
+
     public override Element Render()
     {
         // 直接返回 HStack，用 Padding 控制精确间距，不使用任何居中对齐
@@ -50,7 +70,8 @@ public class BottomButtonBar : Component
             CreateIconButton("\uE72C", true, OnRefreshClick, "刷新"),
             CreateIconButton("\uE8C8", true, OnCopyUrlClick, "复制URL"),
             CreateIconButton("\uE774", true, OnOpenExternalClick, "外部打开"),
-            CreateIdleModeButton()
+            CreateIdleModeButton(),
+            CreatePwaModeButton()
         )
         .Padding(UniformSpacing)  // 上下左右统一 4px 内边距
         .HAlign(HorizontalAlignment.Center)
@@ -147,6 +168,50 @@ public class BottomButtonBar : Component
         return Button(
             content: icon,
             onClick: () => OnCycleIdleModeClick?.Invoke()
+        )
+        .SubtleButton()
+        .Width(ButtonWidth)
+        .Height(FixedButtonHeight)
+        .MaxHeight(FixedButtonHeight)
+        .MinWidth(32)
+        .AutomationName(automationName)
+        .ToolTip(toolTip);
+    }
+
+    /// <summary>
+    /// 创建「PWA 模式」按钮
+    /// 图标 = 手机（Segoe MDL2 E8EA），状态用颜色点出：<b>关=默认色 / 已生效=绿 / 待生效=黄</b>。
+    ///
+    /// <para>沿用 IdleMode 按钮的视觉语言 —— 只有「非默认档位」才染色。
+    /// «待生效» 用 <see cref="Theme.SystemCaution"/> 而不是成功色，是为了让
+    /// 「设置开了但内核还没跟上」看起来像一个需要注意的状态，而不是已经完成的状态。</para>
+    /// </summary>
+    private Element CreatePwaModeButton()
+    {
+        string label = LocalizationHelper.GetString("BottomButtonBar_PwaModeButton");
+
+        // 三档：关 / 已生效 / 待生效（设置开了但内核确认失败或还没确认完）
+        string stateKey = !PwaMode ? "PwaMode_Off" : (PwaModeEffective ? "PwaMode_On" : "PwaMode_Pending");
+
+        string automationName = $"{label}：{LocalizationHelper.GetString(stateKey)}";
+        string toolTip = $"{automationName}（{LocalizationHelper.GetString("BottomButtonBar_PwaModeHint")}）";
+
+        var icon = TextBlock("\uE8EA")
+            .FontFamily(new Microsoft.UI.Xaml.Media.FontFamily("Segoe Fluent Icons"))
+            .FontSize(16);
+
+        ThemeRef? iconForeground = !PwaMode
+            ? null
+            : PwaModeEffective ? Theme.SystemSuccess : Theme.SystemCaution;
+
+        if (iconForeground.HasValue)
+        {
+            icon = icon.Foreground(iconForeground.Value);
+        }
+
+        return Button(
+            content: icon,
+            onClick: () => OnPwaModeClick?.Invoke()
         )
         .SubtleButton()
         .Width(ButtonWidth)
