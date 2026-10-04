@@ -130,8 +130,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         /// </summary>
         /// <param name="probeOnly">
         /// true 时跳过常驻脚本，只对当前文档做一次性探测。
-        /// 用于 Chromium 内部页面（错误页）这类 AddScriptToExecuteOnDocumentCreated 不生效、
-        /// 但仍能 ExecuteScript 读取的文档。
+        /// 用于 Chromium 内部页面（错误页）这类文档。
+        /// 【实测更正】旧注释说「错误页上 AddScriptToExecuteOnDocumentCreated 不生效」是错的 ——
+        /// 错误页（chrome-error://chromewebdata/）上常驻脚本照样注入执行，
+        /// window.chrome.webview 也在，ExecuteScript 同样能读。保留这条一次性探测路径只是多一层保险。
         /// </param>
         private void ScheduleAdaptiveBarColourUpdate(bool probeOnly = false)
         {
@@ -187,8 +189,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
         /// <param name="probeOnly">
         /// true 时跳过常驻脚本，只对当前文档做一次性探测。
-        /// 用于 Chromium 内部页面（错误页）这类 AddScriptToExecuteOnDocumentCreated 不生效、
-        /// 但仍能 ExecuteScript 读取的文档。
+        /// 用于 Chromium 内部页面（错误页）这类文档。
+        /// 【实测更正】旧注释说「错误页上 AddScriptToExecuteOnDocumentCreated 不生效」是错的 ——
+        /// 错误页（chrome-error://chromewebdata/）上常驻脚本照样注入执行，
+        /// window.chrome.webview 也在，ExecuteScript 同样能读。保留这条一次性探测路径只是多一层保险。
         /// </param>
         /// <param name="forceProbe">
         /// true 时即便常驻脚本已生效、选择器也没变，也强制重探一次。
@@ -249,7 +253,8 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             }
 
             // 动态刷新关掉时（ATBC 的 dynamic=false）：不注入常驻脚本，只在每次导航后取一次色。
-            // probeOnly：当前文档是错误页之类拿不到常驻脚本的文档，同样只能一次性探测。
+            // probeOnly：只对当前文档做一次性探测、不依赖常驻脚本的场合（动态刷新关闭等）。
+            // 注：错误页其实拿得到常驻脚本（实测），不再是这一支的必要条件。
             if (probeOnly || !AdaptiveColourSettings.Dynamic)
             {
                 // 动态刷新关掉时脚本里的 dispatch 会自己挡掉回传（开关在回传前查，不是启动时查），
@@ -433,7 +438,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 return;
             }
 
-            // 探测不到（错误页上 ExecuteScript 被拒 / 内核还没准备好）：
+            // 探测不到（内核还没准备好 / 脚本被 CSP 挡住等；实测错误页上 ExecuteScript 是可用的）：
             // 不要用兜底色去刷栏子，直接回落系统默认，顺带清掉上一个网页残留的颜色与主题。
             if (data is null)
             {

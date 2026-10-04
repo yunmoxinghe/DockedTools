@@ -235,8 +235,8 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // 页面就绪后按网页外观刷新顶栏/底栏颜色（ATBC 移植）。
             //
             // 导航失败（「无法访问此页面」等 Chromium 内部错误页）时：
-            // AddScriptToExecuteOnDocumentCreated 注入的常驻脚本对这些内部文档不生效，
-            // 所以必须走一次性探测（ExecuteScript 在错误页上仍然可用）；
+            // 【实测更正】常驻脚本对这些内部文档其实是生效的（错误页上能注入、能 postMessage），
+            // 这里走一次性探测只是多一层保险，不是必须；探测也用 ExecuteScript（错误页上可用）；
             // 如果连探测都取不到，RunOneShotProbe 里会回落系统默认栏色，
             // 不留着上一个网页的颜色和顶栏亮/暗。
             if (!e.IsSuccess)
