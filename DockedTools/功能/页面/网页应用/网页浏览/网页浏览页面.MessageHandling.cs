@@ -108,11 +108,27 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         ///
         /// 【为什么用 capture 阶段】
         /// 页面很可能在冒泡阶段 stopPropagation，挂在 window 的 capture 阶段是最早能拿到的位置。
+        ///
+        /// 【为什么要中继 iframe 的按键 —— 实测结论，WebView2 Runtime 154】
+        /// AddScriptToExecuteOnDocumentCreated 注入的脚本会下到【每一个】frame
+        /// （同源子 frame / srcdoc / 跨域子 frame 都验证过脚本确实执行了），
+        /// 但 WebView2 的 WebMessage 通道只接主 frame：子 frame 里 window.chrome.webview 存在、
+        /// postMessage 也不抛错，宿主却一条都收不到。
+        /// 于是子 frame 把按键 postMessage 给父 frame，逐级上浮，由主 frame 统一交给宿主。
+        /// 少这一段，焦点落在登录框 / 内嵌播放器 / 聊天挂件这类 iframe 里时快捷键就失灵。
         /// </summary>
         private const string ShortcutScript =
 @"(function () {
   if (window.__dtShortcutInstalled) { return; }
   window.__dtShortcutInstalled = true;
+  var RELAY = 'dtShortcutRelay';
+  var isTop = (window === window.top);
+
+  // sandbox iframe 里读 location.href 会抛 SecurityError，别让它把整次按键带没了
+  function frameHref() {
+    try { return String(location.href || ''); } catch (e) { return ''; }
+  }
+
   function post(payload) {
     try {
       if (window.chrome && window.chrome.webview) {
@@ -120,17 +136,55 @@ namespace DockedTools.Features.Pages.WebApp.Browser
       }
     } catch (e) { }
   }
+
+  // 只认自己的直接子 frame。页面随时能从任意 window postMessage 过来，
+  // 不校验来源的话一条 window.top.postMessage 就能替用户切标签。
+  function isOwnFrame(source) {
+    try {
+      var frames = document.getElementsByTagName('iframe');
+      for (var i = 0; i < frames.length; i++) {
+        if (frames[i].contentWindow === source) { return true; }
+      }
+    } catch (e) { }
+    return false;
+  }
+
+  if (isTop) {
+    window.addEventListener('message', function (ev) {
+      var data = ev && ev.data;
+      if (!data || data[RELAY] !== true) { return; }
+      if (!isOwnFrame(ev.source)) { return; }
+      post({
+        type: 'dtShortcut',
+        code: data.code || '',
+        key: data.key || '',
+        ctrl: !!data.ctrl,
+        alt: !!data.alt,
+        shift: !!data.shift,
+        frame: data.frame || ''
+      });
+    });
+  }
+
   window.addEventListener('keydown', function (ev) {
     if (ev.repeat) { return; }
     if (!ev.ctrlKey && !ev.altKey) { return; }
-    post({
-      type: 'dtShortcut',
+    var payload = {
       code: ev.code || '',
       key: ev.key || '',
       ctrl: !!ev.ctrlKey,
       alt: !!ev.altKey,
-      shift: !!ev.shiftKey
-    });
+      shift: !!ev.shiftKey,
+      frame: frameHref()
+    };
+    if (isTop) {
+      payload.type = 'dtShortcut';
+      post(payload);
+      return;
+    }
+    // 嵌套 iframe 会一级级上浮，每层的 isOwnFrame 都对着自己的直接子 frame 校验
+    payload[RELAY] = true;
+    try { window.parent.postMessage(payload, '*'); } catch (e) { }
   }, true);
 })();";
 
@@ -167,6 +221,16 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 bool ctrl = root.TryGetProperty("ctrl", out JsonElement ctrlElement) && ctrlElement.GetBoolean();
                 bool alt = root.TryGetProperty("alt", out JsonElement altElement) && altElement.GetBoolean();
                 bool shift = root.TryGetProperty("shift", out JsonElement shiftElement) && shiftElement.GetBoolean();
+                string frame = root.TryGetProperty("frame", out JsonElement frameElement)
+                    ? frameElement.GetString() ?? string.Empty
+                    : string.Empty;
+
+                // 日志打在映射【之前】：带上原始 code/key 和 frame，
+                // 「按键到了但没映射上」这种情况才不会在日志里凭空消失 ——
+                // 焦点落在 iframe 里时，这条能直接看出按键是从哪个 frame 转上来的。
+                System.Diagnostics.Debug.WriteLine(
+                    $"[WebBrowserPage] 页面快捷键上报: code={code} key={keyName} " +
+                    $"ctrl={ctrl} alt={alt} shift={shift} frame={frame}");
 
                 if (!TryMapVirtualKey(code, keyName, out VirtualKey key))
                 {

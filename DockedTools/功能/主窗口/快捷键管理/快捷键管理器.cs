@@ -260,9 +260,15 @@ namespace DockedTools.Features.MainWindow.KeyboardManagement
             }
 
             long now = Environment.TickCount64;
+            long elapsed = now - _lastHandledTick;
 
             // 同一按键在去抖窗口内重复到达（XAML 与 WebView 双路、或 KeyDown+KeyUp 各触发一次）
-            if (key == _lastHandledKey && now - _lastHandledTick < DuplicateSuppressMs)
+            //
+            // elapsed >= 0 这一半是给 TickCount64 回绕兜的：它每约 49.7 天绕回 long.MinValue，
+            // 恰好卡在回绕点上的那一次差值会算成极大负数，< DuplicateSuppressMs 依然成立 →
+            // 用户按了一次却被执行出来「没反应」。少去重一次顶多是重复跳一格，
+            // 把真按键吞掉才是事故，所以回绕点宁可不去重。
+            if (key == _lastHandledKey && elapsed >= 0 && elapsed < DuplicateSuppressMs)
             {
                 LogDebug($"去抖吞掉重复快捷键: Ctrl+{key}");
                 return true; // 已归属快捷键系统，阻止其它路径再次执行

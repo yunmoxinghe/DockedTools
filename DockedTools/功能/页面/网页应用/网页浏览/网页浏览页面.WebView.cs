@@ -102,7 +102,22 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 // 只剩进站时那两次一次性采样。
                 // probeCurrentDocument: false —— 这个分支里文档可能已经加载完了，
                 // 注入对它无效，交给下面的一次性探测补。
-                _ = EnsureAdaptiveColourSourceAsync(probeCurrentDocument: false);
+                //
+                // ⚠️ 必须 await：AddScriptToExecuteOnDocumentCreatedAsync 是异步的，
+                // fire-and-forget 的话它还在半路就已经放行、调用方开始导航，
+                // 首个文档会注册不上脚本 —— 那个页面上「动态刷新」等于关着的，
+                // 只剩进站时的一次性采样。
+                //
+                // ⚠️ 必须 try：本方法的 catch 会弹「WebView 初始化失败」对话框，
+                // 取色是锦上添花，它出任何问题都不该让用户连网页都打不开。
+                try
+                {
+                    await EnsureAdaptiveColourSourceAsync(probeCurrentDocument: false);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[EnsureWebViewInitializedAsync] 取色脚本注入失败（忽略）: {ex.Message}");
+                }
 
                 // 快捷键上报脚本（焦点在网页里时把 Ctrl+1~9 / Ctrl+Tab / Ctrl+D 交回宿主）
                 // ⚠️ 必须 await：AddScriptToExecuteOnDocumentCreatedAsync 是异步的，丢成
@@ -225,7 +240,17 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     // 只剩进站时那两次一次性采样，页面滚动/换肤都不会再更新。
                     // probeCurrentDocument: false —— 这里还没导航，探测只会取到空白页；
                     // 第一次导航的 NavigationCompleted 会补上探测。
-                    _ = EnsureAdaptiveColourSourceAsync(probeCurrentDocument: false);
+                    //
+                    // ⚠️ 必须 await（理由同上：不等注入完成就放行，首个文档会漏掉脚本）、
+                    // 必须 try（取色出问题不该升级成「WebView 初始化失败」对话框）。
+                    try
+                    {
+                        await EnsureAdaptiveColourSourceAsync(probeCurrentDocument: false);
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[EnsureWebViewInitializedAsync] 取色脚本注入失败（忽略）: {ex.Message}");
+                    }
 
                     // 快捷键上报脚本（焦点在网页里时把 Ctrl+1~9 / Ctrl+Tab / Ctrl+D 交回宿主）
                     // ⚠️ 必须 await，理由同上：注入没完成就放行的话，下面「准备导航」之后

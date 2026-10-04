@@ -75,6 +75,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         private CoreWebView2? _adaptiveMonitorCore;
 
         /// <summary>
+        /// 正在进行的取色脚本注入任务（single-flight 的那一扇门）。
+        /// 注入未完成时 _adaptiveMonitorInstalled 还没置起来，并发调用必须共用这一个任务，
+        /// 否则同一份脚本会被装上两遍 —— 详见 EnsureAdaptiveColourSourceAsync 里的说明。
+        /// </summary>
+        private Task<bool>? _adaptiveMonitorInjection;
+
+        /// <summary>
         /// 常驻脚本当前生效的取色选择器（规则选择器优先于全局）。
         /// 缓存的取色数据是按它探出来的 —— 它变了就必须重新探一次，
         /// 只把新选择器推给脚本是不够的，当前页面会一直停在旧结果上。
@@ -250,6 +257,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 _adaptiveSuspended = false;
                 _adaptiveMonitorInstalled = false;
                 _adaptiveMonitorCore = null;
+                _adaptiveMonitorInjection = null;
             }
 
             // 动态刷新关掉时（ATBC 的 dynamic=false）：不注入常驻脚本，只在每次导航后取一次色。
@@ -291,10 +299,48 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 return;
             }
 
+            // 保证同一时刻只有一次注入在跑（single-flight）。
+            // AddScriptToExecuteOnDocumentCreatedAsync 返回之前 _adaptiveMonitorInstalled 还没置起来，
+            // 这段窗口里再进来一次调用（WebView 就绪那次常与首个文档的 NavigationCompleted 撞在一起），
+            // 两条都会走到注入分支 —— 脚本于是被装上两遍，每个文档里注册两份监听、回传双倍消息。
+            // 并发调用必须共用一个注入任务；内核换了就丢掉上一次的，让它重新注入。
+            if (!ReferenceEquals(_adaptiveMonitorCore, core))
+            {
+                _adaptiveMonitorInjection = null;
+            }
+
+            string? injectedQuery = ResolveEffectiveQuery();
+            _adaptiveMonitorInjection ??= TryInstallAdaptiveMonitorAsync(core, injectedQuery);
+            bool installed = await _adaptiveMonitorInjection;
+
+            // 注入失败就把门打开，下一次调度还能重试；成功的话 Installed 标记已经替我们守住了。
+            if (!installed)
+            {
+                _adaptiveMonitorInjection = null;
+            }
+
+            // AddScriptToExecuteOnDocumentCreated 只对【注入之后才创建的文档】生效。
+            // 正常流程下我们在 CoreWebView2 就绪后、首次导航之前就注入（见 WebView.cs），
+            // 当前文档拿得到脚本，不需要补探测（probeCurrentDocument=false）；
+            // 只有事后补注入（内核重建、错误页恢复等）才需要 —— 那时文档早就创建完了，
+            // 不补一次就会一直不取色，直到用户再导航一次。
+            if (probeCurrentDocument)
+            {
+                await RestartOneShotProbeAsync();
+            }
+        }
+
+        /// <summary>
+        /// 真正把常驻取色脚本装到内核上（成功返回 true）。
+        ///
+        /// 抽出独立方法是为了给 <see cref="EnsureAdaptiveColourSourceAsync"/> 提供 single-flight 的
+        /// 注入任务：上面那个 <c>_adaptiveMonitorInjection</c> 只能持有「整段注入」，
+        /// 持有一个已经跑完一半的片段没有意义。
+        /// </summary>
+        private async Task<bool> TryInstallAdaptiveMonitorAsync(CoreWebView2 core, string? injectedQuery)
+        {
             try
             {
-                string? injectedQuery = ResolveEffectiveQuery();
-
                 await core.AddScriptToExecuteOnDocumentCreatedAsync(
                     PageColourProbe.BuildMonitorScript(injectedQuery));
 
@@ -309,27 +355,12 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 // 这里按当前页面的规则推一次，否则规则里的选择器永远不生效。
                 await PushRuntimeOptionsAsync();
 
-                // AddScriptToExecuteOnDocumentCreated 只对【注入之后才创建的文档】生效。
-                // 正常流程下我们在 CoreWebView2 就绪后、首次导航之前就注入（见 WebView.cs），
-                // 当前文档拿得到脚本，不需要补探测；
-                // 只有事后补注入（内核重建、错误页恢复等）才需要 —— 那时文档早就创建完了，
-                // 不补一次就会一直不取色，直到用户再导航一次。
-                if (probeCurrentDocument)
-                {
-                    await RestartOneShotProbeAsync();
-                }
-
-                return;
+                return true;
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[WebBrowserPage] 常驻取色脚本注入失败，回退一次性探测: {ex.Message}");
-            }
-
-            // 兜底：注入不成时退化为导航后一次性探测
-            if (probeCurrentDocument)
-            {
-                await RestartOneShotProbeAsync();
+                return false;
             }
         }
 
@@ -870,6 +901,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             if (detachMonitor)
             {
                 _adaptiveMonitorCore = null;
+                _adaptiveMonitorInjection = null;
                 _adaptiveInjectedQuery = null;
 
                 if (WebView?.CoreWebView2 is { } core)
