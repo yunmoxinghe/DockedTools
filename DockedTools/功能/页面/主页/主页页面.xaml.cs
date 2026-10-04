@@ -150,16 +150,21 @@ namespace DockedTools.Features.Pages.Home
 
                 card.Click += (sender, e) => OnCardClick(shortcut);
 
-                if (shortcut.IconBytes != null && shortcut.IconBytes.Length > 0)
+                // 图标统一先落盘再按路径建源（SVG 走 SvgImageSource、位图走 BitmapImage）。
+                // 顺带修掉原来「每次刷新都把 IconBytes 全量解码一遍」的开销 ——
+                // 路径命中缓存时 Save 直接返回已有路径，解码交给 XAML 自己去做。
+                string? iconPath = shortcut.IconBytes is { Length: > 0 } iconBytes
+                    ? WebAppIconCache.Save(shortcut.Id, iconBytes)
+                    : null;
+
+                if (iconPath is not null)
                 {
                     try
                     {
-                        var bitmap = new BitmapImage();
-                        using var stream = new InMemoryRandomAccessStream();
-                        await stream.WriteAsync(shortcut.IconBytes.AsBuffer());
-                        stream.Seek(0);
-                        await bitmap.SetSourceAsync(stream);
-                        card.HeaderIcon = new ImageIcon { Source = bitmap };
+                        card.HeaderIcon = new ImageIcon
+                        {
+                            Source = WebAppIconCache.CreateImageSource(new Uri(iconPath))
+                        };
                     }
                     catch
                     {

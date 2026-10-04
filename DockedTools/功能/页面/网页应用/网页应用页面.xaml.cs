@@ -4,6 +4,7 @@ using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Hosting;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Navigation;
 using System;
@@ -215,6 +216,7 @@ namespace DockedTools.Features.Pages.WebApp
                 picker.FileTypeFilter.Add(".webp");
                 picker.FileTypeFilter.Add(".bmp");
                 picker.FileTypeFilter.Add(".ico");
+                picker.FileTypeFilter.Add(".svg"); // 矢量图标，显示侧走 SvgImageSource
 
                 IntPtr hwnd = GetForegroundWindow();
                 if (hwnd == IntPtr.Zero)
@@ -415,10 +417,7 @@ namespace DockedTools.Features.Pages.WebApp
                         {
                             continue;
                         }
-                        if (contentType.Contains("svg", StringComparison.OrdinalIgnoreCase))
-                        {
-                            continue;
-                        }
+                        // SVG 不再跳过：显示侧走 SvgImageSource 能直接渲染，矢量图最清晰
                     }
 
                     byte[] bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
@@ -427,7 +426,8 @@ namespace DockedTools.Features.Pages.WebApp
                         continue;
                     }
 
-                    if (!await CanDecodeBitmapAsync(bytes))
+                    // 位图要求能解码；SVG 单独放行（BitmapDecoder 解不了它）
+                    if (!WebAppIconCache.IsSvgContent(bytes) && !await CanDecodeBitmapAsync(bytes))
                     {
                         continue;
                     }
@@ -566,15 +566,33 @@ namespace DockedTools.Features.Pages.WebApp
         private async Task ShowWebsiteIconAsync(byte[] iconBytes)
         {
             _currentIconBytes = iconBytes.ToArray();
-            bool shouldRound = await ShouldRoundIconCornersAsync(iconBytes);
 
-            var bitmap = new BitmapImage();
-            using var stream = new InMemoryRandomAccessStream();
-            await stream.WriteAsync(iconBytes.AsBuffer());
-            stream.Seek(0);
-            await bitmap.SetSourceAsync(stream);
+            // SVG 走 SvgImageSource；它也没有位图那种「四角不透明 ⇒ 要圆角」的问题，
+            // 圆角判断（要解码像素）对矢量图直接跳过。
+            bool shouldRound = !WebAppIconCache.IsSvgContent(iconBytes)
+                               && await ShouldRoundIconCornersAsync(iconBytes);
 
-            SiteIconImage.Source = bitmap;
+            ImageSource source;
+            if (WebAppIconCache.IsSvgContent(iconBytes))
+            {
+                var svg = new SvgImageSource();
+                using var stream = new InMemoryRandomAccessStream();
+                await stream.WriteAsync(iconBytes.AsBuffer());
+                stream.Seek(0);
+                await svg.SetSourceAsync(stream);
+                source = svg;
+            }
+            else
+            {
+                var bitmap = new BitmapImage();
+                using var stream = new InMemoryRandomAccessStream();
+                await stream.WriteAsync(iconBytes.AsBuffer());
+                stream.Seek(0);
+                await bitmap.SetSourceAsync(stream);
+                source = bitmap;
+            }
+
+            SiteIconImage.Source = source;
             SiteIconImage.Visibility = Visibility.Visible;
             SiteIconFallback.Visibility = Visibility.Collapsed;
             ApplyIconClip(shouldRound);

@@ -67,7 +67,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 WebView.CoreWebView2.HistoryChanged += CoreWebView2_HistoryChanged;
                 WebView.CoreWebView2.NavigationStarting += CoreWebView2_NavigationStarting;
                 WebView.CoreWebView2.NavigationCompleted += CoreWebView2_NavigationCompleted;
-                
+
+                // ⭐ 站点图标（Favicon）：进站和 JS 动态改图标都会触发，见 网页浏览页面.Favicon.cs
+                WebView.CoreWebView2.FaviconChanged += CoreWebView2_FaviconChanged;
+
                 // ⭐ 订阅新窗口请求事件
                 WebView.CoreWebView2.NewWindowRequested += CoreWebView2_NewWindowRequested;
                 
@@ -188,7 +191,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     WebView.CoreWebView2.HistoryChanged += CoreWebView2_HistoryChanged;
                     WebView.CoreWebView2.NavigationStarting += CoreWebView2_NavigationStarting;
                     WebView.CoreWebView2.NavigationCompleted += CoreWebView2_NavigationCompleted;
-                    
+
+                    // ⭐ 站点图标（Favicon）：进站和 JS 动态改图标都会触发，见 网页浏览页面.Favicon.cs
+                    WebView.CoreWebView2.FaviconChanged += CoreWebView2_FaviconChanged;
+
                     // ⭐ 订阅新窗口请求事件
                     WebView.CoreWebView2.NewWindowRequested += CoreWebView2_NewWindowRequested;
                     
@@ -638,6 +644,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     webView.CoreWebView2.HistoryChanged -= CoreWebView2_HistoryChanged;
                     webView.CoreWebView2.NavigationStarting -= CoreWebView2_NavigationStarting;
                     webView.CoreWebView2.NavigationCompleted -= CoreWebView2_NavigationCompleted;
+                    webView.CoreWebView2.FaviconChanged -= CoreWebView2_FaviconChanged;
                     webView.CoreWebView2.ContextMenuRequested -= CoreWebView2_ContextMenuRequested;
                     
                     // ⭐ 取消订阅新窗口请求事件
@@ -660,6 +667,19 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 {
                     System.Diagnostics.Debug.WriteLine($"[CleanupAndCloseWebView] 清理事件失败: {ex.Message}");
                 }
+            }
+
+            // 内核都要关了，还在飞的图标下载没必要留着 —— 掐掉，省得回调回来写已废弃的页面
+            try
+            {
+                // 只 Cancel 不 Dispose：在飞的下载还拿着这个 Token，
+                // Dispose 之后它们一访问就会抛 ObjectDisposedException
+                _faviconCts?.Cancel();
+                _faviconCts = null;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[CleanupAndCloseWebView] 取消图标下载失败: {ex.Message}");
             }
             
             // ⭐ 取消订阅 BrowserProcessExited 事件（避免重复订阅）

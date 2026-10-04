@@ -1453,9 +1453,6 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   <data name="WebAppDetailPage_UrlNotValidImage" xml:space="preserve">
     <value>URL 不是有效的图片</value>
   </data>
-  <data name="WebAppDetailPage_SvgNotSupported" xml:space="preserve">
-    <value>不支持 SVG 格式</value>
-  </data>
   <data name="WebAppDetailPage_ImageEmpty" xml:space="preserve">
     <value>图片为空</value>
   </data>
