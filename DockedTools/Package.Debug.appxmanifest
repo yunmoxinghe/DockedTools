@@ -64,12 +64,19 @@
             <uap:DataFormat>Uri</uap:DataFormat>
           </uap:ShareTarget>
         </uap:Extension>
-        <uap5:Extension Category="windows.startupTask">
-          <uap5:StartupTask
+        <!-- 开机自启动：本包是 packaged desktop app（runFullTrust + Windows.FullTrustApplication），
+             必须用 desktop: 命名空间；uap5: 是 UWP/AppContainer 的语法，用在桌面包上
+             Enabled 属性会被忽略、只能靠 RequestEnableAsync + 用户同意对话框。
+             ⚠️ Executable 写死 DockedTools.exe，不能抄 Application 的 $targetnametoken$.exe
+             —— 构建只替换 Application/@Executable（同下面 com:ExeServer 那个坑）。 -->
+        <desktop:Extension Category="windows.startupTask"
+          Executable="DockedTools.exe"
+          EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask
             TaskId="AppStartupTask"
-            Enabled="false"
+            Enabled="true"
             DisplayName="边栏助手 (Debug)" />
-        </uap5:Extension>
+        </desktop:Extension>
 
         <!-- 网页通知：把本应用登记成系统通知的激活目标。
              两条是一套，缺一则应用没在跑时点通知唤不起来（只会被当成普通启动，拿不到 arguments）：

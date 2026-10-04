@@ -1468,9 +1468,6 @@ Error Message: {1}</value>
   <data name="WebAppDetailPage_UrlNotValidImage" xml:space="preserve">
     <value>URL is not a valid image</value>
   </data>
-  <data name="WebAppDetailPage_SvgNotSupported" xml:space="preserve">
-    <value>SVG format not supported</value>
-  </data>
   <data name="WebAppDetailPage_ImageEmpty" xml:space="preserve">
     <value>Image is empty</value>
   </data>

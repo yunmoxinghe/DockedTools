@@ -4,6 +4,7 @@ using DockedTools.Features.Localization;
 using DockedTools.Features.MainWindow.Entry;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Navigation;
 using System;
@@ -454,6 +455,7 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
                 picker.FileTypeFilter.Add(".webp");
                 picker.FileTypeFilter.Add(".bmp");
                 picker.FileTypeFilter.Add(".ico");
+                picker.FileTypeFilter.Add(".svg"); // 矢量图标，显示侧走 SvgImageSource
 
                 IntPtr hwnd = GetForegroundWindow();
                 if (hwnd == IntPtr.Zero)
@@ -523,11 +525,8 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
                         ShowStatus(LocalizationHelper.GetString("WebAppDetailPage_UrlNotValidImage"), InfoBarSeverity.Warning);
                         return;
                     }
-                    if (contentType.Contains("svg", StringComparison.OrdinalIgnoreCase))
-                    {
-                        ShowStatus(LocalizationHelper.GetString("WebAppDetailPage_SvgNotSupported"), InfoBarSeverity.Warning);
-                        return;
-                    }
+                    // SVG 不再拒收：显示侧走 SvgImageSource 能直接渲染，而且它是矢量图，
+                    // 比任何位图都清晰。content-type 是 image/svg+xml，上面的 image/* 已经放行。
                 }
 
                 byte[] bytes = await response.Content.ReadAsByteArrayAsync();
@@ -544,8 +543,8 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
                     return;
                 }
 
-                // 验证是否可以解码
-                if (!await CanDecodeBitmapAsync(bytes))
+                // 验证是否可用：位图要求能解码，SVG 单独放行（BitmapDecoder 解不了它）
+                if (!WebAppIconCache.IsSvgContent(bytes) && !await CanDecodeBitmapAsync(bytes))
                 {
                     ShowStatus(LocalizationHelper.GetString("WebAppDetailPage_CannotDecodeImage"), InfoBarSeverity.Warning);
                     return;
@@ -727,13 +726,28 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
         {
             try
             {
-                var bitmap = new BitmapImage();
-                using var stream = new InMemoryRandomAccessStream();
-                await stream.WriteAsync(iconBytes.AsBuffer());
-                stream.Seek(0);
-                await bitmap.SetSourceAsync(stream);
+                ImageSource source;
+                if (WebAppIconCache.IsSvgContent(iconBytes))
+                {
+                    // SVG 走 SvgImageSource（BitmapImage 只认位图）
+                    var svg = new SvgImageSource();
+                    using var stream = new InMemoryRandomAccessStream();
+                    await stream.WriteAsync(iconBytes.AsBuffer());
+                    stream.Seek(0);
+                    await svg.SetSourceAsync(stream);
+                    source = svg;
+                }
+                else
+                {
+                    var bitmap = new BitmapImage();
+                    using var stream = new InMemoryRandomAccessStream();
+                    await stream.WriteAsync(iconBytes.AsBuffer());
+                    stream.Seek(0);
+                    await bitmap.SetSourceAsync(stream);
+                    source = bitmap;
+                }
 
-                IconPreviewImage.Source = bitmap;
+                IconPreviewImage.Source = source;
                 IconPreviewImage.Visibility = Visibility.Visible;
                 IconPreviewFallback.Visibility = Visibility.Collapsed;
             }

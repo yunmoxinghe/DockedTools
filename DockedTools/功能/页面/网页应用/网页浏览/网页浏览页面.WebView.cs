@@ -57,6 +57,14 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 WebView.CoreWebView2.Settings.IsSwipeNavigationEnabled = true;
                 WebView.CoreWebView2.Settings.IsZoomControlEnabled = false;
                 WebView.CoreWebView2.Settings.IsStatusBarEnabled = false;
+
+                // 浏览器加速键表保持默认（开启）。
+                // 实测（WebView2 Runtime 154）：Ctrl+1~9 / Ctrl+Tab / Ctrl+D 根本不在这张表里 ——
+                // 开或关，页面的 capture 阶段都能拿到 keydown，关掉它对这些快捷键零帮助。
+                // 这张表真正吃掉的是 F5 / Ctrl+F / Ctrl+P / Ctrl+R / 缩放 / 前进后退，
+                // 那是网页自己的功能，宿主不该抢。要接管 F5/Ctrl+F 时再打开下面这行，
+                // 但那条路得宿主自己实现查找条。
+                // WebView.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = false;
                 
                 // 应用内存模式设置
                 ApplyMemoryModeSettings();
@@ -67,7 +75,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 WebView.CoreWebView2.HistoryChanged += CoreWebView2_HistoryChanged;
                 WebView.CoreWebView2.NavigationStarting += CoreWebView2_NavigationStarting;
                 WebView.CoreWebView2.NavigationCompleted += CoreWebView2_NavigationCompleted;
-                
+
+                // ⭐ 站点图标（Favicon）：进站和 JS 动态改图标都会触发，见 网页浏览页面.Favicon.cs
+                WebView.CoreWebView2.FaviconChanged += CoreWebView2_FaviconChanged;
+
                 // ⭐ 订阅新窗口请求事件
                 WebView.CoreWebView2.NewWindowRequested += CoreWebView2_NewWindowRequested;
                 
@@ -94,7 +105,29 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 // 只剩进站时那两次一次性采样。
                 // probeCurrentDocument: false —— 这个分支里文档可能已经加载完了，
                 // 注入对它无效，交给下面的一次性探测补。
-                _ = EnsureAdaptiveColourSourceAsync(probeCurrentDocument: false);
+                //
+                // ⚠️ 必须 await：AddScriptToExecuteOnDocumentCreatedAsync 是异步的，
+                // fire-and-forget 的话它还在半路就已经放行、调用方开始导航，
+                // 首个文档会注册不上脚本 —— 那个页面上「动态刷新」等于关着的，
+                // 只剩进站时的一次性采样。
+                //
+                // ⚠️ 必须 try：本方法的 catch 会弹「WebView 初始化失败」对话框，
+                // 取色是锦上添花，它出任何问题都不该让用户连网页都打不开。
+                try
+                {
+                    await EnsureAdaptiveColourSourceAsync(probeCurrentDocument: false);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[EnsureWebViewInitializedAsync] 取色脚本注入失败（忽略）: {ex.Message}");
+                }
+
+                // 快捷键上报脚本（焦点在网页里时把 Ctrl+1~9 / Ctrl+Tab / Ctrl+D 交回宿主）
+                // ⚠️ 必须 await：AddScriptToExecuteOnDocumentCreatedAsync 是异步的，丢成
+                // fire-and-forget 的话它还在半路，this 方法的调用方就已经开始导航了 ——
+                // 首屏文档可能注册不上脚本，表现为「刚打开的那个页面快捷键没反应，
+                // 再导航一次才灵」。注入必须完成才能对外宣告 ready。
+                await EnsureShortcutScriptInstalledAsync(WebView.CoreWebView2);
 
                 // PWA 模式：三条通道（请求头钩子 / CDP UA 覆盖 / 常驻脚本）全部必须在导航之前就位。
                 // ⚠️ 这里是 await 而不是 _ = xxx discarded —— 下面紧跟着就要
@@ -183,7 +216,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     
                     // 禁用状态栏（悬停链接时左下角不显示 URL）
                     WebView.CoreWebView2.Settings.IsStatusBarEnabled = false;
-                    
+
+                    // 同上（首次初始化那段有实测依据）：加速键表保持默认开启。
+
                     // 根据设置决定是否禁用默认右键菜单
                     bool useWinUIContextMenu = ExperimentalSettings.EnableWinUIContextMenu;
                     WebView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = !useWinUIContextMenu;
@@ -196,7 +231,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     WebView.CoreWebView2.HistoryChanged += CoreWebView2_HistoryChanged;
                     WebView.CoreWebView2.NavigationStarting += CoreWebView2_NavigationStarting;
                     WebView.CoreWebView2.NavigationCompleted += CoreWebView2_NavigationCompleted;
-                    
+
+                    // ⭐ 站点图标（Favicon）：进站和 JS 动态改图标都会触发，见 网页浏览页面.Favicon.cs
+                    WebView.CoreWebView2.FaviconChanged += CoreWebView2_FaviconChanged;
+
                     // ⭐ 订阅新窗口请求事件
                     WebView.CoreWebView2.NewWindowRequested += CoreWebView2_NewWindowRequested;
                     
@@ -216,7 +254,22 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     // 只剩进站时那两次一次性采样，页面滚动/换肤都不会再更新。
                     // probeCurrentDocument: false —— 这里还没导航，探测只会取到空白页；
                     // 第一次导航的 NavigationCompleted 会补上探测。
-                    _ = EnsureAdaptiveColourSourceAsync(probeCurrentDocument: false);
+                    //
+                    // ⚠️ 必须 await（理由同上：不等注入完成就放行，首个文档会漏掉脚本）、
+                    // 必须 try（取色出问题不该升级成「WebView 初始化失败」对话框）。
+                    try
+                    {
+                        await EnsureAdaptiveColourSourceAsync(probeCurrentDocument: false);
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[EnsureWebViewInitializedAsync] 取色脚本注入失败（忽略）: {ex.Message}");
+                    }
+
+                    // 快捷键上报脚本（焦点在网页里时把 Ctrl+1~9 / Ctrl+Tab / Ctrl+D 交回宿主）
+                    // ⚠️ 必须 await，理由同上：注入没完成就放行的话，下面「准备导航」之后
+                    // 第一个文档会漏掉脚本。
+                    await EnsureShortcutScriptInstalledAsync(WebView.CoreWebView2);
 
                     // PWA 模式：同上，必须 await —— 这条路径跑完紧接着就是
                     // Navigation.cs 里的 ContinueWith → TryNavigatePendingUri。
@@ -653,6 +706,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     webView.CoreWebView2.HistoryChanged -= CoreWebView2_HistoryChanged;
                     webView.CoreWebView2.NavigationStarting -= CoreWebView2_NavigationStarting;
                     webView.CoreWebView2.NavigationCompleted -= CoreWebView2_NavigationCompleted;
+                    webView.CoreWebView2.FaviconChanged -= CoreWebView2_FaviconChanged;
                     webView.CoreWebView2.ContextMenuRequested -= CoreWebView2_ContextMenuRequested;
                     
                     // ⭐ 取消订阅新窗口请求事件
@@ -660,6 +714,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     
                     // ⭐ 任务 3.2：取消订阅 ProcessFailed 事件
                     webView.CoreWebView2.ProcessFailed -= CoreWebView2_ProcessFailed;
+
+                    // 内核没了，挂在它上面的快捷键上报脚本也一起没了 —— 清标记，
+                    // 下次重建内核时才会重新注入（脚本只对注入之后创建的文档生效）。
+                    if (ReferenceEquals(_shortcutScriptCore, webView.CoreWebView2))
+                    {
+                        _shortcutScriptCore = null;
+                    }
 
                     // ⭐ 摘掉网页通知桥接。这一步漏了的话，LRU 淘汰是异步低优先级执行的，
                     // 从「决定淘汰」到 Close() 之间还有一段窗口，期间该内核仍会进
@@ -675,6 +736,19 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 {
                     System.Diagnostics.Debug.WriteLine($"[CleanupAndCloseWebView] 清理事件失败: {ex.Message}");
                 }
+            }
+
+            // 内核都要关了，还在飞的图标下载没必要留着 —— 掐掉，省得回调回来写已废弃的页面
+            try
+            {
+                // 只 Cancel 不 Dispose：在飞的下载还拿着这个 Token，
+                // Dispose 之后它们一访问就会抛 ObjectDisposedException
+                _faviconCts?.Cancel();
+                _faviconCts = null;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[CleanupAndCloseWebView] 取消图标下载失败: {ex.Message}");
             }
             
             // ⭐ 取消订阅 BrowserProcessExited 事件（避免重复订阅）

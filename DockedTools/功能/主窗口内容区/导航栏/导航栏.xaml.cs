@@ -11,6 +11,8 @@ using DockedTools.Features.MainWindowContent.ContentArea;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Media.Imaging;
 using System;
 using System.Collections.Generic;
@@ -25,7 +27,19 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
     {
         private readonly Dictionary<string, WebAppShortcut> _webShortcuts = new();
         private readonly Dictionary<string, NavigationViewItem> _webShortcutItems = new();
-        private readonly Dictionary<string, ImageIcon> _webShortcutIconCache = new(); // ⭐ 图标缓存
+
+        /// <summary>
+        /// appId → 这一条当前「已经在显示」的图标标识（缓存文件路径 / 在线 favicon Uri / "globe"）。
+        ///
+        /// 用途只有一个：图标内容没变就一次都别碰 <c>NavigationViewItem.Icon</c>。
+        /// WinUI 的 Image 换 Source 必然经过一个空白帧（microsoft-ui-xaml#8750），
+        /// 而 favicon 更新通知是会重复来的（同一张图也会被反复推送），
+        /// 不去重的话就是「同一张图反复重挂」—— 官方 issue 里点名的、最容易看见的闪烁源。
+        /// </summary>
+        private readonly Dictionary<string, string> _webShortcutIconKeys = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>兜底地球图标在 _webShortcutIconKeys 里的标识</summary>
+        private const string GlobeIconKey = "globe";
         private NavigationViewItemBase? _lastSelectedNavigationItem;
         private bool _suppressSelectionChanged;
         
@@ -553,7 +567,7 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
             if (_webShortcutItems.TryGetValue(shortcut.Id, out NavigationViewItem? existingItem))
             {
                 existingItem.Content = shortcut.Name;
-                existingItem.Icon = BuildShortcutIcon(shortcut);
+                _ = UpdateShortcutIconAsync(existingItem, shortcut, fade: true, waitForDecode: false);
                 if (selectItem)
                 {
                     NavView.SelectedItem = existingItem;
@@ -565,8 +579,15 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
             {
                 Content = shortcut.Name,
                 Tag = "webapp:" + shortcut.Id,
-                Icon = BuildShortcutIcon(shortcut)
+                // ⭐ 占位必须是「有尺寸但看不见」的 IconElement：
+                //   直接留 null 的话条目里没有图标槽，文字会往左顶，等真图标上来又往右跳 —— 抖得比闪还难看。
+                //   用透明地球占住位置，解码完了再换成真图标。
+                Icon = new FontIcon { Glyph = "\uE774", Opacity = 0 }
             };
+
+            // 首屏不等解码：几十个条目一起等只会堆出一堆并发任务和 UI 线程延续，
+            //   而这会儿根本没有"旧图被换掉"这回事，没有可闪的。
+            _ = UpdateShortcutIconAsync(navItem, shortcut, fade: false, waitForDecode: false);
 
             var contextMenu = new MenuFlyout();
             var unpinItem = new MenuFlyoutItem
@@ -593,43 +614,134 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
             }
         }
 
-        private IconElement BuildShortcutIcon(WebAppShortcut shortcut)
+        /// <summary>
+        /// 换图标并淡入。
+        ///
+        /// 前提是传进来的图标已经解码完成（见 <see cref="WebAppIconCache.WaitUntilReadyAsync"/>）：
+        /// Image 换 Source 本身就有一帧空白，未解码的源会把这帧拉长成整个解码耗时 —— 那就是「闪」。
+        /// 解码完再换，剩下的是一次同帧替换，这里的淡入只是让它出现得柔和一点。
+        /// </summary>
+        /// <param name="fade">false 用于首次创建（启动时几十个图标一起淡入反而吵）</param>
+        private static void SetNavItemIcon(NavigationViewItem navItem, IconElement icon, bool fade)
         {
-            string cacheDir = Path.Combine(
-                Windows.Storage.ApplicationData.Current.LocalFolder.Path,
-                "web-icons");
-            Directory.CreateDirectory(cacheDir);
-            string extension = DetectImageExtension(shortcut.IconBytes ?? Array.Empty<byte>());
-            string iconPath = Path.Combine(cacheDir, $"{shortcut.Id}{extension}");
+            if (!fade)
+            {
+                navItem.Icon = icon;
+                return;
+            }
 
-            // 尝试从 IconBytes 加载
+            icon.Opacity = 0;
+            navItem.Icon = icon;
+
+            var animation = new DoubleAnimation
+            {
+                From = 0,
+                To = 1,
+                Duration = new Duration(TimeSpan.FromMilliseconds(150)),
+                // Opacity 属于依赖式动画（dependent），不显式开这个开关 WinUI 会静默忽略它
+                EnableDependentAnimation = true
+            };
+
+            Storyboard.SetTarget(animation, icon);
+            Storyboard.SetTargetProperty(animation, "Opacity");
+
+            var storyboard = new Storyboard();
+            storyboard.Children.Add(animation);
+            storyboard.Begin();
+        }
+
+        /// <summary>
+        /// 算出这个快捷方式该用什么图标，按需等它解码完，再挂到条目上。
+        /// </summary>
+        /// <param name="fade">要不要淡入（首次创建 / 批量加载时不要，几十个一起淡太吵）</param>
+        /// <param name="waitForDecode">
+        /// 要不要等解码完成再上树。
+        /// <b>只有运行中的单条 favicon 更新才该开</b> —— 那才是会闪的场景。
+        /// 启动时几十个条目一起等就是几十个并发任务 + 几十次延续回 UI 线程，
+        /// 首屏本来就一次性铺完，没有"旧图被换掉"这回事，等它纯属自找负载。
+        /// </param>
+        private async Task UpdateShortcutIconAsync(NavigationViewItem navItem, WebAppShortcut shortcut, bool fade, bool waitForDecode)
+        {
+            try
+            {
+                (IconElement icon, string key) = await BuildShortcutIconAsync(shortcut, waitForDecode);
+
+                // ⭐ 后面要动 NavigationViewItem，必须在 UI 线程。
+                //    await 之后线程不保证还是 UI 线程（被调用的库方法随时可能 ConfigureAwait(false)），
+                //    跨线程碰 XAML 元素会抛异常，而这个方法是 fire-and-forget 调用的，
+                //    异常一被吞掉表现出来就是「图标全没了」—— 踩过一次。
+                if (!DispatcherQueue.HasThreadAccess)
+                {
+                    DispatcherQueue.TryEnqueue(() => ApplyShortcutIcon(navItem, shortcut.Id, icon, key, fade));
+                    return;
+                }
+
+                ApplyShortcutIcon(navItem, shortcut.Id, icon, key, fade);
+            }
+            catch (Exception ex)
+            {
+                // fire-and-forget：不接住的话异常静悄悄消失，界面上只看到"图标没了"
+                System.Diagnostics.Debug.WriteLine($"[NavigationBar] 更新图标异常: {shortcut.Id}, {ex}");
+            }
+        }
+
+        private void ApplyShortcutIcon(NavigationViewItem navItem, string shortcutId, IconElement icon, string key, bool fade)
+        {
+            // ⭐ 内容没变就一次都别动 —— 理由见 _webShortcutIconKeys 的注释。
+            //    favicon 通知会重复推同一张图，不去重就是反复重挂同一个源，闪得最厉害的正是这种情况。
+            if (_webShortcutIconKeys.TryGetValue(shortcutId, out string? current) &&
+                string.Equals(current, key, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            _webShortcutIconKeys[shortcutId] = key;
+            SetNavItemIcon(navItem, icon, fade);
+        }
+
+        /// <summary>
+        /// 返回「图标 + 它对应的标识」。标识用来判断内容到底变没变：
+        /// 本地缓存用文件路径（文件名带内容哈希，内容一变路径必变），在线的用 Uri，都没有就是 globe。
+        /// </summary>
+        private async Task<(IconElement Icon, string Key)> BuildShortcutIconAsync(WebAppShortcut shortcut, bool waitForDecode)
+        {
+            // 尝试从 IconBytes 加载。文件名带内容哈希：图标一换路径就换，
+            // BitmapImage 那个「同 Uri 不重新解码」的坑自动就没了。
             if (shortcut.IconBytes is { Length: > 0 })
             {
                 try
                 {
-                    File.WriteAllBytes(iconPath, shortcut.IconBytes);
-                    var icon = CreateImageIconWithFallback(new Uri(iconPath), shortcut.Id);
-                    if (icon != null) return icon;
+                    string? iconPath = WebAppIconCache.Save(shortcut.Id, shortcut.IconBytes);
+                    if (iconPath is not null)
+                    {
+                        ImageIcon? icon = await TryCreateImageIconAsync(new Uri(iconPath), shortcut.Id, waitForDecode);
+                        if (icon is not null)
+                        {
+                            return (icon, iconPath);
+                        }
+
+                        // 能落盘却解不出来 = 坏文件，删掉，否则下次又把它翻出来
+                        WebAppIconCache.Delete(shortcut.Id);
+                    }
+
+                    // ⭐ 有 IconBytes 却拿不到图标时不再去网上兜底：
+                    //    缓存是我们自己按内容写的，解不出来基本就是坏了，
+                    //    再发一次网络请求只会把「图标位空着」的时间拖得更长。
+                    return (new FontIcon { Glyph = "\uE774" }, GlobeIconKey);
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[NavigationBar] 保存图标失败: {iconPath}, {ex.Message}");
+                    // ⭐ 落盘失败（磁盘 / 权限之类）时直接交地球图标，不要往下走：
+                    //    下面第一件事就是 Delete 缓存，好好的缓存会因为一次 IO 失败被清掉。
+                    System.Diagnostics.Debug.WriteLine($"[NavigationBar] 保存图标失败: {shortcut.Id}, {ex.Message}");
+                    return (new FontIcon { Glyph = "\uE774" }, GlobeIconKey);
                 }
             }
 
-            // 尝试从缓存加载
-            if (File.Exists(iconPath))
-            {
-                try
-                {
-                    var icon = CreateImageIconWithFallback(new Uri(iconPath), shortcut.Id);
-                    if (icon != null) return icon;
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[NavigationBar] 读取缓存图标失败: {iconPath}, {ex.Message}");
-                }
-            }
+            // ⭐ 走到这里说明没有 IconBytes（图标被重置 / 还没抓到）。
+            // 必须把磁盘缓存一起清掉，否则下一次又把上一张图翻出来，
+            // 「重置图标」看起来就像没生效。清完就走下面的在线兜底 / 地球图标。
+            WebAppIconCache.Delete(shortcut.Id);
 
             // 尝试从网站 favicon 加载
             if (Uri.TryCreate(shortcut.Url, UriKind.Absolute, out Uri? websiteUri))
@@ -637,8 +749,11 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
                 try
                 {
                     Uri faviconUri = new Uri(websiteUri.GetLeftPart(UriPartial.Authority) + "/favicon.ico");
-                    var icon = CreateImageIconWithFallback(faviconUri, shortcut.Id);
-                    if (icon != null) return icon;
+                    ImageIcon? icon = await TryCreateImageIconAsync(faviconUri, shortcut.Id, waitForDecode);
+                    if (icon is not null)
+                    {
+                        return (icon, faviconUri.AbsoluteUri);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -648,40 +763,40 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
 
             // 所有方法都失败时，返回地球图标作为后备
             System.Diagnostics.Debug.WriteLine($"[NavigationBar] 所有图标加载方法失败，使用地球图标: {shortcut.Name}");
-            return new FontIcon { Glyph = "\uE774" }; // Globe 地球图标
+            return (new FontIcon { Glyph = "\uE774" }, GlobeIconKey);
         }
 
-        private ImageIcon? CreateImageIconWithFallback(Uri imageUri, string shortcutId)
+        private async Task<ImageIcon?> TryCreateImageIconAsync(Uri imageUri, string shortcutId, bool waitForDecode)
         {
             try
             {
-                var bitmapImage = new BitmapImage();
-                var imageIcon = new ImageIcon { Source = bitmapImage };
-                
-                // ⭐ 缓存 ImageIcon 对象（用于后续复用）
-                _webShortcutIconCache[shortcutId] = imageIcon;
-                
-                // 监听图片加载失败事件，失败时切换到地球图标
-                bitmapImage.ImageFailed += (s, e) =>
+                // SVG 走 SvgImageSource，其余走 BitmapImage —— 分叉在 WebAppIconCache 里，
+                // 失败回调对两种源是同一份（位图的 ImageFailed / SVG 的 OpenFailed 都接到这里）
+                ImageSource source = WebAppIconCache.CreateImageSource(imageUri, () => FallbackToGlobeIcon(imageUri, shortcutId));
+
+                if (waitForDecode)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[NavigationBar] 图标加载失败: {imageUri}, 错误: {e.ErrorMessage}");
-                    
-                    // 在 UI 线程上切换到地球图标
-                    DispatcherQueue.TryEnqueue(() =>
+                    // ⭐ 等解码真正完成再交出 ImageIcon（microsoft-ui-xaml#8750：
+                    //    换 Source 必然经过一个空白帧，未解码的源会把这帧拉长成整个解码耗时）。
+                    //    本地文件解码是毫秒级的，等得起；在线 favicon 给 1.5s。
+                    int timeout = imageUri.IsFile ? 1200 : 1500;
+                    ImageLoadState state = await WebAppIconCache.WaitUntilReadyAsync(source, timeout);
+
+                    if (state == ImageLoadState.Failed)
                     {
-                        if (_webShortcutItems.TryGetValue(shortcutId, out var navItem))
-                        {
-                            navItem.Icon = new FontIcon { Glyph = "\uE774" }; // Globe 地球图标
-                            _webShortcutIconCache.Remove(shortcutId); // 清除缓存
-                            System.Diagnostics.Debug.WriteLine($"[NavigationBar] 已切换到地球图标: {shortcutId}");
-                        }
-                    });
-                };
-                
-                // 开始加载图片
-                bitmapImage.UriSource = imageUri;
-                
-                return imageIcon;
+                        System.Diagnostics.Debug.WriteLine($"[NavigationBar] 图标加载失败: {imageUri}");
+                        return null;
+                    }
+
+                    if (state == ImageLoadState.Timeout)
+                    {
+                        // ⭐ 没确认好坏就别当坏的处理：照旧上树，最坏也就是跟"不等"一样（可能闪一下），
+                        //    总比为了防闪把图标整没了强。
+                        System.Diagnostics.Debug.WriteLine($"[NavigationBar] 图标就绪状态未知，按原样使用: {imageUri}");
+                    }
+                }
+
+                return new ImageIcon { Source = source };
             }
             catch (Exception ex)
             {
@@ -690,46 +805,33 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
             }
         }
 
-        private static string DetectImageExtension(byte[] bytes)
+        private void FallbackToGlobeIcon(Uri imageUri, string shortcutId)
         {
-            if (bytes.Length >= 8 &&
-                bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47)
+            System.Diagnostics.Debug.WriteLine($"[NavigationBar] 图标加载失败: {imageUri}");
+
+            // ⭐ 坏文件必须从磁盘缓存里删掉：留着的话下次又会把它翻出来，
+            //    表现就是「这应用的图标一直是坏的」。
+            if (imageUri.IsFile && File.Exists(imageUri.LocalPath))
             {
-                return ".png";
+                WebAppIconCache.Delete(shortcutId);
             }
 
-            if (bytes.Length >= 3 &&
-                bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF)
+            // 在 UI 线程上切换到地球图标（也走淡入，跟正常换图标一个观感）
+            DispatcherQueue.TryEnqueue(() =>
             {
-                return ".jpg";
-            }
+                if (_webShortcutIconKeys.TryGetValue(shortcutId, out string? current) &&
+                    string.Equals(current, GlobeIconKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    return; // 已经是地球了，别再挂一次
+                }
 
-            if (bytes.Length >= 4 &&
-                bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x38)
-            {
-                return ".gif";
-            }
-
-            if (bytes.Length >= 2 &&
-                bytes[0] == 0x42 && bytes[1] == 0x4D)
-            {
-                return ".bmp";
-            }
-
-            if (bytes.Length >= 12 &&
-                bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46 &&
-                bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50)
-            {
-                return ".webp";
-            }
-
-            if (bytes.Length >= 4 &&
-                bytes[0] == 0x00 && bytes[1] == 0x00 && bytes[2] == 0x01 && bytes[3] == 0x00)
-            {
-                return ".ico";
-            }
-
-            return ".png";
+                if (_webShortcutItems.TryGetValue(shortcutId, out NavigationViewItem? navItem))
+                {
+                    _webShortcutIconKeys[shortcutId] = GlobeIconKey;
+                    SetNavItemIcon(navItem, new FontIcon { Glyph = "\uE774" }, fade: true);
+                    System.Diagnostics.Debug.WriteLine($"[NavigationBar] 已切换到地球图标: {shortcutId}");
+                }
+            });
         }
 
         // 顶部 NavigationView 的 SelectionChanged 处理
@@ -1047,38 +1149,11 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
 
                 if (e.UpdateType.HasFlag(WebAppUpdateType.Icon))
                 {
-                    // ⚠️ 尝试复用现有图标对象
-                    if (_webShortcutIconCache.TryGetValue(e.AppId, out ImageIcon? cachedIcon) &&
-                        cachedIcon.Source is BitmapImage existingBitmap)
-                    {
-                        // 更新现有 BitmapImage 的 URI（避免重新创建）
-                        string cacheDir = Path.Combine(
-                            Windows.Storage.ApplicationData.Current.LocalFolder.Path,
-                            "web-icons");
-                        Directory.CreateDirectory(cacheDir);
-                        string extension = DetectImageExtension(updatedShortcut.IconBytes ?? Array.Empty<byte>());
-                        string iconPath = Path.Combine(cacheDir, $"{updatedShortcut.Id}{extension}");
-
-                        if (updatedShortcut.IconBytes is { Length: > 0 })
-                        {
-                            File.WriteAllBytes(iconPath, updatedShortcut.IconBytes);
-                            existingBitmap.UriSource = new Uri(iconPath);
-                            System.Diagnostics.Debug.WriteLine($"[NavigationBar] 复用图标对象，更新 URI: {iconPath}");
-                        }
-                        else
-                        {
-                            // 重置为默认图标
-                            navItem.Icon = new FontIcon { Glyph = "\uE774" };
-                            _webShortcutIconCache.Remove(e.AppId);
-                            System.Diagnostics.Debug.WriteLine($"[NavigationBar] 重置为地球图标: {e.AppId}");
-                        }
-                    }
-                    else
-                    {
-                        // 没有缓存或不是 ImageIcon，重新创建
-                        navItem.Icon = BuildShortcutIcon(updatedShortcut);
-                        System.Diagnostics.Debug.WriteLine($"[NavigationBar] 重新创建图标: {e.AppId}");
-                    }
+                    // ⭐ 只有这里是"运行中用新图换掉旧图"，会闪的就是它 —— 走完整防闪链路：
+                    //    先等解码完成，确认内容真变了才换，换了再淡入。
+                    //    缓存文件名带内容哈希，内容变了路径必变，所以「内容变没变」这个判断是准的。
+                    _ = UpdateShortcutIconAsync(navItem, updatedShortcut, fade: true, waitForDecode: true);
+                    System.Diagnostics.Debug.WriteLine($"[NavigationBar] 更新图标: {e.AppId}");
                 }
 
                 // URL 变化不需要更新 UI（只存储在 Tag 中）
@@ -1103,7 +1178,8 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
             {
                 NavView.MenuItems.Remove(navItem);
                 _webShortcutItems.Remove(shortcutId);
-                _webShortcutIconCache.Remove(shortcutId); // ⭐ 清除图标缓存
+                _webShortcutIconKeys.Remove(shortcutId);
+                WebAppIconCache.Delete(shortcutId);       // ⭐ 顺带清掉磁盘上的图标文件
 
                 if (NavView.SelectedItem is NavigationViewItem selectedItem && selectedItem == navItem)
                 {

@@ -30,6 +30,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         private int _unresponsiveCount; // ⭐ 任务 3.4：记录 RenderProcessUnresponsive 连续次数
         private bool _isRecoveringWebView; // ⭐ 任务 3.5：防重入 guard，多个进程事件同时触发时只执行一次恢复
 
+        // 快捷键上报脚本挂在 CoreWebView2 上（和取色脚本一样随内核走）：
+        // 记住注入时的内核实例，内核被重建（崩溃恢复 / 页面重建）时能发现「脚本没了」并重新注入。
+        private CoreWebView2? _shortcutScriptCore;
+
         // 键盘映射按钮：2026-10-02 起顶栏收的是【按钮数据】而不是 Button 实例，
         // 页面不再自己 new Button / 自己配悬停色 —— 外观统一由 AppTopBar 负责。
         private TopBarButton? _leftMappingButton;

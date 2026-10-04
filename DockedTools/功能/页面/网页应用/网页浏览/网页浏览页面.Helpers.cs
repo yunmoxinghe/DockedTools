@@ -1,8 +1,10 @@
+using DockedTools.Features.Pages.WebApp.Shared;
 using DockedTools.Features.UnifiedCalls.TopAppBar;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media.Imaging;
 using System;
+using System.Linq;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading.Tasks;
 using Windows.Storage.Streams;
@@ -152,11 +154,12 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 // 用内容哈希做文件名：同一份图标不重复写，也天然避开多实例写同一个文件
                 var hash = System.Security.Cryptography.SHA256.HashData(iconBytes);
                 var name = Convert.ToHexString(hash)[..16];
-                var path = System.IO.Path.Combine(directory, name + GuessIconExtension(iconBytes));
+                var path = System.IO.Path.Combine(directory, name + WebAppIconCache.DetectExtension(iconBytes));
 
                 if (!System.IO.File.Exists(path))
                 {
                     await System.IO.File.WriteAllBytesAsync(path, iconBytes);
+                    PruneTopBarIconCache(directory);
                 }
 
                 _topBarIconPath = path;
@@ -170,11 +173,42 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             PublishTopBarCenter();
         }
 
-        /// <summary>按文件头猜扩展名（快捷方式图标只有 PNG / ICO 两种）。</summary>
-        private static string GuessIconExtension(byte[] bytes) =>
-            bytes.Length > 4 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47
-                ? ".png"
-                : ".ico";
+        /// <summary>
+        /// 临时图标目录最多留多少份。
+        /// 文件名是内容哈希，站点每换一次图标就多一个文件，而临时目录没人替我们收 ——
+        /// 不设上限的话用久了会攒出一堆永不复用的小文件。
+        /// </summary>
+        private const int TopBarIconCacheLimit = 128;
+
+        /// <summary>每个进程只清一次，别每次换图标都扫一遍目录</summary>
+        private static bool _topBarIconCachePruned;
+
+        private static void PruneTopBarIconCache(string directory)
+        {
+            if (_topBarIconCachePruned)
+            {
+                return;
+            }
+
+            _topBarIconCachePruned = true;
+
+            try
+            {
+                var files = new System.IO.DirectoryInfo(directory)
+                    .EnumerateFiles("*.*")
+                    .OrderByDescending(f => f.LastWriteTimeUtc)
+                    .Skip(TopBarIconCacheLimit);
+
+                foreach (var file in files)
+                {
+                    file.Delete();
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[PublishShortcutIconAsync] 清理临时图标失败: {ex.Message}");
+            }
+        }
 
 
         private void HandleDoubleClick()

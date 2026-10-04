@@ -444,6 +444,29 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
     //   其余（PathIconData / 无法解析的 Symbol 名）→ None。转接层（FromSnapshot 的
     //   CenterIcon 翻译）只会下发上面前三种，这里不再为其余形态准备原生控件。
     // </summary>
+    /// <summary>
+    /// 按 Uri 建标题图标的图像源：.svg 走 <see cref="SvgImageSource"/>，其余走 <see cref="BitmapImage"/>。
+    ///
+    /// 为什么在这里自带一份判断而不是复用网页应用那层的图标缓存类：顶栏是通用组件，
+    /// 不能反向依赖上层 feature。判断本身只有"扩展名是不是 .svg"这一行，重复一份的
+    /// 代价远小于把依赖方向倒过来。
+    /// </summary>
+    private static ImageSource? CreateCenterImageSource(Uri? uri)
+    {
+        if (uri is null)
+        {
+            return null;
+        }
+
+        if (uri.IsAbsoluteUri &&
+            (uri.IsFile ? uri.LocalPath : uri.AbsoluteUri).EndsWith(".svg", StringComparison.OrdinalIgnoreCase))
+        {
+            return new SvgImageSource(uri);
+        }
+
+        return new BitmapImage(uri);
+    }
+
     private static CenterIconPlan ResolveCenterIcon(IconData? data) => data switch
     {
         null => default,
@@ -1333,11 +1356,11 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
         // "按 IconData 挑控件类型" 的分支。
         var iconPlan = ResolveCenterIcon(displayedIcon);
 
-        // 位图的 ImageSource 按 Uri 缓存到【本组件】作用域（不是全局缓存）：
-        // 每帧 new BitmapImage 会让 ImageIcon 重新解码一次，又回到"空一拍"的闪。
+        // 图标的 ImageSource 按 Uri 缓存到【本组件】作用域（不是全局缓存）：
+        // 每帧 new 一个 ImageSource 会让 ImageIcon 重新解码一次，又回到"空一拍"的闪。
         // Uri 不变 ⇒ 拿到的是同一个实例 ⇒ 写进 ImageIcon.Source 是同值写入，不触发重新解码。
         var iconBitmap = UseMemo(
-            () => iconPlan.Source is { } uri ? new BitmapImage(uri) : null,
+            () => CreateCenterImageSource(iconPlan.Source),
             iconPlan.Source);
 
         // 字形图标：FontIcon 自撑自然尺寸（= 字号），不写死 16×16，见 TitleIconFontSize。
