@@ -208,7 +208,7 @@
           Condition="'$(Configuration)' == 'Debug' AND '$(WorktreeSuffix)' != ''">
     <PropertyGroup>
       <_WtManifest>$(IntermediateOutputPath)Package.Debug.worktree.appxmanifest</_WtManifest>
-      <_WtNs>&lt;Namespace Prefix='p' Uri='http://schemas.microsoft.com/appx/manifest/foundation/windows10'/&gt;&lt;Namespace Prefix='uap' Uri='http://schemas.microsoft.com/appx/manifest/uap/windows10'/&gt;&lt;Namespace Prefix='uap5' Uri='http://schemas.microsoft.com/appx/manifest/uap/windows10/5'/&gt;</_WtNs>
+      <_WtNs>&lt;Namespace Prefix='p' Uri='http://schemas.microsoft.com/appx/manifest/foundation/windows10'/&gt;&lt;Namespace Prefix='uap' Uri='http://schemas.microsoft.com/appx/manifest/uap/windows10'/&gt;&lt;Namespace Prefix='uap5' Uri='http://schemas.microsoft.com/appx/manifest/uap/windows10/5'/&gt;&lt;Namespace Prefix='desktop' Uri='http://schemas.microsoft.com/appx/manifest/desktop/windows10'/&gt;</_WtNs>
       <_WtPkgName>8B8CC4F4.482486777ECD9.Debug$(WorktreeSuffix)</_WtPkgName>
       <_WtDisplay>边栏助手 (Debug$(WorktreeSuffix))</_WtDisplay>
     </PropertyGroup>
@@ -224,7 +224,7 @@
     <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)"
              Query="/p:Package/p:Applications/p:Application/uap:VisualElements/uap:DefaultTile/@ShortName" Value="$(_WtDisplay)" />
     <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)"
-             Query="/p:Package/p:Applications/p:Application/p:Extensions/uap5:Extension/uap5:StartupTask/@DisplayName" Value="$(_WtDisplay)" />
+             Query="/p:Package/p:Applications/p:Application/p:Extensions/desktop:Extension[@Category='windows.startupTask']/desktop:StartupTask/@DisplayName" Value="$(_WtDisplay)" />
 
     <ItemGroup>
       <AppxManifest Remove="@(AppxManifest)" />
