@@ -90,6 +90,37 @@ namespace DockedTools.Features.MainWindow.KeyboardManagement
         /// </summary>
         private readonly Action _togglePinnedDock;
 
+        /// <summary>
+        /// 去抖窗口（毫秒）：同一按键在这个间隔内重复到达只执行一次。
+        ///
+        /// 【存在原因】
+        /// 焦点在 WebView2 里时，同一个组合键可能同时从两条路进来：
+        /// XAML 输入路由（若 WinUI 把 WebView2 的 AcceleratorKeyPressed 转发成了 KeyDown）
+        /// 和页面注入脚本（WebMessage）。microsoft-ui-xaml#6231 里还记录过
+        /// 「按一次触发两次」的问题 —— 不去重的话切标签会跳两格。
+        /// </summary>
+        private const int DuplicateSuppressMs = 120;
+
+        /// <summary>
+        /// 上一次真正执行过的按键（用于去抖）
+        /// </summary>
+        private VirtualKey _lastHandledKey = VirtualKey.None;
+
+        /// <summary>
+        /// 上一次真正执行的时间戳（<see cref="Environment.TickCount64"/>，单调递增）
+        /// </summary>
+        private long _lastHandledTick;
+
+        /// <summary>
+        /// 当前主窗口的快捷键管理器（主窗口唯一，构造时自动登记）。
+        ///
+        /// 【存在原因】
+        /// 焦点在 WebView2 里时键盘事件走不进 XAML 输入路由，只能由页面里的注入脚本
+        /// 通过 WebMessage 上报；网页浏览页面需要一个不依赖 UI 树查找的入口把按键
+        /// 转交到这里，统一走同一套映射逻辑，不在页面里复制一份 switch。
+        /// </summary>
+        public static KeyboardShortcutManager? Current { get; private set; }
+
         // ==================== 构造函数 ====================
         
         /// <summary>
@@ -107,7 +138,9 @@ namespace DockedTools.Features.MainWindow.KeyboardManagement
             _switchToTab = switchToTab ?? throw new ArgumentNullException(nameof(switchToTab));
             _switchToNextTab = switchToNextTab ?? throw new ArgumentNullException(nameof(switchToNextTab));
             _togglePinnedDock = togglePinnedDock ?? throw new ArgumentNullException(nameof(togglePinnedDock));
-            
+
+            Current = this;
+
             LogDebug("快捷键管理器已初始化");
         }
 
@@ -199,6 +232,58 @@ namespace DockedTools.Features.MainWindow.KeyboardManagement
             }
         }
 
+        // ==================== 统一分发入口 ====================
+
+        /// <summary>
+        /// 快捷键统一入口：XAML 路由事件和 WebView2 页面上报都走这里。
+        ///
+        /// 【设计原因】
+        /// 映射逻辑只保留一份（<see cref="TryHandleCtrlShortcut"/>），
+        /// 焦点在 XAML 控件上还是陷在 WebView2 里，行为完全一致。
+        /// </summary>
+        /// <param name="key">按键值</param>
+        /// <param name="ctrl">Ctrl 是否按下</param>
+        /// <param name="alt">Alt 是否按下</param>
+        /// <param name="shift">Shift 是否按下（当前映射不使用，保留给扩展）</param>
+        /// <returns>
+        /// true 表示该按键归快捷键系统管（含被去抖吞掉的重复事件），
+        /// 调用方不要再往下传；false 表示不是我们的快捷键。
+        /// </returns>
+        public bool TryHandleShortcut(VirtualKey key, bool ctrl, bool alt, bool shift)
+        {
+            // 映射表里全都是 Ctrl 组合，这里必须严格只认 Ctrl。
+            // 放宽成「ctrl || alt」的话 Alt+D 会去固定侧边栏、Alt+数字会切标签 ——
+            // 而 Alt+左/右 在网页里是后退/前进，带 Alt 的按键本来就归浏览器和页面。
+            if (!ctrl)
+            {
+                return false;
+            }
+
+            long now = Environment.TickCount64;
+            long elapsed = now - _lastHandledTick;
+
+            // 同一按键在去抖窗口内重复到达（XAML 与 WebView 双路、或 KeyDown+KeyUp 各触发一次）
+            //
+            // elapsed >= 0 这一半是给 TickCount64 回绕兜的：它每约 49.7 天绕回 long.MinValue，
+            // 恰好卡在回绕点上的那一次差值会算成极大负数，< DuplicateSuppressMs 依然成立 →
+            // 用户按了一次却被执行出来「没反应」。少去重一次顶多是重复跳一格，
+            // 把真按键吞掉才是事故，所以回绕点宁可不去重。
+            if (key == _lastHandledKey && elapsed >= 0 && elapsed < DuplicateSuppressMs)
+            {
+                LogDebug($"去抖吞掉重复快捷键: Ctrl+{key}");
+                return true; // 已归属快捷键系统，阻止其它路径再次执行
+            }
+
+            bool handled = TryHandleCtrlShortcut(key);
+            if (handled)
+            {
+                _lastHandledKey = key;
+                _lastHandledTick = now;
+            }
+
+            return handled;
+        }
+
         // ==================== PreviewKeyDown 处理方法 ====================
 
         /// <summary>
@@ -231,16 +316,20 @@ namespace DockedTools.Features.MainWindow.KeyboardManagement
                 // 获取修饰键状态
                 var ctrlState = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control);
                 bool isCtrlPressed = ctrlState.HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+                var altState = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Menu);
+                bool isAltPressed = altState.HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+                var shiftState = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift);
+                bool isShiftPressed = shiftState.HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
 
                 LogDebug($"Ctrl 键状态: {(isCtrlPressed ? "按下" : "未按下")}");
 
-                if (!isCtrlPressed)
+                if (!isCtrlPressed && !isAltPressed)
                 {
-                    return; // 提前返回：我们只处理 Ctrl 修饰键的快捷键
+                    return; // 提前返回：我们只处理 Ctrl / Alt 修饰键的快捷键
                 }
 
-                // 使用局部变量存储处理结果，减少重复的事件属性访问
-                bool handled = TryHandleCtrlShortcut(e.Key);
+                // 走统一入口（带去抖，避免与 WebView2 页面上报路径重复执行）
+                bool handled = TryHandleShortcut(e.Key, isCtrlPressed, isAltPressed, isShiftPressed);
 
                 if (handled)
                 {
