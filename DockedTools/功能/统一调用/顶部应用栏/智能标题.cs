@@ -9,12 +9,26 @@ namespace DockedTools.Features.UnifiedCalls.TopAppBar;
 /// </summary>
 public sealed class 智能标题
 {
+    // ── 浮现阈值的【死区 + 滞后】（px）────────────────────────────
+    //   · 进入：滚过 EnterEmergePx ⇒ 顶栏带亚克力接管、大标题淡出；
+    //   · 退出：退到 ExitEmergePx 以内 ⇒ 顶栏收回、大标题回来；
+    //   · 中间那段是死区：滚动停在阈值附近不会来回切换（否则顶栏会闪）。
+    //
+    // 为什么不能用 offset > 0：回到顶部是个【浮点过程】。惯性 / 回弹的末段经常停在
+    // 0.4、1.6 这类亚像素值上，"大于 0" 就永远算"滚过了" —— 明明已经到顶，
+    // 顶栏却还挂着、大标题还藏着（用户看到的就是这个）。
+    private const double EnterEmergePx = 8;
+    private const double ExitEmergePx = 2;
+
     private ScrollViewer? _scrollViewer;
     private Page? _page;
     private bool _titleVisible = true;
     // 顶栏是否已"浮现"（滚动过 = true）。与 _titleVisible 互补：
     // 页面在顶部时显示大标题、顶栏收回；滚动后顶栏带着亚克力浮现、大标题淡出。
     private bool _emerged;
+
+    // 结算是否已排进队列（见 QueueSettle）
+    private bool _settleQueued;
 
     // 页面大标题元素 + 它的 Text 订阅令牌（见 Setup 处注释）
     private Microsoft.UI.Xaml.Controls.TextBlock? _titleElement;
@@ -37,7 +51,9 @@ public sealed class 智能标题
         // 不等导航层切换前台身份。
         TopAppBarService.EnterPage(page);
 
-        // 再把本页自己的 state 归零：清上一轮的内容残留、把顶栏整条收回到"未浮现"态
+        // 再把本页自己的 state 归零：清上一轮的内容残留，并把顶栏收回到"未浮现"态
+        //（没有亚克力、居中位不写字 —— 页面在顶部，这句话由大标题来说）。
+        // 注意收回只收这两样：返回按钮与左右图标是常驻铬，不跟着滚动走。
         TopAppBarService.ClearAll();
         TopAppBarService.SetEmerged(false);
 
@@ -68,6 +84,12 @@ public sealed class 智能标题
 
         TopAppBarService.SetPageTitle(pageTitleElement);
         _scrollViewer.ViewChanged += OnScrollViewerViewChanged;
+
+        // 别假设"刚进来一定在顶部"：缓存页被恢复时滚动位置可能还停在中间，而 Frame
+        // 恢复滚动位置未必再抛一次 ViewChanged —— 那时就成了"人在中间、却顶着大标题"。
+        // 进来先按当下的位移对一次，再排一次结算兜住"位置稍后才恢复"的情况。
+        ApplyScrollState(_scrollViewer.VerticalOffset);
+        QueueSettle();
     }
 
     private void OnPageTitleTextChanged(DependencyObject sender, DependencyProperty dp)
@@ -97,6 +119,10 @@ public sealed class 智能标题
             _scrollViewer = null;
         }
 
+        // 标志复位：留在 true 会让下一轮 Setup 少排一次结算。
+        // 已入队的那次回调自己会认出 _scrollViewer 没了并直接返回。
+        _settleQueued = false;
+
         TopAppBarService.SetPageTitle(null);
         // 文本订阅必须摘：页面实例若是被缓存的，下次 Setup 会重新挂一条，
         // 不摘就会一条旧的 + 一条新的同时往同一份 state 里写
@@ -118,10 +144,25 @@ public sealed class 智能标题
     {
         if (sender is not ScrollViewer sv) return;
 
-        var scrolled = sv.VerticalOffset > 0;
+        // 即时响应：滚动过程中越过阈值就立刻切换，不等静止
+        ApplyScrollState(sv.VerticalOffset);
 
-        // 顶栏整条浮现/收回：必须走 SetEmerged —— 它同时翻"整栏可见"与"底衬可见"，
-        // 只改 IsVisible 的话浮现出来的是一条没有亚克力的裸标题。
+        // 再排一次【结算】，兜住 "最后一次 ViewChanged 早于 offset 落定" 那种情况
+        QueueSettle();
+    }
+
+    /// <summary>
+    /// 按当前滚动位移决定"浮现 / 收回"。幂等 —— 状态没跨过阈值就什么都不做，
+    /// 所以无论是滚动中每帧调用、还是结算时再调一次，都不会抖动或重复下发。
+    /// </summary>
+    private void ApplyScrollState(double offset)
+    {
+        // 死区 + 滞后，判据见本类顶部那两个常量的注释
+        var scrolled = _emerged ? offset > ExitEmergePx : offset > EnterEmergePx;
+
+        // 顶栏浮现/收回：必须走 SetEmerged —— 它一次翻"亚克力底衬"与"居中位文本"两样，
+        // 只改底衬的话收回去的是一条光秃秃的标题（字还在、背景没了）；
+        // 更不能去翻整栏 Visible —— 那会把左右图标一起抽走，而图标与滚动无关。
         if (scrolled != _emerged)
         {
             _emerged = scrolled;
@@ -133,5 +174,48 @@ public sealed class 智能标题
             _titleVisible = !scrolled;
             TopAppBarService.SetPageTitleVisible(!scrolled);
         }
+    }
+
+    /// <summary>
+    /// 排一次【结算】：滚动停下之后的那一帧，再读一次真实位移复核状态。
+    ///
+    /// <b>为什么需要它。</b><c>ViewChanged</c> 不保证在滚动【真正终止】时再抛最后一次 ——
+    /// 惯性衰减到极慢速度、回弹被新的输入打断、或滚动条拖拽松手，都会出现
+    /// "最后一次回调时的 offset 还不是终值，之后再没有回调了"。状态就此卡在旧值上：
+    /// 表现就是"下拉一段距离后顶栏卡住"、"明明回到了顶部却还藏着大标题"。
+    /// 这不是我们能改的 WinUI 行为，只能在自己这边补一次复核。
+    ///
+    /// 为什么不干脆改成"只在静止时判定"：<c>e.IsIntermediate=false</c> 同样不保证派发，
+    /// 而且那样浮现会滞后到滚动结束，手感是错的。这里【即时 + 兜底】两条路并存，
+    /// 兜底那次因为 ApplyScrollState 幂等，重复执行没有副作用。
+    ///
+    /// 入队时机也正好：滚动繁忙时 dispatcher 队列里排着各帧的 ViewChanged，
+    /// 结算被排在它们之后 —— 天然就是"静止后那一帧"。
+    /// </summary>
+    private void QueueSettle()
+    {
+        if (_settleQueued || _scrollViewer is not { } sv)
+        {
+            return;
+        }
+
+        if (sv.DispatcherQueue is not { } queue)
+        {
+            return;
+        }
+
+        _settleQueued = true;
+        queue.TryEnqueue(() =>
+        {
+            _settleQueued = false;
+
+            // 已经 Cleanup（或换了页面）就什么都不做
+            if (_scrollViewer is not { } current)
+            {
+                return;
+            }
+
+            ApplyScrollState(current.VerticalOffset);
+        });
     }
 }

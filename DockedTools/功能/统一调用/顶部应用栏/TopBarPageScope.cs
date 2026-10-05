@@ -28,6 +28,10 @@ public sealed class TopBarPageScope : IDisposable
     private bool _visible = true;
     // 【默认透明】没人显式要底衬就不画那 48px 亚克力（见 TopBarBackdrop 注释）
     private bool _chromeVisible;
+    // 居中位（标题 / 搜索框）是否露出来。与 _center 是两件事：
+    // _center 记"这一位上放什么"，本字段记"这一位露不露" —— 智能标题收起时内容
+    // 原样保留，只是不露（详见 SetEmerged）。默认露出来。
+    private bool _centerVisible = true;
     private TopBarThemeMode _themeMode = TopBarThemeMode.System;
     private TopBarCenter _center = TopBarCenter.Empty;
     private IReadOnlyList<TopBarButton> _left = Array.Empty<TopBarButton>();
@@ -140,6 +144,8 @@ public sealed class TopBarPageScope : IDisposable
             left: left,
             center: _center,
             right: _right,
+            // 内容照旧带着，露不露由 _centerVisible 单说（见该字段注释）
+            showCenter: _centerVisible,
             padding: 12);
     }
 
@@ -177,22 +183,33 @@ public sealed class TopBarPageScope : IDisposable
     }
 
     /// <summary>
-    /// 【滚动联动专用】把"整栏浮现 / 收回"作为一件事切换：
-    /// 滚动前整栏不显示（也没有底衬），滚动后整栏连亚克力底衬一起出现。
+    /// 【滚动联动专用】顶栏"浮现 / 收回"：只翻【亚克力底衬】与【居中位文本】这两样，
+    /// 图标（返回按钮 + 左右两组动作按钮）是常驻铬，全程不动。
     ///
-    /// 为什么必须合成一个入口：分两次设 <see cref="Visible"/> 与
-    /// <see cref="ChromeVisible"/> 会<b>各下发一份快照</b>，中间态（整栏可见但还没
-    /// 有底衬）用户真的会看到一帧。蒸腾/收回必须是一次偏序的状态变更。
+    /// <b>为什么收回不该动图标。</b>页面大标题与顶栏居中标题是【同一句话的两个位置】：
+    /// 页面在顶部时由大标题顶班（顶栏transparent，不画亚克力、不写字），滚动后大标题
+    /// 滚出视野、顶栏带着亚克力把这句话接过来。滚动切换的是"这句话在哪儿"，
+    /// 与"顶栏上有没有按钮"毫无关系 —— 把整栏 Visible 一起翻掉，等于每次滚回顶部
+    /// 就把保存/设置这些按钮抽走，滚一点又塞回来，那是把两种语义捆成了一件事。
+    ///
+    /// 于是这里动的是 <see cref="ChromeVisible"/> 与居中位的【露出】意图，
+    /// 而 <see cref="Visible"/>（整栏在不在）保持页面自己那一份决定，互不干扰。
+    /// 居中位内容（<c>_center</c>）也原样留着：收起只是不露，不是清空 ——
+    /// 清了就得另存一份才能还原，还会惊动顶栏的换字动画。
+    ///
+    /// 为什么必须合成一个入口：分两次设这两项会<b>各下发一份快照</b>，中间态
+    /// （有亚克力但标题没收 / 或反之）用户真的会看到一帧。浮现/收回必须是一次
+    /// 偏序的状态变更。
     /// </summary>
     public void SetEmerged(bool emerged)
     {
-        if (_visible == emerged && _chromeVisible == emerged)
+        if (_chromeVisible == emerged && _centerVisible == emerged)
         {
             return;
         }
 
-        _visible = emerged;
         _chromeVisible = emerged;
+        _centerVisible = emerged;
         Publish();
     }
 
@@ -287,6 +304,9 @@ public sealed class TopBarPageScope : IDisposable
     /// 注意：<b>不动整栏显隐</b> —— "占不占顶栏"与"顶栏上放什么"是两件事，
     /// 混在一起会踩顺序坑（曾经 ClearAll() 把刚设好的 IsVisible=false 又拽回 true，
     /// 于是"默认透明"的页面一进去就把标题顶了出来）。
+    ///
+    /// 居中位的"露不露"跟着"这一轮的内容"一起复位：内容都清成空了，收起状态也没
+    /// 有理由跨清屏延续（<see cref="SetEmerged"/> 会紧接着重新定一次）。
     /// </summary>
     public void Clear()
     {
@@ -294,6 +314,7 @@ public sealed class TopBarPageScope : IDisposable
         _textChanged = null;
         _smartTitleSuppressed = false;
         _chromeVisible = false;
+        _centerVisible = true;
         _themeMode = TopBarThemeMode.System;
         _center = TopBarCenter.Empty;
         _left = Array.Empty<TopBarButton>();

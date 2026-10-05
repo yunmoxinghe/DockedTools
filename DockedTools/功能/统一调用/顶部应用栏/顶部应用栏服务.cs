@@ -244,7 +244,13 @@ public static class TopAppBarService
 
     // ── 对外 API：名字不变，统统转给前台 scope ──────────────────
 
-    /// <summary>显示或隐藏整条顶栏（组件内部自带淡入淡出）。</summary>
+    /// <summary>
+    /// 显示或隐藏<b>整条</b>顶栏（组件内部自带淡入淡出）。
+    ///
+    /// 与 <see cref="SetEmerged"/> 的分工：这里是"顶栏在不在"（图标一起走，只留返回按钮），
+    /// 那里是"滚动浮现"（只翻亚克力与居中位文本，图标不动）。沉浸式页面用这里；
+    /// 有页面大标题、靠滚动交接标题的页面用那里。
+    /// </summary>
     public static bool IsVisible
     {
         get => Current.Visible;
@@ -258,12 +264,17 @@ public static class TopAppBarService
     public static void ResetChromeVisibility() => Current.ChromeVisible = false;
 
     /// <summary>
-    /// 【滚动联动专用】顶栏整条<b>浮现 / 收回</b>（见 <see cref="TopBarPageScope.SetEmerged"/>）：
-    /// false = 页面在顶部，顶栏整条不显示、也没有底衬（页面大标题在此时显示）；
-    /// true  = 页面滚动过，顶栏连亚克力底衬一起出现，接管页面大标题的角色。
+    /// 【滚动联动专用】顶栏<b>浮现 / 收回</b>（见 <see cref="TopBarPageScope.SetEmerged"/>）：
+    /// false = 页面在顶部，顶栏没有亚克力、居中位不写字（这句话由页面大标题顶班）；
+    /// true  = 页面滚动过，顶栏铺上亚克力、居中位接管页面大标题的角色。
     ///
-    /// 页面的滚动处理必须走这一个入口 —— 只切 IsVisible 的话，浮现出来的顶栏没有
-    /// 亚克力（底衬意图没跟着翻），正是"向上滚动后亚克力不出来"的根因。
+    /// <b>只动亚克力与居中位文本</b>，顶栏上的图标（返回按钮 + 左右两组动作按钮）是
+    /// 常驻铬，不参与浮现/收回 —— 它们是"顶栏有什么功能"，与"页面滚到哪儿了"无关。
+    /// 要整条顶栏消失（沉浸式页面那种）请另用 <see cref="IsVisible"/>，那是另一件事。
+    ///
+    /// 页面的滚动处理必须走这一个入口：只切 IsVisible 的话，浮现出来的顶栏没有
+    /// 亚克力（底衬意图没跟着翻），正是"向上滚动后亚克力不出来"的根因；
+    /// 反过来只切底衬又会让居中标题在不该出现的时候悬在那儿。
     /// </summary>
     public static void SetEmerged(bool emerged) => Current.SetEmerged(emerged);
 

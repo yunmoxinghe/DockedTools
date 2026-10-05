@@ -316,6 +316,11 @@ public sealed record TopBarSnapshot : IEquatable<TopBarSnapshot>
     /// <summary>
     /// 整栏是否可见。false = 内容淡出、只留返回按钮（返回不参与淡出，始终可点）。
     /// 顶栏自己会在它变化时做 220ms 淡入淡出。
+    ///
+    /// ⚠️ 这是"整条顶栏在不在"，与【滚动浮现】（亚克力 + 居中标题）是两件事：
+    /// 浮现/收回只动 <see cref="Backdrop"/> 与 <see cref="ShowCenter"/>，
+    /// 图标（返回 + 左右两组）是常驻铬，不跟着滚动走 —— 详见
+    /// <see cref="TopBarPageScope.SetEmerged"/>。
     /// </summary>
     public bool Visible { get; init; } = true;
 
@@ -343,6 +348,18 @@ public sealed record TopBarSnapshot : IEquatable<TopBarSnapshot>
     /// <summary>左右两组按钮是否显示（false = 只留返回与居中位）。</summary>
     public bool ShowActions { get; init; } = true;
 
+    /// <summary>
+    /// 居中位（标题 / 搜索框）是否显示（false = 只留返回与左右图标）。
+    ///
+    /// 与 <see cref="Center"/> 是【两件事】：Center 说"这一位上放什么内容"，
+    /// ShowCenter 说"这一位要不要露出来"。分开才有"内容还在、只是暂时收起来"这种状态
+    /// —— 智能标题正是靠它做滚动联动：页面在顶部时居中标题收起（页面大标题顶班），
+    /// 滚动后才把它连同亚克力一起放出来，而左右图标全程不动。
+    /// 若改成"收起时把 Center 清成 None"，内容就丢了（还要另存一份才能还原），
+    /// 且中途那一次 Center 变化会惊动换字动画。
+    /// </summary>
+    public bool ShowCenter { get; init; } = true;
+
     /// <summary>左组与左边缘的间距（像素）。</summary>
     public double LeftPadding { get; init; } = 12;
 
@@ -361,6 +378,7 @@ public sealed record TopBarSnapshot : IEquatable<TopBarSnapshot>
         TopBarCenter? center = null,
         IReadOnlyList<TopBarButton>? right = null,
         bool showActions = true,
+        bool showCenter = true,
         double padding = 12) => new()
         {
             Visible = visible,
@@ -372,6 +390,7 @@ public sealed record TopBarSnapshot : IEquatable<TopBarSnapshot>
             Center = center ?? TopBarCenter.Empty,
             Right = right ?? Array.Empty<TopBarButton>(),
             ShowActions = showActions,
+            ShowCenter = showCenter,
             LeftPadding = padding,
             RightPadding = padding,
         };
@@ -392,6 +411,7 @@ public sealed record TopBarSnapshot : IEquatable<TopBarSnapshot>
             && Theme == other.Theme
             && Back == other.Back
             && ShowActions == other.ShowActions
+            && ShowCenter == other.ShowCenter
             && LeftPadding.Equals(other.LeftPadding)
             && RightPadding.Equals(other.RightPadding)
             && Center == other.Center
@@ -410,6 +430,7 @@ public sealed record TopBarSnapshot : IEquatable<TopBarSnapshot>
         hash.Add(Theme);
         hash.Add(Back);
         hash.Add(ShowActions);
+        hash.Add(ShowCenter);
         hash.Add(LeftPadding);
         hash.Add(RightPadding);
         hash.Add(Center);

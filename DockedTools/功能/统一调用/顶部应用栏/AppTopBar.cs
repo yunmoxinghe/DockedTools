@@ -321,7 +321,11 @@ internal sealed record AppTopBarProps : IEquatable<AppTopBarProps>
             ShowActions = snapshot.ShowActions,
             // 两种形态都显示标题（Search 形态下它就是"可点开的那个标题"），
             // 只有 None 才把居中位留空。
-            ShowCenter = search is not null || center is TopBarCenter.Title,
+            //
+            // 再与快照的 ShowCenter 取【且】：那一位是"这一位要不要露出来"的意图，
+            // 与"上面放什么内容"正交 —— 智能标题滚动到顶部时内容（标题文本）原样
+            // 保留在快照里，只是把这一位收起来（页面大标题顶班），左右图标全程不动。
+            ShowCenter = snapshot.ShowCenter && (search is not null || center is TopBarCenter.Title),
             LeftPadding = snapshot.LeftPadding,
             RightPadding = snapshot.RightPadding,
             LeftActions = snapshot.Left.Count > 0
@@ -873,17 +877,10 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
         // 进入方向：真实按钮组在提交那一帧即被卸载，淡出交给并行的幽灵层（同值）；
         // 退出方向：动作按钮在形变启动帧以本值淡入。
         const int ButtonsFadeMs = 100;
-        // 标题按钮边框厚度：与官方 TextControlBorderThemeThickness 对齐，未聚焦（含悬停）
-        // 为 1；聚焦（= 我们的 Pressed）底边加粗到 2。见 titleButton 处注释。
-        var ChromeBorderNormal = new Thickness(1);
-        var ChromeBorderFocused = new Thickness(1, 1, 1, 2);
-        // 「是否处于按下」的可变盒子。用数组而非 UseState：按下不该触发重渲染
-        //（会打断 morph / ConnectedAnimation），只要一个跨渲染存活的标志位即可。
-        var chromePressed = UseMemo(() => new bool[1], 0);
-        // 已挂过指针订阅的按钮实例。AddHandler **不去重**（实测：同实例同委托每次调用都
-        // 会再加一条，日志里一次按下能触发 25→60→72 次，随渲染次数单调增长），而 .Set()
-        // 每次渲染都执行 —— 所以必须自己按元素实例做一次门控，否则订阅无限累积。
-        var chromeHooked = UseRef<Button?>(null);
+        // 「长得像输入框的那个按钮」的外观管家：边框厚度、三态画刷、按下/悬停锁定
+        // 全在里面（见 TitleChrome）。这里只需要一个跨渲染存活的实例 —— 它的状态不能
+        // 走 UseState（按下若触发重渲染会打断 ConnectedAnimation）。
+        var titleChrome = UseMemo(() => new TitleChrome(), 0);
         // 关键：ref 必须在多次渲染间【稳定】。元素常驻挂载时，Reactor 只在原生元素
         // 初次挂载时给 ref 赋 Current；若每次 render 都 new ElementRef()，退出搜索
         // 那次渲染里的新 ref.Current 永远为 null → GetAnimation 拿到已登记动画却
@@ -933,25 +930,8 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
         // 按钮的 CommonStates（Normal/PointerOver/Pressed），避免“退出时 IsHitTestVisible=false
         // → 再进入时 true，WinUI 不重发 PointerEntered”导致的 PointerOver 状态残留。
         var searchBtnRef = UseMemo(() => new ElementRef(), 0);
-        // 标题按钮本身的引用：① 样式实例随主题重建后要重新赋给已挂载的按钮；
-        // ② 进入/退出搜索时用 GoToState 强制复位 CommonStates（与搜索按钮同一理由）。
-        // 声明点必须在所有引用它的局部函数之前（编译器按调用点做确定性赋值分析）。
-        var titleBtnRef = UseMemo(() => new ElementRef(), 0);
-        // 标题按钮的【指针按下】必须走 AddHandler(handledEventsToo: true)：
-        // ButtonBase.OnPointerPressed 会把事件标成 Handled，普通 += 订阅（Reactor 的
-        // .OnPointerPressed 就是这种）根本收不到按下；而 Released/Exited 没被标，所以
-        // 之前能看到“松开/移出”的日志、却永远看不到“按下”——表现就是按下态不生效。
-        //
-        // 委托实例必须缓存（UseMemo）：AddHandler **不按委托去重**，每次 render 传新 lambda
-        // 只会让订阅越积越多。顺序必须与下面 AddHandler 那几行一致：
-        //   [0]=Pressed [1]=Released [2]=Exited [3]=Canceled
-        var chromePointerHandlers = UseMemo(() => new[]
-        {
-            new Microsoft.UI.Xaml.Input.PointerEventHandler((_, _) => SetTitlePressed(true)),
-            new Microsoft.UI.Xaml.Input.PointerEventHandler((_, _) => SetTitlePressed(false)),
-            new Microsoft.UI.Xaml.Input.PointerEventHandler((_, _) => SetTitlePressed(false)),
-            new Microsoft.UI.Xaml.Input.PointerEventHandler((_, _) => SetTitlePressed(false)),
-        }, 8);
+        // 标题按钮本身的引用归 TitleChrome 持有（含样式/厚度/CommonStates 复位），
+        // 本组件这里不再保留 —— 跨平台那种"谁来管这份原生引用"的两主状态正是错位的来源。
         // 形变终点的可见性由【动画真正启动】控制：状态提交后终点先保持不可见，
         // TryStart 成功（同一调度帧内显形+启动）才显示——否则“提交渲染 → TryStart”
         // 之间有 1-2 帧终点已完全可见而动画未启动，表现为展开动画开头闪一下终点。
@@ -1299,7 +1279,7 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
         var boxLeftInset = padLeft + 40 + 8;
         var boxRightInset = padRight + 8 + 40;
 
-        // 搜索框外观的铬层已【并入标题按钮自身】：见 SearchChrome ——
+        // 搜索框外观的铬层已【并入标题按钮自身】：见 TitleChrome ——
         // 既不重写 ControlTemplate，也不去改按钮自己的 Background，而是走 WinUI 官方
         // 的【轻量样式】(lightweight styling)：把官方 SubtleButtonStyle 在 CommonStates
         // 里使用的资源键，在按钮的 Resources 上覆盖掉。官方 Storyboard 照常运行，只是
@@ -1427,179 +1407,27 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
         // 未订阅搜索的页面：标题不可点击（宿主层也已关掉命中测试），只作为静态文本存在。
         Action onTitleClick = p.Searchable ? EnterSearch : static () => { };
 
-        // REACTOR_POOL_001 会报「BorderThickness 在池回收时被重置，.Set 写的值会丢」——
-        // 这是真的，但在这里无害，故就地抑制（不能用它建议的 .BorderThickness(常量)，原因见下）：
-        //   ① 重置后的默认值就是未按下态（1px），与 chromePressed=false 一致，不会张冠李戴；
-        //   ② 元素回到树上时 .Set 会再跑一次，按当前标志重新写回；
-        //   ③ 真正按下时指针事件里也会即时改一次，不依赖渲染时机。
-        // 即：厚度的唯一真相源是 chromePressed 标志，池重置只是清了缓存，不是把状态改错。
-        // 该警告报在【元素根节点】这一行，所以 pragma 必须罩在语句开头，不能只罩 .Set 那一段。
-#pragma warning disable REACTOR_POOL_001
-        var titleButton = Button(titleBody, onTitleClick)
-            .Ref(titleBtnRef)
-            .AutomationName("TopBarTitle")
-            .HAlign(HorizontalAlignment.Stretch)
-            .VAlign(VerticalAlignment.Stretch)
-            // SubtleButtonStyle = 官方「无铬」按钮：透明底、无边框，主题切换自动跟随。
-            // 它同时提供官方的悬停/按下 CommonStates，作为画笔取不到时的兜底外观。
-            .SubtleButton()
-            // 原样式 Setter 里的形状值，这里显式补回（内容对齐默认即 Center，不用设）
-            .Padding(12, 0, 12, 0)
-            .CornerRadius(4)
-            // 边框厚度【跟着状态走】，不能写死：
-            //   官方 TextControlBorderThemeThickness        = 1        （未聚焦/悬停）
-            //   官方 TextControlBorderThemeThicknessFocused = 1,1,1,2  （聚焦：底边加粗）
-            // 即「底边加粗到 2px」是**聚焦独有**的特征，悬停仍是 1px。之前把它写成恒
-            // 1,1,1,2，悬停就顶着一条聚焦态的粗底边 —— 这就是「悬停底边太粗」的来源。
-            // SubtleButtonStyle 的 CommonStates 只换画刷、不改厚度，官方也没给厚度留
-            // 资源键（ResourceBuilder.Set 无 Thickness 重载），所以只能在指针事件里手动切。
-            //
-            // ⚠️ 这里【不能】写 .BorderThickness(常量)：那是 render 期修饰器，每次
-            // 重渲染都会把值写回常量，把事件里刚设的 2px 冲掉 —— 按下期间只要发生
-            // 任何一次渲染（例如进入搜索态），厚度就悄悄退回 1px。
-            // 所以改成「render 期按当前标志统一写」：事件只负责改标志 + 即时改一次，
-            // 之后无论渲染多少次，厚度都由同一个标志推出来，天然自愈。
-            .Set(b =>
-            {
-                b.BorderThickness =
-                    chromePressed[0] ? ChromeBorderFocused : ChromeBorderNormal;
-                // 订阅按【元素实例】只做一次：AddHandler 不去重，.Set 却每次渲染都跑，
-                // 不加门控的话一次按下会被处理几十次，且订阅随渲染次数无限增长。
-                // 元素被池回收后若换了个实例回来，引用不等 ⇒ 自动重新挂上（自愈）。
-                if (!ReferenceEquals(chromeHooked.Current, b))
-                {
-                    chromeHooked.Current = b;
-                    // handledEventsToo: true —— 见 chromePointerHandlers 处注释
-                    b.AddHandler(UIElement.PointerPressedEvent, chromePointerHandlers[0], true);
-                    b.AddHandler(UIElement.PointerReleasedEvent, chromePointerHandlers[1], true);
-                    b.AddHandler(UIElement.PointerExitedEvent, chromePointerHandlers[2], true);
-                    b.AddHandler(UIElement.PointerCanceledEvent, chromePointerHandlers[3], true);
-                }
-#pragma warning restore REACTOR_POOL_001
-            })
-            // 松开 / 移出 / 取消：一律退回 1px。Released 后指针多半仍在按钮上（回到悬停），
-            // 悬停就应该是 1px；Exited 与 Canceled 更是必须复位，否则会卡在加粗态。
-            //
-            // ⚠️ 这里【不能】用 Reactor 的 .OnPointerPressed：ButtonBase 在 OnPointerPressed
-            // 里把事件标成 Handled，普通 += 订阅收不到按下。实测对照：同一按钮上
-            // .OnPointerPressed 的探针一次都不触发，.OnPointerExited 的探针正常触发 ⇒
-            // 按下必须走上面的 AddHandler(handledEventsToo: true)。
-            // 也不监听 OnPointerCaptureLost：Button 按下时会捕获指针，捕获发生/转移期间
-            // 可能抛一次 CaptureLost，把刚加粗的厚度立刻打回 1px。
+        // 右键菜单是业务（复制 / 粘贴到搜索），留在宿主这一层；按钮壳本身归 TitleChrome。
+        // 两个闸门（进入前导 / 退出播放）以【读取当前值】的形式递进去：
+        // TitleChrome 是跨渲染长期存活的，传值会被它抓成首次渲染的快照。
+        var titleButton = titleChrome
+            .Build(
+                titleBody,
+                onTitleClick,
+                () => enterPending.Current,
+                () => exitHolding.Current)
             .WithContextFlyout(MenuItems(
                 MenuItem(copyTitleCommand),
                 MenuItem(pasteToSearchCommand)));
 
-        // 三态换刷走【轻量样式覆盖】：官方 CommonStates 用 Storyboard 动画打在
-        // ContentPresenter.Background 上，而动画优先级高于 TemplateBinding —— 所以任何
-        // 去写 Button.Background 的做法（例如 .InteractionStates(background:)）在悬停/按下
-        // 期间都会被官方动画整个遮蔽。实测：进 PointerOver 后 presenterBg 从我们设的
-        // #80F9F9F9 变成 SubtleFillColorSecondaryBrush(#09000000)。覆盖资源键才是正路。
-        titleButton = titleButton.Resources(SearchChrome.Apply);
-
-        // 强制标题按钮回到 Normal（透明）：进入/退出搜索会切 IsHitTestVisible，
-        // 命中测试切换后 WinUI 不补发 PointerExited，CommonStates 会卡在 PointerOver
-        //（与搜索按钮同一手法，见 searchBtnRef 处的注释）。
-        // 退出搜索走这个：形变终点是【标题】，必须以 Normal（透明铬层）定格。
-        void ResetTitleButtonVisualState()
-        {
-            if (titleBtnRef.Current is Control titleCtl)
-            {
-                VisualStateManager.GoToState(titleCtl, "Normal", false);
-            }
-            SetTitlePressed(false);
-        }
-
-        // 退出形变的【播放期间】反向操作：把铬层锁在【悬停态】（PointerOver）。
-        //
-        // 为什么是悬停而不是 Normal：
-        //   退出是「搜索框 → 标题」的形变。源端（搜索框）无论静置还是聚焦都有实底，
-        //   而标题的 Normal 是【完全透明】的 —— 若终点以 Normal 定格，形变最后一帧
-        //   等于把实底抹掉，观感是"闪一下消失"。悬停态有 50% 白底，与源端有实底这一点
-        //   一致，形变全程只剩尺寸/位置在变。
-        //   退出动作本身也暗示指针正落在顶栏（点返回键 / 提交），悬停正是此刻应有的态。
-        //
-        // 为什么不是常态：动画播完必须退回 Normal（见 MorphEffect 的 Completed），
-        //   否则铬层会被永久钉在悬停态 —— 之后指针移开也不会复原。
-        //
-        // ⚠️ 不能只在这里压一次就完事：ButtonBase 的 UpdateVisualState 随时可能把状态
-        //   打回去（与进入侧同一个坑），所以 SetTitlePressed 里还有一道 exitHolding 闸，
-        //   且 TryStart 成功的同帧会再压一次（那是最后一个能改状态的点）。
-        void HoldTitleChromeHover()
-        {
-            if (titleBtnRef.Current is Control titleCtl)
-            {
-                VisualStateManager.GoToState(titleCtl, "PointerOver", false);
-            }
-            // 直接写，不走 SetTitlePressed：后者在 exitHolding 为真时会回头调本方法
-            chromePressed[0] = false;
-            if (titleBtnRef.Current is Button titleBtn)
-            {
-                titleBtn.BorderThickness = ChromeBorderNormal;
-            }
-        }
-
         // 解除悬停锁并退回 Normal。顺序要紧：必须先清标志再复位，
-        // 否则 SetTitlePressed(false) 会撞上 exitHolding 闸、又把悬停夺回来。
+        // 否则 SetPressed(false) 会撞上退出播放这道闸、又把悬停夺回来。
         void ReleaseTitleChromeHover()
         {
             exitHolding.Current = false;
-            ResetTitleButtonVisualState();
+            titleChrome.Reset();
         }
 
-
-        // 进入搜索的前导期反向操作：把铬层【锁在按下态】（= 搜索框聚焦外观）。
-        // 进入动画是从「标题」形变到「搜索框」，而搜索框一进来就是聚焦态（白底 + 强调色
-        // 边框 + 底边 2px）。若前导期退回 Normal（透明），就会看到
-        //   按下(白+蓝边) → 松开瞬间透明 → 150ms 后形变 → 聚焦(白+蓝边)
-        // 中间那一拍是凭空闪一下。源端保持聚焦外观，两端像素一致，形变只剩尺寸/位置变化。
-        void HoldTitleChromePressed()
-        {
-            if (titleBtnRef.Current is Control titleCtl)
-            {
-                VisualStateManager.GoToState(titleCtl, "Pressed", false);
-            }
-            // 同上：直接写，不经过 SetTitlePressed
-            chromePressed[0] = true;
-            if (titleBtnRef.Current is Button titleBtn)
-            {
-                titleBtn.BorderThickness = ChromeBorderFocused;
-            }
-        }
-
-        // 厚度只能走本地值：官方没给厚度留资源键，ResourceBuilder.Set 也没有 Thickness
-        // 重载，而 .InteractionStates() 只认 visual/brush、不认 layout 属性。
-        // 两步走：先记标志（供 render 期 .Set 自愈），再即时改一次（不等下次渲染）。
-        // 用 ref.Current 现场解析，不要在 Render 期抓快照 —— Render 里抓到的是上一帧的
-        // 元素引用，闭包一旦把它捕获下来就永远过期。
-        void SetTitlePressed(bool pressed)
-        {
-            // 进入搜索的前导期：铬层锁定聚焦外观，任何「松开/移出」都不许把它复位。
-            //
-            // 时序坑（已实测）：Click 是 ButtonBase 在 OnPointerReleased 的【覆写】里抛出的，
-            // EnterSearch 因此先跑（实测 reset 比 raw-release 早约 1ms）；但 ButtonBase 抛完
-            // Click 之后还会 UpdateVisualState 回落 PointerOver/Normal，把我们在 Click 里刚
-            // 压上的 Pressed 冲掉 —— 所以只在 EnterSearch 里压一次是不够的。
-            // 我们的订阅（handledEventsToo）排在那个覆写之后，正好是最后一个能改状态的
-            // 位置：这里再压一次，之后直到快照定格都没有人再动它。
-            if (!pressed && enterPending.Current)
-            {
-                HoldTitleChromePressed();
-                return;
-            }
-            // 退出形变播放期间：任何复位都夺回成悬停态（ButtonBase 的 UpdateVisualState
-            // 会在退出编排里把我们压的 PointerOver 打回 Normal，与进入侧同一个坑）
-            if (!pressed && exitHolding.Current)
-            {
-                HoldTitleChromeHover();
-                return;
-            }
-            chromePressed[0] = pressed;
-            if (titleBtnRef.Current is Button titleBtn)
-            {
-                titleBtn.BorderThickness = pressed ? ChromeBorderFocused : ChromeBorderNormal;
-            }
-        }
 
         // 居中位无内容（ShowCenter=false）时：整块标题宿主透明且不参与命中测试，
         // 背景层与返回按钮照常（这正是“未配置/只有返回”那一页的样子）
@@ -2243,7 +2071,7 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
                     // （IsHitTestVisible / 可见性变化都会触发），压晚了会被打回 Normal。
                     if (!isSearching)
                     {
-                        HoldTitleChromeHover();
+                        titleChrome.HoldHover();
                     }
                     if (animation.TryStart(destination))
                     {
@@ -2867,7 +2695,7 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
 
         // 进入搜索（单阶段，同步提交）：
         //   ① 铬层锁在聚焦（按下）外观 —— 形变终点是聚焦态搜索框，源端用同一套外观才
-        //      不会在松手那一拍闪一下透明（见 HoldTitleChromePressed）；
+        //      不会在松手那一拍闪一下透明（见 TitleChrome.HoldPressed）；
         //   ② 就地定格连接动画快照、切搜索状态，MorphEffect 门控后 TryStart；
         //   ③ 动作按钮同帧卸载，由幽灵层在原地把它们淡出（与形变并行）。
         //
@@ -2881,15 +2709,15 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
             }
 
             FinishTitleSwap();
-            // 退出形变还没播完就又进入搜索：悬停锁必须清掉，否则 SetTitlePressed 的
+            // 退出形变还没播完就又进入搜索：悬停锁必须清掉，否则 TitleChrome.SetPressed 的
             // 复位会被 exitHolding 闸夺回成悬停，按下态就压不住了。
             exitHolding.Current = false;
             enterPending.Current = true;
             // 铬层【保持按下态】而不是复位：形变终点是聚焦态搜索框，源端用同一套
-            // 外观才不会在松开那一拍闪一下透明（见 HoldTitleChromePressed 处注释）。
-            // 必须在 enterPending.Current = true 之后调用 —— SetTitlePressed 靠它挡住
+            // 外观才不会在松开那一拍闪一下透明（见 TitleChrome.HoldPressed 处注释）。
+            // 必须在 enterPending.Current = true 之后调用 —— TitleChrome.SetPressed 靠它挡住
             // 紧随其后的 release/exit 复位。
-            HoldTitleChromePressed();
+            titleChrome.HoldPressed();
             if (searchIconRef.Current is { } si && si.XamlRoot is not null) XamlAnimatedIcon.SetState(si, "Normal");
             setPressedKey(null);
             // 动作按钮的目标透明度先落 0：本轮提交后它们就随 searching=true 卸载，
@@ -2901,7 +2729,7 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
             void Fallback()
             {
                 enterPending.Current = false;
-                ResetTitleButtonVisualState();
+                titleChrome.Reset();
                 if (searchIconRef.Current is { } sicon && sicon.XamlRoot is not null) XamlAnimatedIcon.SetState(sicon, "Normal");
                 setPressedKey(null);
                 setExitSettling(false);
@@ -2923,7 +2751,7 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
                 {
                     enterPending.Current = false;
                     // 放弃进入：铬层要退回 Normal，否则标题会一直顶着聚焦外观
-                    ResetTitleButtonVisualState();
+                    titleChrome.Reset();
                     setExitSettling(false);
                     setActionsShown(true);
                     setSearchBtnShown(false);
@@ -2940,7 +2768,7 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
                 }
                 // 快照已定格，铬层可以松锁：此后标题宿主即将隐藏，退出时由
                 // ResetTitleButtonVisualState 再复位一次（双保险，标志不残留）。
-                SetTitlePressed(false);
+                titleChrome.SetPressed(false);
                 // 终点（输入框）先不可见，TryStart 成功同帧再显形（见 MorphEffect）
                 setTitleShown(false);
                 setBoxShown(false);
@@ -2951,7 +2779,7 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
             // 此刻反而【最有利于快照】：ButtonBase 的两处状态回落（OnPointerReleased 里
             // 的 IsPressed=FALSE→UpdateVisualState，以及 ReleasePointerCapture 抛出的
             // CaptureLost→UpdateVisualState）都发生在 Click【之后】，所以这里定格到的
-            // 必然是 Pressed（聚焦）外观 —— 不必再靠 SetTitlePressed 的重压去抢。
+            // 必然是 Pressed（聚焦）外观 —— 不必再靠 TitleChrome.SetPressed 的重压去抢。
             try
             {
                 Commit();
@@ -2991,9 +2819,9 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
             // 退出形变【播放期间】铬层锁在悬停态。源端（搜索框）无论如何都有实底，
             // 终点若以 Normal（完全透明）定格，最后一帧等于把实底抹掉 —— 观感是
             // "闪一下消失"。悬停态有 50% 白底，与源端一致，形变只剩尺寸/位置在变。
-            // 动画播完由 MorphEffect 的 Completed 退回 Normal（见 HoldTitleChromeHover）。
+            // 动画播完由 MorphEffect 的 Completed 退回 Normal（见 TitleChrome.HoldHover）。
             exitHolding.Current = true;
-            HoldTitleChromeHover();
+            titleChrome.HoldHover();
             // 搜索按钮在静置期先淡出（常驻覆盖层，仅切透明度），同步清掉悬停/按压图标态
             if (searchIconRef.Current is { } si && si.XamlRoot is not null) XamlAnimatedIcon.SetState(si, "Normal");
             setPressedKey(null);
@@ -3099,7 +2927,7 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
                 exitPending.Current = false;
                 // 悬停锁一并解除：异常路径不会有 Completed 回调来解它
                 exitHolding.Current = false;
-                ResetTitleButtonVisualState();
+                titleChrome.Reset();
                 if (searchIconRef.Current is { } si && si.XamlRoot is not null) XamlAnimatedIcon.SetState(si, "Normal");
                 setPressedKey(null);
                 setExitSettling(false);
