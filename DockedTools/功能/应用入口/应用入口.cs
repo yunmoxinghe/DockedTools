@@ -383,8 +383,20 @@ namespace DockedTools
 
                 // 启动浏览器扩展桥接服务（本机回环 WebSocket，供浏览器扩展连接）
                 // 启动失败不能影响主流程，所以只跑后台任务并吞掉异常，详情看日志
-                _ = System.Threading.Tasks.Task.Run(
-                    () => DockedTools.Features.BrowserExtension.BridgeService.StartAsync());
+                //
+                // ⭐ 接收端当前已关闭（BridgeConfig.Enabled = false，2026-10 起暂停新功能）。
+                //    开关关着就别再甩后台任务去初始化 Kestrel 了 —— 白跑一次 ASP.NET Core
+                //    运行时初始化，还会在日志里留一堆"端口探测"噪音。
+                //    恢复时只需把 BridgeConfig.Enabled 改回 true，这里不用动。
+                if (DockedTools.Features.BrowserExtension.BridgeConfig.Enabled)
+                {
+                    _ = System.Threading.Tasks.Task.Run(
+                        () => DockedTools.Features.BrowserExtension.BridgeService.StartAsync());
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine("[App] 浏览器扩展桥接收端已关闭（BridgeConfig.Enabled = false），跳过启动");
+                }
 
                 // 冷启动被通知唤醒的那一次：走到这里窗口、托盘、内容区都已就绪，回头补上跳转。
                 // 压到 Low 优先级是为了排在窗口首帧之后 —— 否则跳转会和首帧布局抢同一帧。

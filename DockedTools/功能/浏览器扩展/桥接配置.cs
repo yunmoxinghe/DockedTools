@@ -65,8 +65,19 @@ namespace DockedTools.Features.BrowserExtension
         /// <summary>WebSocket 终结点路径</summary>
         public const string BridgePath = "/bridge";
 
-        /// <summary>是否启用桥接服务（M0 默认开）</summary>
-        public static bool Enabled { get; set; } = true;
+        /// <summary>
+        /// 是否启用桥接服务【当前：关闭】
+        ///
+        /// 2026-10 起暂停接收端：近期不接新功能，回环 WebSocket（Kestrel）不再拉起，
+        /// 端口 17829~17839 不再监听，浏览器扩展连不进来。代码整体保留，随时可恢复。
+        ///
+        /// 要恢复：把这里改回 true 即可。应用入口的启动/停止两处都读这个开关，
+        /// 不需要再动别的地方（停止侧本身就是幂等的没启动就什么都不做）。
+        ///
+        /// 顺带提醒：重新打开前先确认 StrictOriginWhitelist / StrictWhitelist 的取值 ——
+        /// 宽松模式下机器上任意一个浏览器扩展都能连进来增删网页应用。
+        /// </summary>
+        public static bool Enabled { get; set; } = false;
 
         /// <summary>
         /// 是否启用严格来源白名单。
