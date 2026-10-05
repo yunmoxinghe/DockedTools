@@ -148,6 +148,23 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
             try
             {
+                // ⭐ 顶栏契约只认位图 Uri（BitmapCenterIcon），SVG 交过去必然解码失败 ——
+                //    顶栏图标就那么空着（临时目录里曾经攒下过 9 个 .svg，全是这么来的）。
+                //    先让专用渲染内核画成 PNG：既补上了位图，也顺带把 SVG 里的
+                //    @media (prefers-color-scheme) 按当前主题求了值。
+                if (WebAppIconCache.IsSvgContent(iconBytes))
+                {
+                    byte[]? png = await WebAppIconRasterizer.Instance.RasterizeSvgAsync(
+                        iconBytes,
+                        WebAppIconRasterizer.DefaultRasterSize,
+                        TopAppBarService.GetActualTheme() == ElementTheme.Dark);
+
+                    if (png is { Length: > 0 })
+                    {
+                        iconBytes = png;
+                    }
+                }
+
                 var directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "DockedTools", "ShortcutIcons");
                 System.IO.Directory.CreateDirectory(directory);
 

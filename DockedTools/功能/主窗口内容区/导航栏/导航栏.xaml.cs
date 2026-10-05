@@ -345,7 +345,13 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
             
             // 订阅统一更新服务事件
             WebAppUpdateService.UpdateCompleted += OnUpdateCompleted;
-            
+
+            // ⭐ 主题变了要重建图标：单色 SVG 是「按当前主题上色后再落盘」的，
+            //    主题一换文件内容就变（文件名带内容哈希 ⇒ 路径必变），
+            //    但常驻的侧边栏不会自己再去取一次 —— 不主动刷新的话
+            //    图标就停在旧主题的颜色上（深色底下是黑图标，等于看不见）。
+            ActualThemeChanged += OnActualThemeChanged;
+
             Unloaded += (_, _) =>
             {
                 WebAppEventBus.ShortcutCreated -= OnShortcutCreated;
@@ -353,6 +359,7 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
                 WebAppDeletionService.DeletionStarting -= OnDeletionStarting;
                 WebAppDeletionService.DeletionCompleted -= OnDeletionCompleted;
                 WebAppUpdateService.UpdateCompleted -= OnUpdateCompleted;
+                ActualThemeChanged -= OnActualThemeChanged;
             };
             Loaded += NavigationBar_Loaded;
             SizeChanged += NavigationBar_SizeChanged;
@@ -371,6 +378,29 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
             // HomeNavigationItem 的 IsSelected="True" 会在 XAML 初始化时触发 SelectionChanged
             // 我们需要等到 LoadContent() 调用后才真正导航到首页
             _suppressSelectionChanged = true;
+        }
+
+        /// <summary>
+        /// 主题切换后重建全部网页应用图标。
+        ///
+        /// 为什么必须清一次去重记录：那张表的语义是「内容没变就一次都别动」，
+        /// 而这里恰恰是靠「落盘内容变了 ⇒ 路径变了」来触发重建的 ——
+        /// 不清的话每条都会命中「跟当前一样」直接 return，一条都不会更新。
+        /// </summary>
+        private void OnActualThemeChanged(FrameworkElement sender, object args)
+        {
+            _webShortcutIconKeys.Clear();
+
+            foreach (KeyValuePair<string, NavigationViewItem> pair in _webShortcutItems)
+            {
+                if (!_webShortcuts.TryGetValue(pair.Key, out WebAppShortcut? shortcut))
+                {
+                    continue;
+                }
+
+                // 首屏那套参数：批量刷新不等解码、不淡入（几十个一起淡太吵）
+                _ = UpdateShortcutIconAsync(pair.Value, shortcut, fade: false, waitForDecode: false);
+            }
         }
 
         private void NavigationBar_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -711,7 +741,9 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
             {
                 try
                 {
-                    string? iconPath = WebAppIconCache.Save(shortcut.Id, shortcut.IconBytes);
+                    // 走 SaveAsync（而不是 Save）：光栅化出来的 PNG 里那层颜色是按旧主题算的，
+                    // 这一步会按需用当前主题重画一张 —— 换主题后图标跟着变色全靠它。
+                    string? iconPath = await WebAppIconCache.SaveAsync(shortcut.Id, shortcut.IconBytes);
                     if (iconPath is not null)
                     {
                         ImageIcon? icon = await TryCreateImageIconAsync(new Uri(iconPath), shortcut.Id, waitForDecode);
@@ -774,13 +806,23 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
                 // 失败回调对两种源是同一份（位图的 ImageFailed / SVG 的 OpenFailed 都接到这里）
                 ImageSource source = WebAppIconCache.CreateImageSource(imageUri, () => FallbackToGlobeIcon(imageUri, shortcutId));
 
+                // ⚠️ 只对「运行中用新图换旧图」这条路径等解码 —— 千万别顺手把本地文件也等上。
+                //
+                //    实测教训：试过 waitForDecode || imageUri.IsFile，结果启动日志里每张图标
+                //    都来一条「等图像就绪超时（1200ms）」，26 个应用 26 条。
+                //    原因是我们 await 的时候 ImageIcon 还没挂上可视树，而 WinUI 对
+                //    BitmapImage 的解码是【等有人要画它才开始】的 —— 没人要 ⇒ 不解码
+                //    ⇒ ImageOpened / ImageFailed 都不来 ⇒ 必然等到超时。
+                //    也就是：这种做法注定只能拿到 Timeout，白等 1.2 秒还拖慢图标上树。
+                //
+                //    那张图到底画不画得出来，交给 CreateImageSource 的失败回调去判
+                //    （位图 ImageFailed / SVG OpenFailed → FallbackToGlobeIcon），
+                //    它是上树之后才触发的，才是真正可靠的信号。
                 if (waitForDecode)
                 {
                     // ⭐ 等解码真正完成再交出 ImageIcon（microsoft-ui-xaml#8750：
                     //    换 Source 必然经过一个空白帧，未解码的源会把这帧拉长成整个解码耗时）。
-                    //    本地文件解码是毫秒级的，等得起；在线 favicon 给 1.5s。
-                    int timeout = imageUri.IsFile ? 1200 : 1500;
-                    ImageLoadState state = await WebAppIconCache.WaitUntilReadyAsync(source, timeout);
+                    ImageLoadState state = await WebAppIconCache.WaitUntilReadyAsync(source, 1500);
 
                     if (state == ImageLoadState.Failed)
                     {
