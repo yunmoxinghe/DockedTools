@@ -43,22 +43,18 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         /// </summary>
         public const int DefaultRasterSize = 256;
 
-        /// <summary>
-        /// 渲染内核的启动参数。
-        /// 隐藏窗口上的 renderer 会被 Chromium 判定为「后台」而降优先级，
-        /// 图片解码和定时器都可能被推迟 —— 这三条是标准的反节流开关。
-        /// </summary>
-        private const string RasterBrowserArguments =
-            "--disable-renderer-backgrounding " +
-            "--disable-backgrounding-occluded-windows " +
-            "--disable-background-timer-throttling " +
-            "--disable-renderer-priority-management";
-
-        /// <summary>
-        /// 渲染内核专属的 user data folder。
-        /// 必须跟浏览器页面那个 WebView2 分开 —— 见 <see cref="EnsureReadyCoreAsync"/> 里那段说明。
-        /// </summary>
-        private const string UserDataFolderName = "EBWebView-IconRaster";
+        // ⚠️ 已于 2026-10-06 移除：「专属 user data folder（EBWebView-IconRaster）」与
+        //    「专属反节流启动参数」两套东西。
+        //
+        //    原委：每一份 UDF 都会拉起一整套独立进程树（管理器 / Network Service /
+        //    Storage Service / Crashpad 各一份）。只开一个标签却吃掉 300 MB，
+        //    其中四五十 MB 就是这第二棵树干的 —— 它还顺带让任务管理器里多出四五个进程。
+        //    微软官方（Managing the User Data Folder）也明确建议别同时跑太多份 UDF。
+        //
+        //    现在统一走 SharedWebViewEnvironment，与浏览器页面共用同一棵进程树。
+        //    代价是专属的 --disable-renderer-priority-management 不再单独给，
+        //    但防冻结最关键的两条（--disable-renderer-backgrounding、
+        //    --disable-backgrounding-occluded-windows）本来就在共享参数里，离屏 renderer 不会被停掉。
 
         /// <summary>
         /// 把一个字符串变成 **带引号的 JS 字符串字面量**。
@@ -606,25 +602,16 @@ namespace DockedTools.Features.Pages.WebApp.Shared
 
             try
             {
-                CoreWebView2EnvironmentOptions options = new()
-                {
-                    AdditionalBrowserArguments = RasterBrowserArguments
-                };
+                System.Diagnostics.Debug.WriteLine("[IconRasterizer] 取共享 WebView2 环境…");
 
-                // ⭐ 专属 user data folder —— 这一行就是 0x8007139F 的解药。
-                //    官方文档（ICoreWebView2Environment）写得很明确：
-                //    「同一份 user data folder 上已经有一个实例在跑，而新 Environment 的
-                //     EnvironmentOptions 跟它不同，CreateCoreWebView2Controller 会以
-                //     HRESULT_FROM_WIN32(ERROR_INVALID_STATE) 失败」。
-                //    我们前两版传的是 null（= 默认那份），跟浏览器页面里那个 WebView2 撞车了，
-                //    而反节流参数正是两边 EnvironmentOptions 不同的那一项 ——
-                //    于是每次都在 controller 这一步被顶回来。给个独立目录，互不干涉。
-                string userDataFolder = Path.Combine(
-                    Windows.Storage.ApplicationData.Current.LocalFolder.Path, UserDataFolderName);
-
-                System.Diagnostics.Debug.WriteLine("[IconRasterizer] 建 WebView2 环境…");
-                CoreWebView2Environment environment =
-                    await CoreWebView2Environment.CreateWithOptionsAsync(null, userDataFolder, options);
+                // ⭐ 与浏览器页面共用同一份 environment（同一 UDF、同一套 options）。
+                //
+                //    为什么不再自建：自建要么用独立 UDF（= 多一整棵进程树，几十 MB），
+                //    要么用同一 UDF 但 options 不同（= 0x8007139F，官方文档写明：
+                //    「if a running instance using the same user data folder exists, and the
+                //     Environment objects have different EnvironmentOptions」）。
+                //    共用实例是唯一既能省进程树又不撞 HRESULT 的路。
+                CoreWebView2Environment environment = await SharedWebViewEnvironment.GetAsync();
 
                 // ⭐ 宿主必须是一个「已经被 XAML 真正初始化过」的窗口 —— 对着一个
                 //    新建但还没激活的 Window 建 controller，内核会回 0x8007139F

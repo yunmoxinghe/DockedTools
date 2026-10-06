@@ -1,5 +1,6 @@
 using DockedTools.Features.Pages.Settings;
 using DockedTools.Features.Pages.WebApp.Browser.Managers;
+using DockedTools.Features.Pages.WebApp.Shared;
 using DockedTools.Features.UnifiedCalls.AsyncSafety;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -167,24 +168,16 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     return;
                 }
 
-                CoreWebView2EnvironmentOptions options = new()
-                {
-                    Language = GetWebViewLanguage(),
-                    // 优化触摸板滚动体验的浏览器参数
-                    AdditionalBrowserArguments = BuildBrowserArguments()
-                };
-                
-                // ⭐ 透明背景实验室：环境变量必须在任何一个 CoreWebView2 被创建之前设置，否则不生效
-                ApplyWebViewTransparencyEnvironmentVariable();
-                
                 // ⭐ PreInit 策略：在控制器创建之前就把底色写好，从源头消除白闪
                 ApplyTransparencyBeforeControllerCreation();
                 
-                System.Diagnostics.Debug.WriteLine($"[EnsureWebViewInitializedAsync] 创建 CoreWebView2Environment...");
-                CoreWebView2Environment environment = await CoreWebView2Environment.CreateWithOptionsAsync(
-                    browserExecutableFolder: null,
-                    userDataFolder: null,
-                    options: options);
+                System.Diagnostics.Debug.WriteLine($"[EnsureWebViewInitializedAsync] 取共享 CoreWebView2Environment...");
+                
+                // ⭐ 全应用共用一份 environment：UDF 只有一份 ⇒ 浏览器进程树只有一棵。
+                //    启动参数与透明背景环境变量都由 SharedWebViewEnvironment 统一负责，
+                //    这里绝不能再 CreateWithOptionsAsync 自建一套 —— 同一 UDF 上
+                //    EnvironmentOptions 不一致会直接 0x8007139F。
+                CoreWebView2Environment environment = await SharedWebViewEnvironment.GetAsync();
                 
                 // ⭐ 保存 environment 引用（用于后续订阅 BrowserProcessExited）
                 _webViewEnvironment = environment;
@@ -352,38 +345,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             }
         }
 
-        private static string GetWebViewLanguage()
-        {
-            return CultureInfo.CurrentUICulture.Name;
-        }
-
-        /// <summary>
-        /// 透明背景实验室：在 CoreWebView2 创建之前设置或清理 WEBVIEW2_DEFAULT_BACKGROUND_COLOR
-        /// 
-        /// 【为什么必须放在这里】
-        /// 该环境变量只在「第一个 CoreWebView2 被创建」时被读取一次，晚调用等于没设。
-        /// 
-        /// 【为什么非环境变量模式下要显式删掉】
-        /// 环境变量是进程级的，一旦设了会影响之后所有新建的 WebView。
-        /// 所以切回其它策略时必须主动删除，否则会污染 LRU 里后续新建的实例。
-        /// </summary>
-        private void ApplyWebViewTransparencyEnvironmentVariable()
-        {
-            const string BackgroundColorVariable = "WEBVIEW2_DEFAULT_BACKGROUND_COLOR";
-            WebViewTransparencyMode mode = ExperimentalSettings.WebViewTransparencyMode;
-
-            if (mode == WebViewTransparencyMode.EnvironmentVariable ||
-                mode == WebViewTransparencyMode.EnvironmentVariableAndPreInit)
-            {
-                Environment.SetEnvironmentVariable(BackgroundColorVariable, "00000000");
-                System.Diagnostics.Debug.WriteLine($"[TransparencyLab] 已设置 {BackgroundColorVariable}=00000000");
-            }
-            else if (Environment.GetEnvironmentVariable(BackgroundColorVariable) != null)
-            {
-                Environment.SetEnvironmentVariable(BackgroundColorVariable, null);
-                System.Diagnostics.Debug.WriteLine($"[TransparencyLab] 已清除 {BackgroundColorVariable}");
-            }
-        }
+        // ⚠️ GetWebViewLanguage / ApplyWebViewTransparencyEnvironmentVariable / BuildBrowserArguments
+        //    已迁至 SharedWebViewEnvironment（功能\页面\网页应用\共享\共享WebView环境.cs）。
+        //    原因：它们都属于「EnvironmentOptions」的一部分，而同一 UDF 上所有 WebView
+        //    必须共用完全一致的 options，散在各处迟早会因为某一项不同而撞 0x8007139F。
 
         /// <summary>
         /// 透明背景实验室：只有 PreInit 与双保险两种策略需要在控制器创建之前定色
@@ -452,143 +417,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             }
 
             System.Diagnostics.Debug.WriteLine($"[TransparencyLab] 探针 = {ExperimentalSettings.WebViewTransparencyProbe}");
-        }
-
-        private string BuildBrowserArguments()
-        {
-            var args = new List<string>
-            {
-                "--enable-smooth-scrolling",
-                "--enable-zero-copy"
-
-                // ⚠️ 已于 2026-10-03 移除：--disable-features=msExperimentalScrolling
-                //
-                // 它关掉的是 Edge Scrolling Personality（即 edge://flags/#edge-experimental-scrolling，
-                // Windows 上 Edge 默认开启）。按 Edge 团队公开说明，这套 personality 包含三件事：
-                //   1. 改进的动量 / touch fling 动画曲线
-                //   2. 百分比滚动（用 scroller 高度计算 delta，而非固定 100px/tick）
-                //   3. 根滚动器上的 overscroll bounce —— 官方明确说对 touch 与 touchpad 都生效
-                // 这三项正是 Edge 相对标准 Chromium 在精密触摸板上「跟手」的直接来源。
-                // 关掉它 = 退回标准 Chromium 滚动 → 内容滞后于手指、手感发钝。
-                // 来源：Microsoft Tech Community 讨论（HotCakeX 说明该 flag 在 Edge 中默认开启）、
-                //       Thurrott 汇总的 Edge 团队官方博文、microsoft-ui-xaml#11408。
-                //
-                // ⚠️ 若要复现「标准 Chromium 手感」做对照，把这行加回列表即可（一行 A/B）。
-            };
-
-            // 🚀 启动速度优化（零内存成本）
-            args.Add("--dns-prefetch-disable=false");  // 启用 DNS 预解析
-            args.Add("--enable-tcp-fast-open");        // 启用 TCP Fast Open
-
-            // 🎨 消除白闪（无论是否快速启动模式都启用）
-            args.Add("--disable-backgrounding-occluded-windows");  // 禁用窗口遮挡时的背景化
-            args.Add("--disable-renderer-backgrounding");          // 禁用渲染器后台化
-            
-            // 🎨 透明背景实验室：砍掉创建时的隐式 about:blank 导航，消除首屏白闪
-            if (ExperimentalSettings.WebViewCancelInitialNavigation)
-            {
-                args.Add("--msWebView2CancelInitialNavigation");
-            }
-            
-            // 🎯 进程模型优化
-            if (ExperimentalSettings.SingleProcessMode)
-            {
-                // 单进程模式：将所有服务合并到主进程
-                args.Add("--single-process");  // 完全单进程（最激进）
-            }
-            else
-            {
-                // 多进程模式：优化辅助进程
-                args.Add("--in-process-gpu");              // GPU 进程合并到主进程
-                args.Add("--disable-gpu-process-crash-limit");  // 禁用 GPU 进程崩溃限制
-                
-                // 将 Network Service 和 Storage Service 合并到主进程
-                args.Add("--enable-features=NetworkServiceInProcess");
-            }
-
-            // 构建 enable-features 列表
-            var enableFeatures = new List<string>
-            {
-                "msEdgeFluentOverlayScrollbar"  // 细滚动条
-            };
-
-            // GPU 优化设置
-            if (ExperimentalSettings.EnableHardwareAcceleration)
-            {
-                args.Add("--enable-accelerated-2d-canvas");
-                args.Add("--enable-gpu-rasterization");
-            }
-            else
-            {
-                // 完全禁用 GPU 进程
-                args.Add("--disable-gpu");
-                args.Add("--disable-gpu-compositing");
-                args.Add("--disable-accelerated-2d-canvas");
-            }
-
-            if (ExperimentalSettings.EnableHardwareOverlays)
-            {
-                args.Add("--enable-hardware-overlays");
-            }
-
-            if (ExperimentalSettings.EnableHardwareVideoDecoder)
-            {
-                enableFeatures.Add("VaapiVideoDecoder");
-                args.Add("--enable-accelerated-video-decode");
-            }
-
-            if (ExperimentalSettings.DisableSoftwareRasterizer)
-            {
-                args.Add("--disable-software-rasterizer");
-            }
-
-            // 应用性能优化设置
-            if (ExperimentalSettings.DisableBackgroundNetwork)
-            {
-                args.Add("--disable-background-networking");
-                args.Add("--disable-sync");
-                // ❌ 移除 --disable-preconnect，它严重影响首次加载速度
-                args.Add("--no-pings");
-            }
-            else
-            {
-                // ✅ 显式启用预连接优化
-                args.Add("--enable-preconnect");
-            }
-
-            if (ExperimentalSettings.DisableExtensions)
-            {
-                args.Add("--disable-extensions");
-            }
-
-            if (ExperimentalSettings.DisablePlugins)
-            {
-                args.Add("--disable-plugins");
-            }
-
-            // 磁盘缓存大小限制
-            int cacheSizeMB = ExperimentalSettings.DiskCacheSize;
-            int cacheSizeBytes = cacheSizeMB * 1024 * 1024;
-            args.Add($"--disk-cache-size={cacheSizeBytes}");
-            args.Add($"--media-cache-size={cacheSizeBytes}");
-
-            // 快速启动模式：减少启动时的检查和初始化
-            if (ExperimentalSettings.FastStartupMode)
-            {
-                args.Add("--disable-breakpad");              // 禁用崩溃报告
-                args.Add("--disable-component-update");      // 禁用组件更新检查
-                args.Add("--disable-domain-reliability");    // 禁用域名可靠性监控
-                args.Add("--disable-background-timer-throttling");  // 减少后台定时器
-                args.Add("--disable-features=CalculateNativeWinOcclusion");  // 禁用窗口遮挡计算
-            }
-
-            // 合并所有 enable-features
-            if (enableFeatures.Count > 0)
-            {
-                args.Add($"--enable-features={string.Join(",", enableFeatures)}");
-            }
-
-            return string.Join(" ", args);
         }
 
         private void ApplyMemoryModeSettings()

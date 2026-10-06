@@ -155,11 +155,12 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
 
             try
             {
-                CoreWebView2Environment environment =
-                    await CoreWebView2Environment.CreateWithOptionsAsync(
-                        browserExecutableFolder: null,
-                        userDataFolder: null,
-                        options: null);
+                // ⭐ 复用全应用共享的那一份 environment，不再 CreateWithOptionsAsync 自建。
+                //    原先这里传的是 options: null，而默认 UDF 上早已有一份带 options 的环境在跑 ——
+                //    官方文档（ICoreWebView2Environment）写明：同一 UDF 上 EnvironmentOptions
+                //    不同 ⇒ CreateCoreWebView2Controller 直接 HRESULT_FROM_WIN32(ERROR_INVALID_STATE)。
+                //    也就是说这个按钮在「网页开过」之后按下去必失败，现在一并解决。
+                CoreWebView2Environment environment = await SharedWebViewEnvironment.GetAsync();
 
                 await CookieTempWebView.EnsureCoreWebView2Async(environment);
 
