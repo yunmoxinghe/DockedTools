@@ -154,6 +154,12 @@ namespace DockedTools
         /// </summary>
         public App()
         {
+            // ⭐ 把日志挂到 Windows 错误报告上，越早越好。
+            //    放这里是刻意的：崩溃也可能发生在启动阶段（本轮实测那次 0xc0000409
+            //    就卡在这下面几行的 LaunchArguments 上）—— 晚注册等于漏掉这一类。
+            //    详见 CrashReportAttachment 的类注释。
+            Features.AppEntry.CrashReportAttachment.Attach();
+
             // ⭐ 检查是否是重启请求（必须在单实例检测之前）
             // 合并了命令行 + 激活载荷两条来源：走包唤起时参数不一定在 args[1]。
             bool isRestart = Features.AppEntry.LaunchArguments.Contains("--restart");
@@ -287,7 +293,14 @@ namespace DockedTools
                 DockedTools.Features.Pages.WebApp.Browser.Services.WebNotificationBridge.EnsurePlatformRegistered();
 
                 // Check for ShareTarget activation
-                var activationArgs = AppInstance.GetCurrent().GetActivatedEventArgs();
+                //
+                // ⭐ 必须走 LaunchArguments.Activation 这一份缓存，不能再各自调
+                //    AppInstance.GetCurrent().GetActivatedEventArgs()：
+                //    官方文档明说打包应用下该 API「只有首次调用会返回参数」，
+                //    而首次调用发生在 App 构造函数（LaunchArguments 里）。
+                //    这里再调一次拿到的会是 null —— ShareTarget / AppNotification
+                //    两个分支会永远判不出来。
+                var activationArgs = Features.AppEntry.LaunchArguments.Activation;
                 System.Diagnostics.Debug.WriteLine($"[App] Activation kind: {activationArgs?.Kind}");
 
                 // ShareTarget activation should always proceed
@@ -753,12 +766,29 @@ namespace DockedTools
                     $"Application.Exit() 已完成优雅收尾（WinUI 3 不负责退进程），" +
                     $"等待 {ForcedExitGraceMs}ms 后由 Environment.Exit(0) 收尾（当前线程数={threadCount}）");
 
-                // Environment.Exit 也可能被 finalizer 拖住，再挂一道 Kill 保险。
+                // Environment.Exit 也可能被 finalizer 拖住，再挂一道硬终止保险。
                 // 这个线程是后台线程，不会阻止进程退出；只有进程真的赖着不走时才起作用。
+                //
+                // ⚠️ 原来是 Process.GetCurrentProcess().Kill() + catch {}，实测就是它失效的：
+                //    走到这里时进程已进入 .NET 退出流程，Kill() 会以「进程正在退出」抛异常，
+                //    异常被空的 catch 静默吞掉，进程永久挂着 —— 单实例 Mutex 也跟着不放，
+                //    下一次启动 / 唤起全部失败。
+                //    现在换成 TerminateProcess（内核直接终止，不看 .NET 的任何状态），
+                //    并且失败要留痕，不能再无声无息。
                 var killGuard = new System.Threading.Thread(() =>
                 {
                     System.Threading.Thread.Sleep(KillGuardDelayMs);
-                    try { System.Diagnostics.Process.GetCurrentProcess().Kill(); } catch { }
+
+                    LogService.Warning(
+                        "应用入口",
+                        $"退出已超过 {KillGuardDelayMs}ms 仍未完成，执行进程硬终止（Environment.Exit 被 finalizer 拖住）");
+
+                    if (!Features.AppEntry.AppEntryWin32Api.HardKillSelf(0))
+                    {
+                        LogService.Error(
+                            "应用入口",
+                            "TerminateProcess 失败，进程可能残留；请手动结束 DockedTools.exe");
+                    }
                 })
                 { IsBackground = true, Name = "AppExitGuard" };
                 killGuard.Start();
@@ -778,6 +808,10 @@ namespace DockedTools
         /// </summary>
         private void ShutdownUiResources()
         {
+            // 摘掉 WER 上的日志附件：进程进入退出流程后，剩下的这些清理步骤
+            // 无论成功失败都不需要再被回传了。
+            Features.AppEntry.CrashReportAttachment.Detach();
+
             // 先关闭主窗口
             var window = _window;
             _window = null;

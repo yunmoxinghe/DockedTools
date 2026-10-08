@@ -69,6 +69,8 @@ namespace DockedTools.Features.Pages.Home
             // ⭐ 图标在运行中被更新（favicon 抓到高清图 / 站点换图标）时也要跟着换，
             //    以前只有导航栏订阅它，主页得等到下次返回才看得到新图标。
             WebAppUpdateService.UpdateCompleted += OnWebAppUpdated;
+
+            ActualThemeChanged += OnActualThemeChanged;
         }
 
         private void UnsubscribeEvents()
@@ -85,6 +87,8 @@ namespace DockedTools.Features.Pages.Home
             WebAppEventBus.ShortcutCreated -= OnShortcutCreated;
             WebAppEventBus.ShortcutsRefreshRequested -= OnShortcutsRefreshRequested;
             WebAppUpdateService.UpdateCompleted -= OnWebAppUpdated;
+
+            ActualThemeChanged -= OnActualThemeChanged;
         }
 
         protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
@@ -152,10 +156,13 @@ namespace DockedTools.Features.Pages.Home
                     // 落盘一份（顶栏 / 侧边栏也按路径取图），卡片自己走内存解码
                     if (bytes is not null)
                     {
-                        await WebAppIconCache.SaveAsync(updated.Id, bytes);
+                        await WebAppIconCache.SaveAsync(updated.Id, bytes, ActualTheme);
                     }
 
-                    ApplyCardIcon(card, await WebAppIconCache.DecodeAsync(bytes));
+                    // ⭐ 读【本页主题那一版】，别直接解码 IconBytes ——
+                    //    那份是没染过色的原始字节，深色主题下会是黑图标。
+                    ApplyCardIcon(card, await WebAppIconCache.DecodeAsync(
+                        WebAppIconCache.TryReadCachedBytes(updated.Id, ActualTheme) ?? bytes));
                     return;
                 }
             }
@@ -251,9 +258,12 @@ namespace DockedTools.Features.Pages.Home
             //    整列出现那一刻，所有图标已经在内存里了。
             var decoding = new Task<Microsoft.UI.Xaml.Media.ImageSource?>[shortcuts.Count];
 
+            // 主题按本页实际生效的取（不是顶栏那份）—— 见 DecodeIconAsync 的说明
+            Microsoft.UI.Xaml.ElementTheme theme = ActualTheme;
+
             for (int i = 0; i < shortcuts.Count; i++)
             {
-                decoding[i] = DecodeIconAsync(shortcuts[i]);
+                decoding[i] = DecodeIconAsync(shortcuts[i], theme);
             }
 
             Microsoft.UI.Xaml.Media.ImageSource?[] icons = await Task.WhenAll(decoding);
@@ -289,19 +299,38 @@ namespace DockedTools.Features.Pages.Home
             System.Diagnostics.Debug.WriteLine($"[HomeIcon] +{_iconProbe.ElapsedMilliseconds}ms 整列 Add 完");
 
             BackfillMissingIcons(shortcuts);
-            _ = UpgradeCardIconsAsync(shortcuts);
+            _ = UpgradeCardIconsAsync(shortcuts, theme);
+        }
+
+        /// <summary>
+        /// 主题变了要整列重建图标：图标是【落盘时按主题染好色】的，
+        /// 主题一换，取的就该是另一个 ThemeTag 那份 —— 常驻的主页不会自己再去取一次，
+        /// 不主动刷新的话卡片就停在旧主题的颜色上（深色底下是黑图标，等于看不见）。
+        /// 导航栏那边也有同样一条（见 NavigationBar.OnActualThemeChanged）。
+        /// </summary>
+        private void OnActualThemeChanged(FrameworkElement sender, object args)
+        {
+            AsyncSafety.TryEnqueue(
+                DispatcherQueue,
+                async () => await LoadWebAppsAsync(),
+                "HomePage",
+                "ThemeChanged");
         }
 
         /// <summary>
         /// 后台把【卡片档】补出来 —— 主页卡片单独用的那一套大图。
         ///
-        /// 串行是刻意的：矢量那条路要过渲染内核（进程内单例，本来也会排成一路），
-        /// 位图那条路是 WIC 编解码，25 个一起上会把首屏 CPU 抢光。
+        /// 串行是刻意的：矢量那条路要过渲染内核（进程内单例，本来也会排成一路）。
+        ///
+        /// ⭐ 只对【矢量源】生成卡片档。位图源一律返回 null（见 WebAppIconCache.EnsureCardAsync），
+        ///    卡片继续用通用档 —— 位图那套源最大才 32×32，生成一份同尺寸的卡片档
+        ///    既没变清楚、又白占一份磁盘。
         ///
         /// 卡片档到位后换上去只是「变清楚」，不是「从无到有」——
         /// 列表早就用通用档完整显示着了，这里不会重现「某张最后蹦出来」。
         /// </summary>
-        private async Task UpgradeCardIconsAsync(IReadOnlyList<WebAppShortcut> shortcuts)
+        private async Task UpgradeCardIconsAsync(
+            IReadOnlyList<WebAppShortcut> shortcuts, Microsoft.UI.Xaml.ElementTheme theme)
         {
             foreach (WebAppShortcut shortcut in shortcuts)
             {
@@ -312,25 +341,35 @@ namespace DockedTools.Features.Pages.Home
 
                 string appId = shortcut.Id;
 
-                if (WebAppIconCache.TryGetCardPath(appId) is not null)
-                {
-                    continue;
-                }
+                string? before = WebAppIconCache.TryGetCardPath(appId, theme);
 
-                string? path = await WebAppIconCache.EnsureCardAsync(appId, iconBytes);
-                if (path is null)
+                // 顺带做两件事：矢量源 ⇒ 画一张 48px 的卡片档；位图源 ⇒ 返回 null，
+                // 并把位图时代留下的旧卡片档清掉（见 WebAppIconCache.EnsureCardAsync）。
+                _ = await WebAppIconCache.EnsureCardAsync(appId, iconBytes, theme);
+
+                string? after = WebAppIconCache.TryGetCardPath(appId, theme);
+
+                // 只有卡片档「从无到有」或「从有到无」时才需要换图：
+                //   前者 = 矢量源刚画好，换上去变清楚；
+                //   后者 = 旧档被作废，界面上挂的那张已经没了，必须换回通用档。
+                // 两边都没变说明卡片上挂的已经是对的，不动它（省一次解码 + 一次重挂）。
+                if (string.Equals(before, after, StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
 
                 Microsoft.UI.Xaml.Media.ImageSource? source =
-                    await WebAppIconCache.DecodeAsync(WebAppIconCache.TryReadCardBytes(appId));
+                    await WebAppIconCache.DecodeAsync(
+                        after is not null
+                            ? WebAppIconCache.TryReadCardBytes(appId, theme)
+                            : WebAppIconCache.TryReadCachedBytes(appId, theme));
                 if (source is null)
                 {
                     continue;
                 }
 
-                System.Diagnostics.Debug.WriteLine($"[HomeIcon] 卡片档就绪 {shortcut.Name}");
+                System.Diagnostics.Debug.WriteLine(
+                    $"[HomeIcon] 卡片档{(after is not null ? "就绪" : "已作废，退回通用档")} {shortcut.Name}");
 
                 DispatcherQueue.TryEnqueue(() =>
                 {
@@ -433,7 +472,7 @@ namespace DockedTools.Features.Pages.Home
             }
 
             // 落盘一份（顶栏 / 侧边栏也按路径取图）
-            WebAppIconCache.Save(appId, bytes);
+            WebAppIconCache.Save(appId, bytes, ActualTheme);
 
             // 字节写回快捷方式，下次进主页不用再抓
             await WebAppShortcutStore.UpdateAsync(items =>
@@ -483,19 +522,27 @@ namespace DockedTools.Features.Pages.Home
         /// 取一个应用的图标源：优先磁盘缓存，没有就用快捷方式自带的字节（顺手补写一份缓存）。
         /// 全程不碰渲染内核 —— 主页出列表不该被光栅化拖住。
         /// </summary>
-        private static async Task<Microsoft.UI.Xaml.Media.ImageSource?> DecodeIconAsync(WebAppShortcut shortcut)
+        private static async Task<Microsoft.UI.Xaml.Media.ImageSource?> DecodeIconAsync(
+            WebAppShortcut shortcut, Microsoft.UI.Xaml.ElementTheme theme)
         {
+            // ⭐ 按【本页自己的主题】取那一版，而不是顶栏主题：
+            //    图标是落盘时按主题染好色的，取的那份跟显示它的容器对不上，
+            //    深色容器里就是白图标、浅色容器里就是黑图标 —— 两端都是「看不见」。
+            //
             // ⭐ 卡片档优先：主页 SettingsCard 的图标位被 Viewbox 卡在 20×20，
             //    高 DPI 下得用更大那套才不发虚（尺寸依据见 WebAppIconCache.CardIconSize）。
             //    顶栏 / 侧边栏那套是给 16~20px 用的，拿过来放大就是「糊」。
-            byte[]? bytes = WebAppIconCache.TryReadCardBytes(shortcut.Id)
-                            ?? WebAppIconCache.TryReadCachedBytes(shortcut.Id);
+            byte[]? bytes = WebAppIconCache.TryReadCardBytes(shortcut.Id, theme)
+                            ?? WebAppIconCache.TryReadCachedBytes(shortcut.Id, theme);
 
             if (bytes is null && shortcut.IconBytes is { Length: > 0 } iconBytes)
             {
                 // 缓存缺失才落一次盘（同步、纯磁盘写，毫秒级），别处（顶栏 / 侧边栏）也要用
-                WebAppIconCache.Save(shortcut.Id, iconBytes);
-                bytes = iconBytes;
+                WebAppIconCache.Save(shortcut.Id, iconBytes, theme);
+
+                // ⭐ 落盘那一步会把单色图标按主题染色，所以这里要读【染过色的那一版】，
+                //    而不是直接用 IconBytes —— 那份是原色，深色主题下会是黑图标。
+                bytes = WebAppIconCache.TryReadCachedBytes(shortcut.Id, theme) ?? iconBytes;
             }
 
             return await WebAppIconCache.DecodeAsync(bytes);

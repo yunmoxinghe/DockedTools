@@ -152,16 +152,37 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 //    顶栏图标就那么空着（临时目录里曾经攒下过 9 个 .svg，全是这么来的）。
                 //    先让专用渲染内核画成 PNG：既补上了位图，也顺带把 SVG 里的
                 //    @media (prefers-color-scheme) 按当前主题求了值。
+                //
+                //    尺寸用 CompactIconSize（48）而不是 DefaultRasterSize（256）：
+                //    顶栏那一格只有 16×16，256 的图要靠 GPU 缩 16 倍才塞得进去，
+                //    细节互相挤掉之后就是「发虚」。48 在 300% DPI 下刚好 1:1。
                 if (WebAppIconCache.IsSvgContent(iconBytes))
                 {
                     byte[]? png = await WebAppIconRasterizer.Instance.RasterizeSvgAsync(
                         iconBytes,
-                        WebAppIconRasterizer.DefaultRasterSize,
+                        WebAppIconCache.CompactIconSize,
                         TopAppBarService.GetActualTheme() == ElementTheme.Dark);
 
                     if (png is { Length: > 0 })
                     {
                         iconBytes = png;
+                    }
+                }
+                else
+                {
+                    // ⭐ 位图也要归一化到 48px 的 PNG，两个理由（实测临时目录 128 份图标）：
+                    //   ① ICO 里常常把 16×16 排在第一帧，而 BitmapImage 解 ICO 认的就是第一帧 ——
+                    //      不归一化的话顶栏拿到的永远是最小的那一帧，后面 32/48/256 的帧全白扔，
+                    //      高 DPI 下把 16px 放大到 32/48 物理像素就是「发虚」；
+                    //   ② 另一头站点给的图能大到 1080×1080（实测有一份 212 KB 的），
+                    //      解码一张是 4.6 MB 常驻内存，画出来却只有 16×16。
+                    //      归一化后由 WIC 用 Fant 高质量缩放先压一遍，既省内存也更锐。
+                    byte[]? normalized = await WebAppIconCache.NormalizeBitmapAsync(
+                        iconBytes, WebAppIconCache.CompactIconSize);
+
+                    if (normalized is { Length: > 0 })
+                    {
+                        iconBytes = normalized;
                     }
                 }
 

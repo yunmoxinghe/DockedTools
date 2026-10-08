@@ -408,6 +408,11 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
     // 星形右侧被切出直边）。FontIcon 的自然尺寸就是字号，16 正好落进 16×16 的格子里。
     private const double TitleIconFontSize = 16;
 
+    // 标题图标位图解码的目标边长（物理像素）。
+    // 16 dip 的格子在 300% DPI 下要 48 物理像素才不失真 —— 取 48 一路顶满；
+    // 再往上只是白烧内存（解码内存按边长平方涨）。只设宽、不设高，见 CreateCenterImageSource。
+    private const int TitleIconDecodeSize = 48;
+
     // 标题图标的三种互斥形态（无 / 字形 / 位图）。
     // IconData 是判别联合，渲染层先用 ResolveCenterIcon 把它压成这个纯数据三态，
     // 之后【只】按 Kind 切可见性、按 Glyph / Source 改属性 —— 不再按 IconData 现场
@@ -468,7 +473,15 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
             return new SvgImageSource(uri);
         }
 
-        return new BitmapImage(uri);
+        // ⭐ 必须给解码尺寸：源可能大到 512 / 1080（实测临时目录里就有 1080×1080 的），
+        //    而顶栏这一格只有 16×16。不设的话 WIC 按原始尺寸整张展开 ——
+        //    1080×1080 是 4.6 MB 常驻内存，只为画一个 16px 的小图；
+        //    设了就由 WIC 在解码时先做高质量缩放，内存和锐度两头都赚。
+        //
+        //    只给 DecodePixelWidth、不给 Height：只给一个时 XAML 会【按原比例】算另一个，
+        //    两个都给则强制拉成方框，非正方形的图标会被压变形。
+        //    源比目标小时不会硬拉（放大只会更糊），自动落到原始尺寸。
+        return new BitmapImage(uri) { DecodePixelWidth = TitleIconDecodeSize };
     }
 
     private static CenterIconPlan ResolveCenterIcon(IconData? data) => data switch
@@ -1002,6 +1015,7 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
         var titleSwapSb = UseRef<Microsoft.UI.Xaml.Media.Animation.Storyboard?>(null);
         // 换字兜底定时器（必须 ref 强引用，否则 GC 回收后 Tick 不到达）
         var swapFallbackTimer = UseRef<DispatcherQueueTimer?>(null);
+
         // 显式走 Func<Action> 重载（带 cleanup）；标题未变时返回空清理
         UseEffect(() => TitleSwapEffect(p.CenterText, p.CenterIcon, displayedTitle, displayedIcon, titleInBar),
             p.CenterText, p.CenterIcon);
@@ -2613,12 +2627,15 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
             Action Reveal()
             {
                 setPresenceShown(show);
-                return TitlePresenceAnimation(target, from, to);
+                // 隐藏方向必须 【HoldEnd】。
+                // 原因：动画用的是 FillBehavior.Stop，播完会【回落到本地值】，而本地值只能由
+                // setPresenceShown 触发的下一次渲染写入。切页那一轮主线程忙起来，那次渲染实测
+                // 能晚 250ms 才到 —— 期间本地值还停在 1，动画一停整块标题就弹回屏幕上，
+                // 且此时画着的还是上一次提交的旧标题（网页页那份）。表现就是「先隐藏了、
+                // 又出现一下」。隐藏后目标值恒为 0，让动画自己把终值钉住最稳。
+                return TitlePresenceAnimation(target, from, to, holdEnd: !show);
             }
 
-            // 淡入（由隐藏转显示）必须等文本就绪、且标题几何已稳定：
-            // 否则整块标题会在内容还没测量完成/位置还没收敛时就开始淡入，
-            // 看到的是"先淡入一个空壳、内容随后跳出来"，位置还会跟着抖。
             // 隐藏方向无需等待，立即淡出。
             if (show)
             {
@@ -2632,7 +2649,8 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
         }
 
         // ShowCenter 显隐动画本体：从【当前有效值】动画到目标值（Storyboard + FillBehavior=Stop）
-        Action TitlePresenceAnimation(Microsoft.UI.Xaml.UIElement target, double from, double to)
+        Action TitlePresenceAnimation(
+            Microsoft.UI.Xaml.UIElement target, double from, double to, bool holdEnd = false)
         {
             titlePresenceSb.Current?.Stop();
             var anim = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation
@@ -2641,7 +2659,9 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
                 To = to,
                 Duration = TimeSpan.FromMilliseconds(TitleSwapMs),
                 EnableDependentAnimation = true,
-                FillBehavior = Microsoft.UI.Xaml.Media.Animation.FillBehavior.Stop,
+                FillBehavior = holdEnd
+                    ? Microsoft.UI.Xaml.Media.Animation.FillBehavior.HoldEnd
+                    : Microsoft.UI.Xaml.Media.Animation.FillBehavior.Stop,
             };
             Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(anim, target);
             Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(anim, "Opacity");
@@ -2650,7 +2670,16 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
             titlePresenceSb.Current = sb;
             sb.Completed += (_, _) =>
             {
-                if (titlePresenceSb.Current == sb)
+                if (titlePresenceSb.Current != sb)
+                {
+                    return;
+                }
+                // 动画撒手前把终值写进本地值：无论接下来是 Stop 回落还是被下一段动画接管，
+                // 基准都是这一次的目标值，不会把上一轮陈旧的 1 露出来。
+                target.Opacity = to;
+                // HoldEnd 的这一段【不能】丢引用：它播完仍在压着终值，必须留给下一次显隐
+                // （本函数开头那句 Stop）去摘掉 —— 否则旧的 0 会盖住新的淡入。
+                if (!holdEnd)
                 {
                     titlePresenceSb.Current = null;
                 }

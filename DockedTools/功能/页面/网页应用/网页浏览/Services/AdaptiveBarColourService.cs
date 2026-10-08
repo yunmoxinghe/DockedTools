@@ -11,11 +11,21 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
     /// </summary>
     public sealed class AdaptiveBarColourOptions
     {
-        /// <summary>亮色方案兜底色</summary>
-        public Windows.UI.Color FallbackLight { get; set; } = FromCss("#ffffff");
+        /// <summary>
+        /// 亮色方案兜底色。
+        /// 取 WinUI 3 的 <c>ApplicationPageBackgroundThemeBrush</c>（= <c>SolidBackgroundFillColorBase</c>
+        /// 在 Light 字典里的值 <c>#F3F3F3</c>，见 WindowsAppSDK 2.5.1 的 Microsoft.WinUI/Themes/generic.xaml），
+        /// 而不是 ATBC 上游的 <c>#ffffff</c>：这条兜底色最终要刷在 WinUI 控件上，用浏览器那套白
+        /// 会跟周围的应用背景对不上。与页面复位时读的是同一个主题资源，因此"取不到色"和
+        /// "没开自适应"两种状态在视觉上完全一致。
+        /// </summary>
+        public Windows.UI.Color FallbackLight { get; set; } = FromCss("#f3f3f3");
 
-        /// <summary>暗色方案兜底色</summary>
-        public Windows.UI.Color FallbackDark { get; set; } = FromCss("#2b2a33");
+        /// <summary>
+        /// 暗色方案兜底色。同 Light 的口径，取 <c>SolidBackgroundFillColorBase</c> 在 Dark 字典里的
+        /// <c>#202020</c>。ATBC 上游那版 <c>#2b2a33</c> 是 Firefox 的暗色底（偏紫），落在 WinUI 里很扎眼。
+        /// </summary>
+        public Windows.UI.Color FallbackDark { get; set; } = FromCss("#202020");
 
         /// <summary>亮色方案最小对比度 ×10（ATBC 默认 90，即 9.0）</summary>
         public double MinContrastLightX10 { get; set; } = 90d;

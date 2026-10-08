@@ -63,7 +63,10 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         /// 内容没变时只返回已有路径、不重写盘；同时清理同一个 appId 的旧哈希文件
         /// （否则扩展名/内容一变就留一份垃圾，备份时整个目录一起打包）。
         /// </summary>
-        public static string? Save(string appId, byte[]? bytes)
+        public static string? Save(string appId, byte[]? bytes) => Save(appId, bytes, null);
+
+        /// <summary>按指定主题落盘；不指定就跟顶栏那份一致</summary>
+        public static string? Save(string appId, byte[]? bytes, ElementTheme? theme)
         {
             if (bytes is not { Length: > 0 } || string.IsNullOrEmpty(appId))
             {
@@ -75,13 +78,13 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                 string directory = CacheDirectory;
                 Directory.CreateDirectory(directory);
 
-                // ⭐ 单色图标按当前主题上色后再落盘：
+                // ⭐ 单色图标按主题上色后再落盘：
                 //    内容变了 ⇒ 内容哈希变了 ⇒ 文件名变了 ⇒ ImageIcon 拿到新 Uri 重新解码。
                 //    「切主题图标跟着变」就是这条链路撑起来的 ——
                 //    既不用改持久化的数据（IconBytes 存的是原样），也不用两份文件互相打架。
-                bytes = ApplyMonochromeTheme(bytes);
+                bytes = ApplyMonochromeTheme(bytes, theme);
 
-                string path = Path.Combine(directory, BuildFileName(appId, bytes));
+                string path = Path.Combine(directory, BuildFileName(appId, bytes, theme));
 
                 // 路径没变 + 文件还在 ⇒ 内容和上次一样，连目录枚举都省了
                 lock (KnownPathsLock)
@@ -99,7 +102,12 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                     File.WriteAllBytes(path, bytes);
                 }
 
-                DeleteStaleFiles(appId, path);
+                // 清旧文件。删掉了东西 ⇒ 文件名里的哈希段变了 ⇒ 图标内容换过，
+                // 之前那张卡片档是按旧图画的，作废掉让它下次重新生成（见 DeleteCardFiles）。
+                if (DeleteStaleFiles(appId, path))
+                {
+                    DeleteCardFiles(appId, ResolveTheme(theme));
+                }
 
                 lock (KnownPathsLock)
                 {
@@ -116,7 +124,23 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         }
 
         /// <summary>取某个应用当前缓存里的图标路径；没有就返回 null</summary>
-        public static string? TryGetCachedPath(string appId)
+        public static string? TryGetCachedPath(string appId) => TryGetCachedPath(appId, null);
+
+        /// <summary>
+        /// 取某个应用【指定主题那一版】的通用档路径。
+        ///
+        /// 为什么必须能指定主题：同一个图标会同时在好几个容器里出现 ——
+        /// 侧边栏、主页卡片、顶栏 —— 而它们各自的实际主题未必一样
+        /// （顶栏是<b>页面级</b>的 <c>TopBarPageScope.ThemeMode</c>，侧边栏跟的是元素自己的
+        /// <c>ActualTheme</c>）。染色是按「落盘那一刻的主题」写进文件里的，
+        /// 所以取的时候也得按「显示它的那个容器的主题」取，两边才对得上。
+        /// 以前一律按顶栏主题取，于是顶栏设深色时侧边栏拿到白图标 —— 浅底白图，直接隐形。
+        ///
+        /// 指定主题那份还没生成时<b>退回任意最新的一份</b>，而不是返回 null：
+        /// 位图图标两个主题的内容本来就是同一份（<see cref="ApplyMonochromeTheme"/> 改不动位图），
+        /// 硬要按主题取只会把它变成"没有图标"，掉地球比颜色差得多。
+        /// </summary>
+        public static string? TryGetCachedPath(string appId, ElementTheme? theme)
         {
             if (string.IsNullOrEmpty(appId))
             {
@@ -131,19 +155,40 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                     return null;
                 }
 
+                // 旁路存的 SVG 原件不是「当前图标」，别把它当成缓存命中；
+                // 卡片档是另一套尺寸，也别被通用档当成「当前图标」取走
+                static bool IsGeneral(FileInfo f) =>
+                    !f.Name.EndsWith(SourceSuffix, StringComparison.OrdinalIgnoreCase) &&
+                    !f.Name.Contains(CardSegment, StringComparison.OrdinalIgnoreCase);
+
+                var candidates = new DirectoryInfo(directory)
+                    .EnumerateFiles(SanitizeId(appId) + "-*")
+                    .Where(IsGeneral);
+
                 // 正常情况只该有一份（Save 会清掉同 appId 的其它哈希文件）。
                 // 万一真撞上多份，按最后写入时间取最新的 —— 按文件名排序取到的是
                 // 哈希字典序最大的那份，跟"哪个是当前的"没有任何关系。
-                var newest = new DirectoryInfo(directory)
-                    .EnumerateFiles(SanitizeId(appId) + "-*")
-                    // 旁路存的 SVG 原件不是「当前图标」，别把它当成缓存命中
-                    .Where(f => !f.Name.EndsWith(SourceSuffix, StringComparison.OrdinalIgnoreCase))
-                    // 卡片档是另一套尺寸，别被通用档当成「当前图标」取走
-                    .Where(f => !f.Name.Contains(CardSegment, StringComparison.OrdinalIgnoreCase))
+                var newest = candidates.OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault();
+                if (newest is null)
+                {
+                    return null;
+                }
+
+                if (theme is not ElementTheme.Dark and not ElementTheme.Light)
+                {
+                    return newest.FullName;
+                }
+
+                string tag = ThemeTagFor(theme.Value);
+
+                // ⚠️ 主题标记那段后面还可能接着 "-card-"，只认主题段会误收卡片档 ——
+                //    这里比的是 "id-{d|l}-" 这个前缀，卡片档已经被上面的 IsGeneral 排掉了
+                var themed = candidates
+                    .Where(f => f.Name.StartsWith(SanitizeId(appId) + "-" + tag + "-", StringComparison.OrdinalIgnoreCase))
                     .OrderByDescending(f => f.LastWriteTimeUtc)
                     .FirstOrDefault();
 
-                return newest?.FullName;
+                return (themed ?? newest).FullName;
             }
             catch (Exception ex)
             {
@@ -153,9 +198,12 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         }
 
         /// <summary>把某个应用当前的图标缓存文件整个读进内存；没有缓存就返回 null</summary>
-        public static byte[]? TryReadCachedBytes(string appId)
+        public static byte[]? TryReadCachedBytes(string appId) => TryReadCachedBytes(appId, null);
+
+        /// <summary>读【指定主题那一版】通用档的字节；没有就返回 null</summary>
+        public static byte[]? TryReadCachedBytes(string appId, ElementTheme? theme)
         {
-            string? path = TryGetCachedPath(appId);
+            string? path = TryGetCachedPath(appId, theme);
             if (path is null)
             {
                 return null;
@@ -173,9 +221,12 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         }
 
         /// <summary>把卡片档文件整个读进内存；没有就返回 null</summary>
-        public static byte[]? TryReadCardBytes(string appId)
+        public static byte[]? TryReadCardBytes(string appId) => TryReadCardBytes(appId, null);
+
+        /// <summary>读【指定主题那一版】卡片档的字节；没有就返回 null</summary>
+        public static byte[]? TryReadCardBytes(string appId, ElementTheme? theme)
         {
-            string? path = TryGetCardPath(appId);
+            string? path = TryGetCardPath(appId, theme);
             if (path is null)
             {
                 return null;
@@ -264,8 +315,29 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         /// <summary>卡片档文件名里的标记段，用来跟通用档区分开（两边互不干扰）</summary>
         private const string CardSegment = "-card-";
 
+        /// <summary>
+        /// 「显示格只有 16~20px」的容器（顶栏标题 / 侧边栏）拿位图源时归一到的边长。
+        ///
+        /// 定的依据跟 <see cref="CardIconSize"/> 是同一条：16 dip 的格子在 200% DPI 下
+        /// 要 32 物理像素、300% 下要 48 —— 48 能一路顶到 300% 都不失真，
+        /// 而再往上纯属浪费（解码内存按边长平方涨）。两边取同一个值还顺带让
+        /// 渲染内核的缓存（按「SVG + 尺寸 + 主题」做键）只留一份。
+        /// </summary>
+        public const int CompactIconSize = 48;
+
         /// <summary>取某个应用【当前主题】的卡片档图标路径；没有就返回 null</summary>
-        public static string? TryGetCardPath(string appId)
+        public static string? TryGetCardPath(string appId) => TryGetCardPath(appId, null);
+
+        /// <summary>
+        /// 取某个应用【指定主题那一版】的卡片档路径。
+        /// 跟 <see cref="TryGetCachedPath(string, System.Nullable{Microsoft.UI.Xaml.ElementTheme})"/>
+        /// 同理：按显示它的容器的主题取，而不是一律按顶栏主题。
+        ///
+        /// 指定主题那份还没生成时退回另一主题那份（卡片档不会被
+        /// <see cref="DeleteStaleFiles"/> 清掉，两个主题的版本通常都还在），
+        /// 位图卡片档两个主题的内容本来就一样，退回去不会错。
+        /// </summary>
+        public static string? TryGetCardPath(string appId, ElementTheme? theme)
         {
             if (string.IsNullOrEmpty(appId))
             {
@@ -280,8 +352,23 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                     return null;
                 }
 
+                string id = SanitizeId(appId);
+
+                if (theme is ElementTheme.Dark or ElementTheme.Light)
+                {
+                    string? themed = Directory
+                        .EnumerateFiles(directory, id + "-" + ThemeTagFor(theme.Value) + CardSegment + "*")
+                        .FirstOrDefault();
+
+                    if (themed is not null)
+                    {
+                        return themed;
+                    }
+                }
+
+                // 卡片档是 "{id}-{主题}-card-{hash}.png"，通配中间那段就把两版都收进来
                 return Directory
-                    .EnumerateFiles(directory, SanitizeId(appId) + "-" + ThemeTag + CardSegment + "*")
+                    .EnumerateFiles(directory, id + "-*-" + CardSegment.Trim('-') + "*")
                     .FirstOrDefault();
             }
             catch (Exception ex)
@@ -295,7 +382,10 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         /// 把一张已经处理好的位图存成卡片档。
         /// 跟通用档完全分开：通用档那边换图 / 清旧文件都不会动到它，反之亦然。
         /// </summary>
-        public static string? SaveCard(string appId, byte[]? bytes)
+        public static string? SaveCard(string appId, byte[]? bytes) => SaveCard(appId, bytes, null);
+
+        /// <summary>按指定主题存卡片档；不指定就跟顶栏那份一致</summary>
+        public static string? SaveCard(string appId, byte[]? bytes, ElementTheme? theme)
         {
             if (bytes is not { Length: > 0 } || string.IsNullOrEmpty(appId))
             {
@@ -307,9 +397,11 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                 string directory = CacheDirectory;
                 Directory.CreateDirectory(directory);
 
+                string tag = ThemeTagFor(ResolveTheme(theme));
+
                 string path = Path.Combine(
                     directory,
-                    SanitizeId(appId) + "-" + ThemeTag + CardSegment + ComputeContentHash(bytes) + ".png");
+                    SanitizeId(appId) + "-" + tag + CardSegment + ComputeContentHash(bytes) + ".png");
 
                 if (!File.Exists(path))
                 {
@@ -328,56 +420,139 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         /// <summary>
         /// 备出这个应用的卡片档图标；已经有了就直接返回，没有才真的去做一张。
         ///
-        /// 两条取材路线：
-        ///   ① 存着 SVG 原件 ⇒ 它是矢量，按当前主题光栅化到 <see cref="CardIconSize"/>，
-        ///      比任何位图都清楚（Copilot / DeepSeek 这类 SVG 站点走这条）；
-        ///   ② 只有位图 ⇒ 拿最大那一帧缩到卡片尺寸。
-        ///      必须挑最大帧：ICO 里常常把 16×16 排在第一帧，而 <c>BitmapImage</c> 解码 ICO
-        ///      认的就是第一帧 —— Google 翻译 / 文心一言 那两张糊图就是这么来的。
+        /// ⭐ 只认【矢量源】，位图源一律不生成卡片档（返回 null，调用方退回通用档）。
+        ///    原因（实测 web-icons 目录）：位图那条路是「只缩不拉」，而站点给的 favicon
+        ///    最大帧普遍只有 16×16 / 32×32 —— 14 个卡片档里 13 个跟通用档尺寸一字不差，
+        ///    CardIconSize 定的 48 一个像素都没兑现，只是每个应用多占一份磁盘。
+        ///    更糟的是副作用：SVG 站点在通用档里是矢量（侧边栏 <c>SvgImageSource</c> 矢量渲染），
+        ///    主页却优先用卡片档那张 32×32 PNG —— 主页反而比侧边栏糊。
+        ///    现在卡片档只服务「矢量 → 48px 高清位图」这一件事，位图源直接复用通用档。
         ///
-        /// ⚠️ 只在后台调用：路线 ① 要等渲染内核（冷启动 ~1.4s），路线 ② 是纯 WIC 解码。
+        /// ⚠️ 只在后台调用：要等渲染内核（冷启动 ~1.4s）。
         /// </summary>
-        public static async Task<string?> EnsureCardAsync(string appId, byte[]? fallbackBytes)
+        public static async Task<string?> EnsureCardAsync(string appId, byte[]? fallbackBytes) =>
+            await EnsureCardAsync(appId, fallbackBytes, null);
+
+        /// <summary>按指定主题备出卡片档；不指定就跟顶栏那份一致</summary>
+        public static async Task<string?> EnsureCardAsync(
+            string appId, byte[]? fallbackBytes, ElementTheme? theme)
         {
-            string? existing = TryGetCardPath(appId);
+            // 矢量原件优先。旁路那份没存也不要紧 ——
+            // 很多站点（Copilot / DeepSeek）快捷方式里带的就是 SVG 原件本身
+            byte[]? svg = TryGetIconSource(appId) ?? (IsSvgContent(fallbackBytes) ? fallbackBytes : null);
+
+            if (svg is not { Length: > 0 })
+            {
+                // ⭐ 位图源：不但不生成，还要把【位图时代留下的旧卡片档】一并清掉。
+                //    那些档是老规则「位图也生成一份」时落的，尺寸跟通用档一字不差，
+                //    纯占磁盘；而主页是「卡片档优先」，不删的话它会一直压着通用档。
+                //    这里做一次性自愈 —— 有档才产生一次目录枚举，没档就是空转。
+                DeleteCardFiles(appId);
+                return null;
+            }
+
+            string? existing = TryGetCardPath(appId, theme);
             if (existing is not null)
             {
                 return existing;
             }
 
-            byte[]? card = null;
+            byte[]? card;
 
-            // ① 矢量原件优先。旁路那份没存也不要紧 ——
-            //    很多站点（Copilot / DeepSeek）快捷方式里带的就是 SVG 原件本身
-            byte[]? svg = TryGetIconSource(appId) ?? (IsSvgContent(fallbackBytes) ? fallbackBytes : null);
-            if (svg is { Length: > 0 })
+            try
             {
-                try
-                {
-                    card = await WebAppIconRasterizer.Instance.RasterizeSvgAsync(
-                        svg,
-                        CardIconSize,
-                        TopAppBarService.GetActualTheme() == ElementTheme.Dark);
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"[WebAppIconCache] 卡片档光栅化失败: {appId}, {ex.Message}");
-                }
+                card = await WebAppIconRasterizer.Instance.RasterizeSvgAsync(
+                    svg,
+                    CardIconSize,
+                    ResolveTheme(theme) == ElementTheme.Dark);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[WebAppIconCache] 卡片档光栅化失败: {appId}, {ex.Message}");
+                return null;
             }
 
-            // ② 位图：取最大帧，太大就缩到卡片尺寸，比卡片小的不硬拉（拉了只会更糊）
-            card ??= await RasterizeBitmapToCardAsync(fallbackBytes);
-
-            return card is { Length: > 0 } ? SaveCard(appId, card) : null;
+            return card is { Length: > 0 } ? SaveCard(appId, card, theme) : null;
         }
 
         /// <summary>
-        /// 位图 → 卡片档：挑尺寸最大的那一帧，超过 <see cref="CardIconSize"/> 就等比缩小。
-        /// 出来的统一是 PNG（ICO 那种多帧容器交给 WIC 拆，别让 ImageIcon 自己去猜帧）。
+        /// 作废旧卡片档，让它下次被重新生成。
+        ///
+        /// 卡片档是「生成一次就永久生效」的：以前只要在，就再也不会重画 ——
+        /// 实测时间线坐实过这条：通用档 18:23:48 落盘 → 卡片档 18:23:52 按那张 32×32
+        /// 位图生成 → 真正的 SVG 原件 18:24:49 才到位（晚 57 秒），
+        /// 而卡片档已经锁死在那张糊图上，站点换了更清晰的图，主页卡片永远不变。
+        ///
+        /// 所以凡是「源变了」的时刻都必须调这里：通用档内容变了（<see cref="Save"/>）、
+        /// SVG 原件到位或更新了（<see cref="SaveIconSource"/>）。
         /// </summary>
-        private static async Task<byte[]?> RasterizeBitmapToCardAsync(byte[]? bytes)
+        /// <param name="theme">只清指定主题那一版；不传就两个主题都清</param>
+        public static void DeleteCardFiles(string appId, ElementTheme? theme = null)
         {
-            if (bytes is not { Length: > 0 } || IsSvgContent(bytes))
+            if (string.IsNullOrEmpty(appId))
+            {
+                return;
+            }
+
+            try
+            {
+                string directory = CacheDirectory;
+                if (!Directory.Exists(directory))
+                {
+                    return;
+                }
+
+                // 卡片档文件名形如 "{id}-{d|l}-card-{hash}.png"
+                string pattern = theme is ElementTheme.Dark or ElementTheme.Light
+                    ? SanitizeId(appId) + "-" + ThemeTagFor(theme.Value) + CardSegment + "*"
+                    : SanitizeId(appId) + "-*" + CardSegment + "*";
+
+                foreach (string file in Directory.EnumerateFiles(directory, pattern))
+                {
+                    try
+                    {
+                        File.Delete(file);
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[WebAppIconCache] 清旧卡片档失败: {file}, {ex.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[WebAppIconCache] 卡片档作废失败: {appId}, {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 该按哪个主题处理图标。传了就以传的为准，没传才退回顶栏那份。
+        ///
+        /// 为什么要有这一层：同一个图标会落在好几个容器里，而容器的实际主题可以不一样
+        /// （顶栏是页面级的 <c>TopBarPageScope.ThemeMode</c>，侧边栏跟的是元素自己的
+        /// <c>ActualTheme</c>）。一律按顶栏算的话，顶栏设深色时侧边栏拿到的是白图标，
+        /// 浅底白图直接隐形。
+        /// </summary>
+        private static ElementTheme ResolveTheme(ElementTheme? theme) =>
+            theme is ElementTheme.Dark or ElementTheme.Light
+                ? theme.Value
+                : TopAppBarService.GetActualTheme();
+
+        /// <summary>
+        /// 把位图归一化成一张【边长不超过 <paramref name="size"/> 的 PNG】。
+        ///
+        /// 两个用途：顶栏 / 侧边栏这种「显示格只有 16~20px」的地方，拿到的源动辄
+        /// 512×512、甚至 1080×1080（实测临时目录里就有）—— 解码一张 1080×1080
+        /// 是 4.6 MB 内存，画出来却只有 16×16，纯浪费；而另一头 ICO 里常常把 16×16
+        /// 排在第一帧，<c>BitmapImage</c> 解 ICO 认的就是第一帧，大帧白扔。
+        ///
+        /// 所以这里统一挑【像素最多那一帧】（ICO 多帧容器交给 WIC 拆，别让
+        /// ImageIcon 自己去猜帧），超了就用 Fant 高质量缩放压到目标边长；
+        /// 比目标小的<b>不硬拉</b> —— 拉大只会更糊，信息量不会凭空多出来。
+        /// </summary>
+        public static async Task<byte[]?> NormalizeBitmapAsync(byte[]? bytes, int size)
+        {
+            if (bytes is not { Length: > 0 } || IsSvgContent(bytes) || size <= 0)
             {
                 return null;
             }
@@ -437,9 +612,9 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                 uint targetWidth = width;
                 uint targetHeight = height;
 
-                if (longest > CardIconSize)
+                if (longest > (uint)size)
                 {
-                    double scale = (double)CardIconSize / longest;
+                    double scale = (double)size / longest;
                     targetWidth = (uint)Math.Max(1, Math.Round(width * scale));
                     targetHeight = (uint)Math.Max(1, Math.Round(height * scale));
                 }
@@ -494,7 +669,7 @@ namespace DockedTools.Features.Pages.WebApp.Shared
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[WebAppIconCache] 卡片档位图处理失败: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[WebAppIconCache] 位图归一化失败: {ex.Message}");
                 return null;
             }
         }
@@ -531,18 +706,70 @@ namespace DockedTools.Features.Pages.WebApp.Shared
             }
         }
 
-        private static void DeleteStaleFiles(string appId, string keepPath)
+        /// <summary>
+        /// 清掉同一个 appId 下多余的通用档文件。
+        ///
+        /// 留存的规则是【按主题分桶，每桶只留最新的一份】：
+        ///   ① 当前这次要写的 <paramref name="keepPath"/> —— 无条件留；
+        ///   ② 另一个主题那一版 —— 必须留。同一个图标会同时出现在主题不同的容器里
+        ///      （顶栏是页面级的 <c>TopBarPageScope.ThemeMode</c>，侧边栏 / 主页跟的是
+        ///      元素自己的 <c>ActualTheme</c>）。以前这里只留 keepPath，于是先落盘的
+        ///      容器说了算，后落盘的把对方那版清掉、对方再取就只剩另一主题那张 —— 颜色是错的。
+        ///   ③ SVG 原件（切主题要靠它重画）与卡片档（另一套尺寸，由
+        ///      <see cref="DeleteCardFiles"/> 单独管）—— 都不归这里管。
+        ///
+        /// ⚠️ 之前那版是「凡是以 {id}-d- / {id}-l- 开头的一律跳过」，那就等于同主题下
+        ///    旧哈希的文件也永远留着：站点每换一次图标就多一份，磁盘只会越长越胖。
+        ///    改成每桶只留最新的，才既保住了另一个主题、又不留垃圾。
+        /// </summary>
+        /// <returns>有没有真的删掉东西 —— 删了就说明「图标内容换过」，调用方据此作废旧卡片档</returns>
+        private static bool DeleteStaleFiles(string appId, string keepPath)
         {
             string directory = CacheDirectory;
+            string id = SanitizeId(appId);
 
-            foreach (string file in Directory.EnumerateFiles(directory, SanitizeId(appId) + "-*"))
+            var candidates = new List<string>();
+            var newest = new Dictionary<string, (string Path, DateTime Time)>(StringComparer.OrdinalIgnoreCase);
+
+            static bool IsGeneral(string name) =>
+                !name.EndsWith(SourceSuffix, StringComparison.OrdinalIgnoreCase) &&
+                !name.Contains(CardSegment, StringComparison.OrdinalIgnoreCase);
+
+            // ⭐ 先把 keepPath 按 MaxValue 占住它那一桶的「最新」位。
+            //    它不是候选（下面遍历会跳过它），若不先占位，同主题的旧哈希文件就会
+            //    以「本桶最新」的身份当选、反而被保留下来 —— 那就等于什么都没清。
+            newest[ParseThemeTag(Path.GetFileName(keepPath), id) ?? "?"] =
+                (keepPath, DateTime.MaxValue);
+
+            foreach (string file in Directory.EnumerateFiles(directory, id + "-*"))
             {
-                // SVG 原件要留着：主题一变就得靠它重画，被当成陈年旧文件删掉的话
-                // 切主题就再也换不了色了
-                // 卡片档同理：它是主页单独那一套，通用档换图不该把它带走
-                if (string.Equals(file, keepPath, StringComparison.OrdinalIgnoreCase) ||
-                    file.EndsWith(SourceSuffix, StringComparison.OrdinalIgnoreCase) ||
-                    Path.GetFileName(file).Contains(CardSegment, StringComparison.OrdinalIgnoreCase))
+                string name = Path.GetFileName(file);
+
+                if (!IsGeneral(name) ||
+                    string.Equals(file, keepPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                candidates.Add(file);
+
+                string tag = ParseThemeTag(name, id) ?? "?";
+                DateTime time = SafeWriteTime(file);
+
+                if (!newest.TryGetValue(tag, out (string Path, DateTime Time) current) || time > current.Time)
+                {
+                    newest[tag] = (file, time);
+                }
+            }
+
+            bool deleted = false;
+
+            foreach (string file in candidates)
+            {
+                string tag = ParseThemeTag(Path.GetFileName(file), id) ?? "?";
+
+                if (newest.TryGetValue(tag, out (string Path, DateTime Time) keep) &&
+                    string.Equals(keep.Path, file, StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
@@ -550,11 +777,45 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                 try
                 {
                     File.Delete(file);
+                    deleted = true;
                 }
                 catch (Exception ex)
                 {
                     System.Diagnostics.Debug.WriteLine($"[WebAppIconCache] 清理旧文件失败: {file}, {ex.Message}");
                 }
+            }
+
+            return deleted;
+        }
+
+        /// <summary>从 "{id}-{d|l}-{hash}{ext}" 里取出主题标记；认不出就返回 null</summary>
+        private static string? ParseThemeTag(string name, string id)
+        {
+            int start = id.Length + 1;
+
+            // 形状是 "id" + "-" + 一个字母 + "-" + …，中间那个字母才是主题标记
+            if (name.Length <= start + 1 || name[start + 1] != '-')
+            {
+                return null;
+            }
+
+            return name[start] switch
+            {
+                'd' => "d",
+                'l' => "l",
+                _ => null
+            };
+        }
+
+        private static DateTime SafeWriteTime(string path)
+        {
+            try
+            {
+                return File.GetLastWriteTimeUtc(path);
+            }
+            catch
+            {
+                return DateTime.MinValue;
             }
         }
 
@@ -594,6 +855,11 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                 }
 
                 File.WriteAllBytes(path, svgBytes);
+
+                // ⭐ 原件换了 ⇒ 之前那张卡片档是按旧原件画的，作废让它重画。
+                //    这一步是「SVG 晚到位」那条时间线的解药：卡片档往往先按位图生成，
+                //    原件几十秒后才到，没有这里它就永久锁死在那张糊图上。
+                DeleteCardFiles(appId);
             }
             catch (Exception ex)
             {
@@ -638,7 +904,11 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         /// ⚠️ 调用点必须是不阻塞 UI 线程的异步上下文：
         ///    内部要 await 渲染内核，而内核初始化会往 UI 线程排队。
         /// </summary>
-        public static async Task<string?> SaveAsync(string appId, byte[]? bytes)
+        public static async Task<string?> SaveAsync(string appId, byte[]? bytes) =>
+            await SaveAsync(appId, bytes, null);
+
+        /// <summary>按指定主题落盘（会先判断要不要拿原件重画）；不指定就跟顶栏那份一致</summary>
+        public static async Task<string?> SaveAsync(string appId, byte[]? bytes, ElementTheme? theme)
         {
             try
             {
@@ -650,7 +920,7 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                     byte[]? repaint = await WebAppIconRasterizer.Instance.RasterizeSvgAsync(
                         source,
                         WebAppIconRasterizer.DefaultRasterSize,
-                        TopAppBarService.GetActualTheme() == ElementTheme.Dark);
+                        ResolveTheme(theme) == ElementTheme.Dark);
 
                     if (repaint is { Length: > 0 })
                     {
@@ -663,7 +933,7 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                 System.Diagnostics.Debug.WriteLine($"[WebAppIconCache] 按主题重画失败，用现有图: {appId}, {ex.Message}");
             }
 
-            return Save(appId, bytes);
+            return Save(appId, bytes, theme);
         }
 
         /// <summary>
@@ -762,11 +1032,17 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         /// 而 Direct2D 不执行 CSS。抢救链路能把颜色内联出来，但内联出来的
         /// 是「站点为某个主题挑的颜色」，我们自己的主题切了它不会跟着变。
         ///
-        /// 只动「整张图只有一种颜色」的图标：
+        /// 只动「整张图只有一种颜色、而且那个颜色是无彩色」的图标：
         ///   · 0 种 —— 没写颜色，靠 SVG 默认的 black，也不需要动；
-        ///   · 2 种以上 —— 品牌 logo（vuejs 就是双色），刷成纯色剪影是帮倒忙。
+        ///   · 2 种以上 —— 多色品牌 logo（vuejs 就是双色），刷成纯色剪影是帮倒忙；
+        ///   · 1 种但是【有饱和度】—— 单色品牌 logo（Twitter 蓝 / 小红书红），
+        ///     那是人家的品牌色，刷成纯黑纯白等于把 logo 毁掉，必须原样留着。
+        ///     是不是无彩色交给 <see cref="IsAchromatic"/> 判。
         /// </summary>
-        public static byte[] ApplyMonochromeTheme(byte[] bytes)
+        public static byte[] ApplyMonochromeTheme(byte[] bytes) => ApplyMonochromeTheme(bytes, null);
+
+        /// <summary>按指定主题染；不指定就跟顶栏那份一致</summary>
+        public static byte[] ApplyMonochromeTheme(byte[] bytes, ElementTheme? theme)
         {
             // 位图没有可靠的换色手段（也不该动品牌色），只处理矢量
             if (!IsSvgContent(bytes))
@@ -806,7 +1082,16 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                 }
 
                 string old = colours.First();
-                string target = TopAppBarService.GetActualTheme() == ElementTheme.Dark
+
+                // ⭐ 品牌色保护：只有一种颜色 ≠ 可以随便染。
+                //    黑 / 白 / 灰的剪影图标不染会在深色主题下直接隐形，必须染；
+                //    而单色品牌 logo 染成纯黑纯白就是把人家的识别色抹掉 —— 这里拦掉。
+                if (!IsAchromatic(old))
+                {
+                    return bytes;
+                }
+
+                string target = ResolveTheme(theme) == ElementTheme.Dark
                     ? DarkIconColour
                     : LightIconColour;
 
@@ -841,6 +1126,150 @@ namespace DockedTools.Features.Pages.WebApp.Shared
             }
         }
 
+        /// <summary>
+        /// 「无彩色」的判定阈值：R/G/B 三通道的极差（chroma）不超过这个值就算灰阶。
+        ///
+        /// 为什么不是严格的 R==G==B：#FFFAFA(snow)、#F8F8FF(ghostwhite) 这类值
+        /// 名义上带一点色偏，肉眼就是白的，深色主题下一样会"变暗到看不清"，
+        /// 严格判定会把它们漏在门外。
+        /// </summary>
+        private const int AchromaticChromaLimit = 10;
+
+        /// <summary>
+        /// 这个颜色是不是「无彩色」（黑 / 白 / 灰那一类，没有色相）。
+        ///
+        /// 【为什么非它不可】
+        /// 「整张图只有一种颜色」这个条件会同时命中两类完全相反的图标：
+        ///   · 黑白剪影（#000000 / #666666 / #FFFFFF）—— 不按主题染，深色主题下直接隐形；
+        ///   · 单色品牌 logo（#1DA1F2 这类）—— 它也只有一种颜色，但那是品牌识别色，
+        ///     染成纯黑纯白就是把人家的 logo 抹掉。
+        /// 只有前者该染，两者的区别恰恰就在有没有饱和度。
+        ///
+        /// 【认不出来时】
+        /// 返回 false —— 也就是「当它有彩色，不染」。保守方向必须选保住原色：
+        /// 漏染的代价只是某个图标偏暗，误染的代价是品牌色被抹掉，后者严重得多。
+        /// 这也是为什么 hsl() 之类不常见的写法不做特判，直接落到"不染"。
+        /// </summary>
+        private static bool IsAchromatic(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            string v = value.Trim();
+
+            if (v[0] == '#')
+            {
+                string hex = v[1..];
+                int r;
+                int g;
+                int b;
+
+                // #RGB / #RGBA —— 一位顶两位，展开成 RRGGBB 再判
+                if (hex.Length is 3 or 4)
+                {
+                    int[] shortRgb = new int[3];
+                    for (int i = 0; i < 3; i++)
+                    {
+                        int nibble = HexValue(hex[i]);
+                        if (nibble < 0)
+                        {
+                            return false;
+                        }
+
+                        shortRgb[i] = nibble * 17;
+                    }
+
+                    r = shortRgb[0];
+                    g = shortRgb[1];
+                    b = shortRgb[2];
+                }
+                else if (hex.Length is 6 or 8)
+                {
+                    if (!TryHexByte(hex, 0, out r) ||
+                        !TryHexByte(hex, 2, out g) ||
+                        !TryHexByte(hex, 4, out b))
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    return false;
+                }
+
+                return Chroma(r, g, b) <= AchromaticChromaLimit;
+            }
+
+            if (v.StartsWith("rgb", StringComparison.OrdinalIgnoreCase))
+            {
+                int open = v.IndexOf('(');
+                int close = v.LastIndexOf(')');
+                if (open < 0 || close <= open)
+                {
+                    return false;
+                }
+
+                string[] parts = v[(open + 1)..close].Split(',');
+                if (parts.Length < 3)
+                {
+                    return false;
+                }
+
+                int[] rgb = new int[3];
+                for (int i = 0; i < 3; i++)
+                {
+                    string token = parts[i].Trim();
+                    bool percent = token.EndsWith('%');
+                    if (!int.TryParse(percent ? token[..^1] : token, out int n))
+                    {
+                        return false;
+                    }
+
+                    rgb[i] = percent ? n * 255 / 100 : n;
+                }
+
+                return Chroma(rgb[0], rgb[1], rgb[2]) <= AchromaticChromaLimit;
+            }
+
+            return NamedAchromatic(v);
+        }
+
+        /// <summary>三通道极差，当作饱和度的近似值（0 = 纯灰阶）</summary>
+        private static int Chroma(int r, int g, int b) =>
+            Math.Max(r, Math.Max(g, b)) - Math.Min(r, Math.Min(g, b));
+
+        private static bool TryHexByte(string hex, int start, out int value)
+        {
+            int hi = HexValue(hex[start]);
+            int lo = HexValue(hex[start + 1]);
+            value = (hi * 16) + lo;
+            return hi >= 0 && lo >= 0;
+        }
+
+        private static int HexValue(char c) => c switch
+        {
+            >= '0' and <= '9' => c - '0',
+            >= 'a' and <= 'f' => c - 'a' + 10,
+            >= 'A' and <= 'F' => c - 'A' + 10,
+            _ => -1
+        };
+
+        /// <summary>
+        /// 命名色里的无彩色那一批。
+        /// ⚠️ 刻意没收 slategray 系（#708090 这类）—— 它们看着像灰，其实带青色底，
+        ///    染成纯黑纯白会丢掉那个色调。
+        /// </summary>
+        private static bool NamedAchromatic(string name) => name.ToLowerInvariant() switch
+        {
+            "black" or "white" or "gray" or "grey" or "silver" or
+            "dimgray" or "dimgrey" or "darkgray" or "darkgrey" or
+            "lightgray" or "lightgrey" or "gainsboro" or "whitesmoke" or
+            "snow" or "ghostwhite" => true,
+            _ => false
+        };
+
         private static void CollectPaint(string? value, HashSet<string> colours)
         {
             if (string.IsNullOrWhiteSpace(value))
@@ -871,7 +1300,11 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         }
 
         private static string BuildFileName(string appId, byte[] bytes) =>
-            SanitizeId(appId) + "-" + ThemeTag + "-" + ComputeContentHash(bytes) + DetectExtension(bytes);
+            BuildFileName(appId, bytes, null);
+
+        private static string BuildFileName(string appId, byte[] bytes, ElementTheme? theme) =>
+            SanitizeId(appId) + "-" + ThemeTagFor(ResolveTheme(theme)) + "-" +
+            ComputeContentHash(bytes) + DetectExtension(bytes);
 
         /// <summary>SVG 原件旁路文件的后缀。跟缓存文件用同一个 "{appId}-" 前缀以便统一清理</summary>
         private const string SourceSuffix = "-source.svg";
@@ -885,8 +1318,11 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         /// BitmapImage 会因为「同一个 Uri」直接复用旧解码结果，视觉上就是「切了主题图标不变色」。
         /// 把主题写进文件名 ⇒ 换主题必然换路径 ⇒ 必然重新加载。
         /// </summary>
-        private static string ThemeTag =>
-            TopAppBarService.GetActualTheme() == ElementTheme.Dark ? "d" : "l";
+        private static string ThemeTag => ThemeTagFor(TopAppBarService.GetActualTheme());
+
+        /// <summary>把主题折成文件名里那个单字母标记（d=深色 / l=浅色）</summary>
+        private static string ThemeTagFor(ElementTheme theme) =>
+            theme == ElementTheme.Dark ? "d" : "l";
 
         /// <summary>SHA256 前 16 位十六进制，跟顶栏 PublishShortcutIconAsync 保持一致</summary>
         public static string ComputeContentHash(byte[] bytes) =>

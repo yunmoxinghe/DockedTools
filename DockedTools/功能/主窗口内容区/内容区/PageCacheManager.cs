@@ -43,6 +43,26 @@ namespace DockedTools.Features.MainWindowContent.ContentArea
         /// </summary>
         private void OnPageEvicted(string cacheKey, Page page)
         {
+            DisposeCachedPage(cacheKey, page);
+
+            System.Diagnostics.Debug.WriteLine($"[PageCacheManager] 缓存已满，自动移除最久未使用的页面: {cacheKey}");
+        }
+
+        /// <summary>
+        /// 释放一个即将离开缓存的页面所持有的资源。
+        ///
+        /// 抽成一份是为了让「淘汰」「按 key 移除」「整体清空」三条路走同一套动作 ——
+        /// 之前 <see cref="ClearCache"/> 没走这里，于是整包清空时一个 WebView 都没释放。
+        ///
+        /// ⚠️ 调用方必须已持有 <see cref="_cacheLock"/>（或不涉及缓存结构改动）。
+        /// </summary>
+        private static void DisposeCachedPage(string cacheKey, Page? page)
+        {
+            if (page is null)
+            {
+                return;
+            }
+
             // 页面实例即将离开缓存：把它对顶栏的登记一并收掉。
             // 不做的话，它那份作用域凭证会留在通道的作用域栈里 —— 页面没了、Detach 的
             // 入口也没了，那一项从此无人认领（见 TopBarChannel.Apply 里的清扫注释）。
@@ -61,8 +81,6 @@ namespace DockedTools.Features.MainWindowContent.ContentArea
                     System.Diagnostics.Debug.WriteLine($"[PageCacheManager] 调用 DisposeWebView 失败: {ex.Message}");
                 }
             }
-
-            System.Diagnostics.Debug.WriteLine($"[PageCacheManager] 缓存已满，自动移除最久未使用的页面: {cacheKey}");
         }
 
         /// <summary>
@@ -167,24 +185,10 @@ namespace DockedTools.Features.MainWindowContent.ContentArea
         {
             lock (_cacheLock)
             {
-                if (_lruCache.TryGet(cacheKey, out Page? page) && page != null)
+                if (_lruCache.TryGet(cacheKey, out Page? page))
                 {
-                    // 与 OnPageEvicted 同理：离开缓存就把顶栏登记一起收掉
-                    DockedTools.Features.UnifiedCalls.TopAppBar.TopAppBarService.DisposePageScope(page);
-
-                    // 如果是 WebBrowserPage，调用其清理方法
-                    if (page is Pages.WebApp.Browser.WebBrowserPage webBrowserPage)
-                    {
-                        try
-                        {
-                            webBrowserPage.DisposeWebView();
-                            System.Diagnostics.Debug.WriteLine($"[PageCacheManager] 已调用 WebBrowserPage.DisposeWebView: {cacheKey}");
-                        }
-                        catch (Exception ex)
-                        {
-                            System.Diagnostics.Debug.WriteLine($"[PageCacheManager] 调用 DisposeWebView 失败: {ex.Message}");
-                        }
-                    }
+                    // 与 OnPageEvicted 同理：离开缓存就把顶栏登记 + WebView 一起收掉
+                    DisposeCachedPage(cacheKey, page);
                 }
 
                 bool removed = _lruCache.Remove(cacheKey);
@@ -227,6 +231,19 @@ namespace DockedTools.Features.MainWindowContent.ContentArea
         {
             lock (_cacheLock)
             {
+                // ⭐ 不能直接 _lruCache.Clear()。
+                //    LRU 的 Clear 只把字典抹平，不走淘汰回调 —— 于是每个 WebBrowserPage
+                //    手里的 CoreWebView2Controller 一次 DisposeWebView 都收不到，
+                //    浏览器子进程全部留在原地（退出时表现为「宿主退了、msedgewebview2 还在」）。
+                //    必须先把每个页面逐个释放，再清结构。
+                //
+                //    ToList() 是必需的：Dispose 过程中不能再枚举正在被改动的集合。
+                foreach (string key in _lruCache.GetKeys().ToList())
+                {
+                    _lruCache.TryGet(key, out Page? page);
+                    DisposeCachedPage(key, page);
+                }
+
                 _lruCache.Clear();
                 _currentPageKey = null;
                 System.Diagnostics.Debug.WriteLine("[PageCacheManager] 已清除所有缓存");

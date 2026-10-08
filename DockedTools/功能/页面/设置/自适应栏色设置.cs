@@ -111,17 +111,24 @@ namespace DockedTools.Features.Pages.Settings
             set => SetDouble(MinContrastDarkKey, value);
         }
 
-        /// <summary>浅色兜底色（ATBC: fallbackColour_light，默认 #ffffff）</summary>
+        // 兜底色的默认值取自 WinUI 3 的 ApplicationPageBackgroundThemeBrush
+        // （= SolidBackgroundFillColorBase：Light #F3F3F3 / Dark #202020，
+        //   见 WindowsAppSDK 2.5.1 的 Microsoft.WinUI/Themes/generic.xaml），
+        // 而不是 ATBC 上游的 #ffffff / #2b2a33 —— 那两个是浏览器/Firefox 的底色，
+        // 刷到 WinUI 控件上跟应用背景对不上（暗色那版偏紫，尤其明显）。
+        // 与网页页复位时读的是同一个主题资源，因此"页面取不到色"与"没开自适应"看起来一致。
+
+        /// <summary>浅色兜底色（ATBC: fallbackColour_light；默认改取 WinUI 的 #f3f3f3）</summary>
         public static string FallbackLight
         {
-            get => AotSafeSettingsHelper.GetString(LocalSettings, FallbackLightKey, "#ffffff");
+            get => AotSafeSettingsHelper.GetString(LocalSettings, FallbackLightKey, "#f3f3f3");
             set => SetString(FallbackLightKey, value);
         }
 
-        /// <summary>暗色兜底色（ATBC: fallbackColour_dark，默认 #2b2a33）</summary>
+        /// <summary>暗色兜底色（ATBC: fallbackColour_dark；默认改取 WinUI 的 #202020）</summary>
         public static string FallbackDark
         {
-            get => AotSafeSettingsHelper.GetString(LocalSettings, FallbackDarkKey, "#2b2a33");
+            get => AotSafeSettingsHelper.GetString(LocalSettings, FallbackDarkKey, "#202020");
             set => SetString(FallbackDarkKey, value);
         }
 
@@ -194,8 +201,8 @@ namespace DockedTools.Features.Pages.Settings
 
             return new AdaptiveBarColourOptions
             {
-                FallbackLight = ParseColour(FallbackLight, "#ffffff"),
-                FallbackDark = ParseColour(FallbackDark, "#2b2a33"),
+                FallbackLight = ParseColour(FallbackLight, "#f3f3f3"),
+                FallbackDark = ParseColour(FallbackDark, "#202020"),
                 MinContrastLightX10 = MinContrastLight * 10d,
                 MinContrastDarkX10 = MinContrastDark * 10d,
                 AllowDarkLight = AllowDarkLight,

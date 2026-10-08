@@ -743,7 +743,11 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
                 {
                     // 走 SaveAsync（而不是 Save）：光栅化出来的 PNG 里那层颜色是按旧主题算的，
                     // 这一步会按需用当前主题重画一张 —— 换主题后图标跟着变色全靠它。
-                    string? iconPath = await WebAppIconCache.SaveAsync(shortcut.Id, shortcut.IconBytes);
+                    //
+                    // ⭐ 按【侧边栏自己的主题】落盘，而不是顶栏主题：
+                    //    图标是落盘时染好色的，按谁的主题染就得给谁看。
+                    //    侧边栏跟的是元素自己的 ActualTheme，跟顶栏那份页面级主题未必一样。
+                    string? iconPath = await WebAppIconCache.SaveAsync(shortcut.Id, shortcut.IconBytes, ActualTheme);
                     if (iconPath is not null)
                     {
                         ImageIcon? icon = await TryCreateImageIconAsync(new Uri(iconPath), shortcut.Id, waitForDecode);

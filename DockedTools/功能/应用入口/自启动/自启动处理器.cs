@@ -25,8 +25,11 @@ namespace DockedTools.Features.AppEntry.AutoLaunch
         {
             try
             {
-                var activationArgs = AppInstance.GetCurrent().GetActivatedEventArgs();
-                
+                // ⭐ 走 LaunchArguments 那份缓存：打包应用下 GetActivatedEventArgs()
+                //    只有首次调用会返回参数（官方文档原话），首次已被 App 构造函数用掉，
+                //    这里再调一次只会拿到 null，自启动判定就会永久失效。
+                var activationArgs = DockedTools.Features.AppEntry.LaunchArguments.Activation;
+
                 // 检查激活类型是否为 StartupTask（开机自启动）
                 // 参考: https://learn.microsoft.com/en-us/windows/windows-app-sdk/api/winrt/microsoft.windows.applifecycle.extendedactivationkind
                 if (activationArgs?.Kind == ExtendedActivationKind.StartupTask)
