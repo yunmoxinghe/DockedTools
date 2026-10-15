@@ -52,7 +52,7 @@ namespace DockedTools.Features.Shared.AotOptimization
                     AotDebugLogger.Log($"[AotSafeSettings] GetBool: {key} = {boolValue} (found)");
                     return boolValue;
                 }
-                AotDebugLogger.Log($"[AotSafeSettings] GetBool: {key} - value type mismatch: {value?.GetType().Name ?? "null"}");
+                AotDebugLogger.Warn($"[AotSafeSettings] GetBool: {key} - value type mismatch: {value?.GetType().Name ?? "null"}");
             }
             AotDebugLogger.Log($"[AotSafeSettings] GetBool: {key} = {defaultValue} (default)");
             return defaultValue;
@@ -112,7 +112,7 @@ namespace DockedTools.Features.Shared.AotOptimization
                     AotDebugLogger.Log($"[AotSafeSettings] GetInt: {key} = {intValue} (found)");
                     return intValue;
                 }
-                AotDebugLogger.Log($"[AotSafeSettings] GetInt: {key} - value type mismatch: {value?.GetType().Name ?? "null"}");
+                AotDebugLogger.Warn($"[AotSafeSettings] GetInt: {key} - value type mismatch: {value?.GetType().Name ?? "null"}");
             }
             AotDebugLogger.Log($"[AotSafeSettings] GetInt: {key} = {defaultValue} (default)");
             return defaultValue;
@@ -169,7 +169,7 @@ namespace DockedTools.Features.Shared.AotOptimization
                     }
                     AotDebugLogger.Log($"[AotSafeSettings] GetEnum: {key} - invalid enum value: {intValue}");
                 }
-                AotDebugLogger.Log($"[AotSafeSettings] GetEnum: {key} - value type mismatch: {value?.GetType().Name ?? "null"}");
+                AotDebugLogger.Warn($"[AotSafeSettings] GetEnum: {key} - value type mismatch: {value?.GetType().Name ?? "null"}");
             }
             AotDebugLogger.Log($"[AotSafeSettings] GetEnum: {key} = {defaultValue} (default)");
             return defaultValue;

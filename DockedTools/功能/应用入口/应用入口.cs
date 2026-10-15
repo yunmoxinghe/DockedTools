@@ -1416,6 +1416,11 @@ namespace DockedTools
                 {
                     var logDirectory = LogService.GetLogDirectory() ?? "[未初始化]";
                     context.AppendLine($"日志目录: {logDirectory}");
+
+                    // 带上落盘级别：崩溃报告里「日志只有两行」往往不是没出事，
+                    // 而是级别还停在 Info/Warning，Debug 细节根本没写盘。
+                    // 看到这行就知道该不该把 level.txt 改成 Debug 再复现一次。
+                    context.AppendLine($"日志落盘级别: {LogService.MinimumLevel}");
                 }
                 catch (Exception ex)
                 {

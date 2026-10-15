@@ -1,38 +1,52 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Threading;
 
 namespace DockedTools.Features.UnifiedCalls.Logging
 {
     /// <summary>
     /// 统一日志服务
-    /// 
+    ///
     /// 【功能】
     /// 1. 统一的异常记录接口
-    /// 2. 自动写入本地日志文件
+    /// 2. 自动写入本地日志文件（有大小上限 + 滚动保留，不会无限长）
     /// 3. 同时输出到调试控制台
-    /// 4. 支持不同日志级别
-    /// 
+    /// 4. 支持不同日志级别，且级别可以在**运行期**被外部开关改变（不必重新打包）
+    ///
     /// 【使用方法】
     /// LogService.Error("模块名", "操作描述", exception);
     /// LogService.Warning("模块名", "警告信息");
     /// LogService.Info("模块名", "信息");
-    /// LogService.Debug("模块名", "调试信息");
+    /// LogService.Debug("模块名", "调试信息");   // 默认不落盘，见「运行期级别开关」
+    ///
+    /// 【落盘位置】
+    /// LocalState\logs\app.log（Debug/Info/Warning）与 error.log（Error）。
+    /// 单文件超过上限后滚成 app.log.1 … app.log.{N}，最旧的一份被替换掉。
+    /// 读取请用 脚本工具\读取日志.ps1（边写边读，不会阻塞本服务）。
+    ///
+    /// 【运行期级别开关】
+    /// 往 logs\level.txt 里写 Debug / Info / Warning / Error 之一即可，
+    /// 写盘线程最多 5 秒后生效；文件或内容不合法时按 Info。
+    /// 之所以用文件而不是应用内设置：用户出问题时报错往往在设置页能打开之前，
+    /// 而 CLI / 记事本改一个文件就能让下一次复现带上完整细节。
+    /// Debug 档默认只在 Debug 编译下走控制台；开了这个开关才会落盘。
+    ///
+    /// 【为什么全程只有一条写线程】
+    /// 旧实现是 File.AppendAllText + 全局 lock，直接在调用线程上同步落盘。
+    /// 而 WebView2 的 ProcessFailed 处理器、页面初始化失败路径都在 UI 线程上调
+    /// Error()，于是「磁盘停顿 / 杀软扫描 / MSIX 容器里的重定向写入」会经由日志
+    /// 把 UI 线程按住 —— 而 UI 线程一停泵，托盘看门狗就判卡死并静默重启。
+    /// 日志本身不值得为此冒无响应风险，所以这里改成：调用方只做一次入队，
+    /// 真正的磁盘 IO 全部由唯一一条写线程串行完成。
     /// </summary>
     public static class LogService
     {
         private static string? _logDirectory;
 
-        // ⭐ 为什么必须把写盘挪出调用线程（2026-10-15）
-        // 旧实现是 File.AppendAllText + 全局 lock，直接在调用线程上同步落盘。
-        // 而 WebView2 的 ProcessFailed 处理器、页面初始化失败路径都在 UI 线程上调
-        // Error()，于是「磁盘停顿 / 杀软扫描 / MSIX 容器里的重定向写入」会经由日志
-        // 把 UI 线程按住 —— 而 UI 线程一停泵，托盘看门狗就判卡死并静默重启。
-        // 日志本身不值得为此冒无响应风险，所以这里改成：调用方只做一次入队，
-        // 真正的磁盘 IO 全部由唯一一条写线程串行完成。
-        //
         // 【有界队列】宁可丢日志，也不能让积压吃掉内存或在关闭时无限等待。
         // 溢出按「丢最旧」处理并计数，计数会在下一次成功入队时补一条告警。
         private const int MaxQueuedEntries = 4096;
@@ -53,18 +67,77 @@ namespace DockedTools.Features.UnifiedCalls.Logging
         /// </summary>
         private static int _writerBusy;
 
+        // ── 有界与滚动 ────────────────────────────────────────────────
+        // 官方口径里 .NET 并没有内置的「滚动文件」日志提供程序（内置只有
+        // Console / Debug / EventSource / EventLog），要限体积只能自己滚。
+        // 单文件上限 5MB、滚动保留 4 份 ⇒ 每种日志最多约 25MB，
+        // 托盘应用挂在后台几周也不会把用户的盘撑爆，同时又够留下事故现场。
+        // 为什么不是「按天切」：托盘应用常年不重启，按天切等于又一个无界文件。
+        private const long MaxLogBytesPerFile = 5L * 1024 * 1024;
+        private const int RolledFileCount = 4;
+
+        // 运行期级别开关所在的文件名（放在日志目录里，和日志一起被导出）。
+        private const string LevelFileName = "level.txt";
+
+        /// <summary>旧版本 AotDebugLogger 自己写的文件，现在只作为历史遗留被清理</summary>
+        private const string LegacyDebugLogFileName = "debug.log";
+
+        // 写线程空闲时的等待粒度，同时也是 level.txt 的轮询周期。
+        // 这里刻意不用 GetConsumingEnumerable：它一阻塞就没人去碰 level.txt，
+        // 用户把开关打开后可能长时间不生效。
+        //
+        // 为什么是 5 秒而不是 1 秒：托盘应用常年挂在后台，这条线程醒一次就去
+        // 读一个小文件，1 秒 = 每天 8 万多次无意义唤醒。级别开关是「手动排查」
+        // 用的，改完等 5 秒完全能接受，不值得为它牺牲整机的空闲功耗。
+        private const int TakeTimeoutMs = 5000;
+
+        // 一轮最多压这么多条就停下来看看开关、顺带把缓冲刷下去，
+        // 免得日志洪峰把运行期级别切换挤到后面去。
+        private const int DrainBatchLimit = 128;
+
+        // 当前最低落盘级别。默认 Info —— 保持原有行为，不因为这次改造
+        // 让既有排查习惯突然少日志。低于该级别的调用连字符串都不拼。
+        // 用 int + Volatile 读写：调用线程与写线程都要碰，不能上锁。
+        private static int _minimumLevel = (int)LogLevel.Info;
+
+        // ── 只在写线程上访问，除了 Flush ──────────────────────────────
+        // Flush 想替写线程把缓冲压下去，必须和它抢同一把锁（TryEnter，等不起就放弃）。
+        private static readonly object _ioLock = new();
+
+        // 每个日志文件一条常驻追加流。为什么必须常驻：原先每条日志一次
+        // File.AppendAllText，等于每条都开-写-关一遍句柄，MSIX 容器里还要
+        // 叠加路径重定向与杀软扫描，放大「磁盘停顿按住 UI 线程」的风险。
+        // FileShare.ReadWrite 是硬要求：日志要能被外部 CLI 边写边读（tail）。
+        private readonly record struct LogTarget(string FileName, StreamWriter Writer, long BytesWritten);
+
+        private static Dictionary<string, LogTarget>? _openTargets;
+
+        /// <summary>正在写的活文件，清理逻辑绝不碰它们</summary>
+        private static readonly HashSet<string> LiveFileNames = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "app.log",
+            "error.log",
+        };
+
         /// <summary>一条待落盘的日志</summary>
         private readonly struct LogEntry
         {
-            public LogEntry(string message, string fileName)
+            public LogEntry(string message, string fileName, bool requiresImmediateFlush)
             {
                 Message = message;
                 FileName = fileName;
+                RequiresImmediateFlush = requiresImmediateFlush;
             }
 
             public string Message { get; }
 
             public string FileName { get; }
+
+            /// <summary>
+            /// 这条写完必须立刻刷盘。Error 档为真 ——
+            /// 缓冲是为省 IO，不是为把崩溃前最后几条留在内存里陪进程一起没。
+            /// </summary>
+            public bool RequiresImmediateFlush { get; }
         }
 
         /// <summary>
@@ -77,6 +150,9 @@ namespace DockedTools.Features.UnifiedCalls.Logging
             Warning,
             Error
         }
+
+        /// <summary>当前最低落盘级别（受 logs\level.txt 运行期控制）</summary>
+        public static LogLevel MinimumLevel => (LogLevel)Volatile.Read(ref _minimumLevel);
 
         /// <summary>
         /// 初始化日志目录
@@ -137,7 +213,7 @@ namespace DockedTools.Features.UnifiedCalls.Logging
                 callerFilePath,
                 callerLineNumber);
 
-            WriteLog(message, "error.log");
+            WriteLog(LogLevel.Error, message, "error.log", requiresImmediateFlush: true);
         }
 
         /// <summary>
@@ -159,7 +235,7 @@ namespace DockedTools.Features.UnifiedCalls.Logging
                 callerFilePath,
                 callerLineNumber);
 
-            WriteLog(logMessage, "error.log");
+            WriteLog(LogLevel.Error, logMessage, "error.log", requiresImmediateFlush: true);
         }
 
         /// <summary>
@@ -172,6 +248,11 @@ namespace DockedTools.Features.UnifiedCalls.Logging
             [CallerFilePath] string callerFilePath = "",
             [CallerLineNumber] int callerLineNumber = 0)
         {
+            if (!IsEnabled(LogLevel.Warning))
+            {
+                return;
+            }
+
             var logMessage = FormatMessage(
                 LogLevel.Warning,
                 module,
@@ -181,7 +262,7 @@ namespace DockedTools.Features.UnifiedCalls.Logging
                 callerFilePath,
                 callerLineNumber);
 
-            WriteLog(logMessage, "app.log");
+            WriteLog(LogLevel.Warning, logMessage, "app.log", requiresImmediateFlush: false);
         }
 
         /// <summary>
@@ -194,6 +275,11 @@ namespace DockedTools.Features.UnifiedCalls.Logging
             [CallerFilePath] string callerFilePath = "",
             [CallerLineNumber] int callerLineNumber = 0)
         {
+            if (!IsEnabled(LogLevel.Info))
+            {
+                return;
+            }
+
             var logMessage = FormatMessage(
                 LogLevel.Info,
                 module,
@@ -203,11 +289,16 @@ namespace DockedTools.Features.UnifiedCalls.Logging
                 callerFilePath,
                 callerLineNumber);
 
-            WriteLog(logMessage, "app.log");
+            WriteLog(LogLevel.Info, logMessage, "app.log", requiresImmediateFlush: false);
         }
 
         /// <summary>
-        /// 记录调试信息
+        /// 记录调试信息。
+        ///
+        /// 控制台：Debug 编译下始终输出，保持原来的开发习惯（Release 里近乎无开销）。
+        /// 落盘：只有把 logs\level.txt 设成 Debug 才会写文件 —— 官方口径里
+        /// Trace 级别不进生产环境，Debug 也是「量大、只给复现现场用」的档，
+        /// 默认落盘等于把用户的盘拿来存开发噪音。
         /// </summary>
         public static void Debug(
             string module,
@@ -216,7 +307,19 @@ namespace DockedTools.Features.UnifiedCalls.Logging
             [CallerFilePath] string callerFilePath = "",
             [CallerLineNumber] int callerLineNumber = 0)
         {
+            bool toFile = IsEnabled(LogLevel.Debug);
+
 #if DEBUG
+            bool toConsole = true;
+#else
+            bool toConsole = false;
+#endif
+
+            if (!toFile && !toConsole)
+            {
+                return;
+            }
+
             var logMessage = FormatMessage(
                 LogLevel.Debug,
                 module,
@@ -226,9 +329,21 @@ namespace DockedTools.Features.UnifiedCalls.Logging
                 callerFilePath,
                 callerLineNumber);
 
-            // 调试信息只输出到控制台，不写文件
-            System.Diagnostics.Debug.WriteLine(logMessage);
-#endif
+            if (toConsole)
+            {
+                System.Diagnostics.Debug.WriteLine(logMessage);
+            }
+
+            if (toFile)
+            {
+                Enqueue(logMessage, "app.log", requiresImmediateFlush: false);
+            }
+        }
+
+        /// <summary>这条级别现在要不要记录（调用线程无锁读）</summary>
+        private static bool IsEnabled(LogLevel level)
+        {
+            return (int)level >= Volatile.Read(ref _minimumLevel);
         }
 
         /// <summary>
@@ -254,7 +369,7 @@ namespace DockedTools.Features.UnifiedCalls.Logging
                 formattedMessage += $"\n异常类型: {exception.GetType().FullName}";
                 formattedMessage += $"\n异常消息: {exception.Message}";
                 formattedMessage += $"\n堆栈跟踪:\n{exception.StackTrace}";
-                
+
                 if (exception.InnerException != null)
                 {
                     formattedMessage += $"\n\n内部异常: {exception.InnerException.GetType().FullName}";
@@ -269,21 +384,31 @@ namespace DockedTools.Features.UnifiedCalls.Logging
         }
 
         /// <summary>
-        /// 写入日志：调用线程只负责入队，落盘由写线程完成。
-        /// 本方法在任何情况下都不做磁盘 IO，也不允许阻塞。
+        /// 判级别 + 出控制台 + 入队。调用线程在任何情况下都不做磁盘 IO，也不允许阻塞。
+        /// Error 是最高级别，永远通得过，所以不在这上面加判断。
         /// </summary>
-        private static void WriteLog(string message, string fileName)
+        private static void WriteLog(LogLevel level, string message, string fileName, bool requiresImmediateFlush)
         {
+            if (!IsEnabled(level))
+            {
+                return;
+            }
+
             // 总是输出到调试控制台（Release 下等价于近乎无开销）
             System.Diagnostics.Debug.WriteLine(message);
 
+            Enqueue(message, fileName, requiresImmediateFlush);
+        }
+
+        /// <summary>入队（队列满就丢最旧的一条，绝不等待）</summary>
+        private static void Enqueue(string message, string fileName, bool requiresImmediateFlush)
+        {
             EnsureWriterStarted();
 
             try
             {
-                if (!_queue.TryAdd(new LogEntry(message, fileName)))
+                if (!_queue.TryAdd(new LogEntry(message, fileName, requiresImmediateFlush)))
                 {
-                    // 队列满：丢最旧的一条，给最新的让位。
                     // 积压到这个程度说明磁盘已经不对劲了，绝不能在这里等它。
                     Interlocked.Increment(ref _droppedEntries);
                     try
@@ -325,29 +450,59 @@ namespace DockedTools.Features.UnifiedCalls.Logging
 
         /// <summary>
         /// 唯一的落盘线程。串行消费 ⇒ 天然保证写入顺序，也保证不会有两个线程抢同一个文件。
+        ///
+        /// 用「带超时的 TryTake」而不是 GetConsumingEnumerable：
+        /// 空闲的这段时间正好用来轮询 level.txt，运行期级别开关才可能生效。
         /// </summary>
         private static void WriterLoop()
         {
-            try
+            int entriesSinceLevelCheck = 0;
+
+            while (true)
             {
-                foreach (LogEntry entry in _queue.GetConsumingEnumerable())
+                bool gotEntry = false;
+                try
                 {
-                    // 出队之后、写完之前算「忙」—— Flush 要连这一段一起等，
-                    // 否则「Count 已归零」和「最后一行真的落盘」之间还差一次写。
+                    gotEntry = _queue.TryTake(out LogEntry entry, TakeTimeoutMs);
+
                     Interlocked.Exchange(ref _writerBusy, 1);
                     try
                     {
-                        AppendToFile(entry);
-
-                        long dropped = Interlocked.Read(ref _droppedEntries);
-                        if (dropped > 0)
+                        if (gotEntry)
                         {
-                            // 补一条丢日志告警，避免「文件里什么都没记」变成更难查的第二个坑
-                            Interlocked.Exchange(ref _droppedEntries, 0);
-                            AppendToFile(new LogEntry(
-                                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [Warning] [LogService] " +
-                                $"写盘跟不上产生速度，此前丢弃 {dropped} 条日志（队列上限 {MaxQueuedEntries}）",
-                                "app.log"));
+                            int written = 0;
+                            do
+                            {
+                                AppendToFile(entry);
+                                written++;
+                                entriesSinceLevelCheck++;
+
+                                // 溢出告警：避免「文件里什么都没记」变成更难查的第二个坑
+                                if (entriesSinceLevelCheck >= DrainBatchLimit)
+                                {
+                                    ReportDroppedEntries();
+                                    entriesSinceLevelCheck = 0;
+                                }
+                            }
+                            while (written < DrainBatchLimit && _queue.TryTake(out entry, 0));
+                        }
+                        else
+                        {
+                            // 队列空了 ⇒ 把 StreamWriter 缓冲压下去，
+                            // 这样 tail 到的最后一行不会卡在内存里。
+                            // 必须持锁：外部的 Flush(timeoutMs) 也会抢同一批流去刷，
+                            // 两个线程同时 StreamWriter.Flush() 是会互相踩坏内部状态的。
+                            lock (_ioLock)
+                            {
+                                FlushStreamsLocked();
+                            }
+                        }
+
+                        if (entriesSinceLevelCheck >= DrainBatchLimit || !gotEntry)
+                        {
+                            ReportDroppedEntries();
+                            PollLevelFile();
+                            entriesSinceLevelCheck = 0;
                         }
                     }
                     finally
@@ -355,14 +510,39 @@ namespace DockedTools.Features.UnifiedCalls.Logging
                         Interlocked.Exchange(ref _writerBusy, 0);
                     }
                 }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[LogService] 写线程异常退出: {ex.Message}");
+                catch (InvalidOperationException)
+                {
+                    // 队列被标记完成（进程正在收尾）—— 没有更多日志了
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    // 写线程一旦死掉，之后所有日志都会静默堆积在队列里，
+                    // 所以这里只报告不退出；真出问题的话下一轮大概率能继续写。
+                    System.Diagnostics.Debug.WriteLine($"[LogService] 写线程本轮异常: {ex.Message}");
+                    Thread.Sleep(TakeTimeoutMs);
+                }
             }
         }
 
-        /// <summary>真正碰磁盘的地方，只在写线程上调用</summary>
+        /// <summary>补一条丢日志告警（只在写线程上调用）</summary>
+        private static void ReportDroppedEntries()
+        {
+            long dropped = Interlocked.Read(ref _droppedEntries);
+            if (dropped <= 0)
+            {
+                return;
+            }
+
+            Interlocked.Exchange(ref _droppedEntries, 0);
+            AppendToFile(new LogEntry(
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [Warning] [LogService] " +
+                $"写盘跟不上产生速度，此前丢弃 {dropped} 条日志（队列上限 {MaxQueuedEntries}）",
+                "app.log",
+                requiresImmediateFlush: false));
+        }
+
+        /// <summary>真正碰磁盘的地方。内部自带 _ioLock，调用方不需要再加锁。</summary>
         private static void AppendToFile(LogEntry entry)
         {
             try
@@ -374,12 +554,176 @@ namespace DockedTools.Features.UnifiedCalls.Logging
                     return; // 无法创建日志目录，只输出控制台
                 }
 
-                var logFilePath = Path.Combine(_logDirectory, entry.FileName);
-                File.AppendAllText(logFilePath, entry.Message + Environment.NewLine);
+                lock (_ioLock)
+                {
+                    var targets = _openTargets ??= new Dictionary<string, LogTarget>(StringComparer.OrdinalIgnoreCase);
+
+                    if (!targets.TryGetValue(entry.FileName, out var target))
+                    {
+                        var opened = OpenTarget(entry.FileName);
+                        if (opened == null)
+                        {
+                            return;
+                        }
+
+                        target = opened.Value;
+                        targets[entry.FileName] = target;
+                    }
+
+                    // 用字节数而不是字符数判上限：中文一条日志 UTF-8 是 3 字节/字，
+                    // 按字符算会把体积估小三分之一。
+                    int payloadBytes = Encoding.UTF8.GetByteCount(entry.Message) + Environment.NewLine.Length;
+
+                    if (target.BytesWritten + payloadBytes > MaxLogBytesPerFile)
+                    {
+                        var rotated = RotateTarget(target);
+                        if (rotated == null)
+                        {
+                            return;
+                        }
+
+                        target = rotated.Value;
+                    }
+
+                    try
+                    {
+                        target.Writer.WriteLine(entry.Message);
+
+                        if (entry.RequiresImmediateFlush)
+                        {
+                            target.Writer.Flush();
+                        }
+
+                        targets[entry.FileName] = target with
+                        {
+                            BytesWritten = target.BytesWritten + payloadBytes,
+                        };
+                    }
+                    catch
+                    {
+                        // 流已经进入不可用状态，丢掉等下一轮重开，
+                        // 不能让一条坏日志把整个写线程带崩。
+                        CloseAndRemoveTarget(entry.FileName);
+                    }
+                }
             }
             catch
             {
                 // 写入日志失败不应影响程序运行
+            }
+        }
+
+        /// <summary>打开（或重开）某个日志文件的常驻追加流；只在写线程 + _ioLock 内调用</summary>
+        private static LogTarget? OpenTarget(string fileName)
+        {
+            try
+            {
+                var path = Path.Combine(_logDirectory!, fileName);
+
+                // FileMode.Append：重启后接着上次的文件写，不覆盖上一场事故的现场。
+                // FileShare.ReadWrite：让外部 CLI 能边写边读（tail / -Follow）。
+                var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+                var writer = new StreamWriter(stream, new UTF8Encoding(false), bufferSize: 4096);
+
+                return new LogTarget(fileName, writer, stream.Length);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[LogService] 打开 {fileName} 失败: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// 关流 ⇒ 文件名后移一格 ⇒ 重开。
+        ///
+        /// 滚动失败（通常是外部读者还握着句柄，改名要求文件没有被打开）时降级为
+        /// 「继续往原文件追加」：宁可让文件暂时超出上限，也不能把这一条日志弄丢。
+        /// 因为重开走 FileMode.Append 并按真实长度记账，下一轮还会再试一次，
+        /// 所以占用一松开就自动回到限额内。读取日志的 CLI 用
+        /// FileShare.ReadWrite | Delete 打开文件，就是为了不触发这个降级。
+        /// </summary>
+        private static LogTarget? RotateTarget(LogTarget current)
+        {
+            CloseAndRemoveTarget(current.FileName);
+
+            if (!TryRollFiles(current.FileName))
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[LogService] {current.FileName} 已达上限但滚动失败（可能被外部占用），本条改为继续追加");
+            }
+
+            return OpenTarget(current.FileName);
+        }
+
+        /// <summary>app.log → app.log.1，.1 → .2 …；最旧的一份被替换掉</summary>
+        private static bool TryRollFiles(string fileName)
+        {
+            try
+            {
+                // 从后往前移，并且用带覆盖的 Move：
+                // 先删最旧再改名会在中途少一份文件，覆盖式改名没有这个窗口。
+                for (int i = RolledFileCount - 1; i >= 1; i--)
+                {
+                    var from = Path.Combine(_logDirectory!, $"{fileName}.{i}");
+                    if (File.Exists(from))
+                    {
+                        File.Move(from, Path.Combine(_logDirectory!, $"{fileName}.{i + 1}"), overwrite: true);
+                    }
+                }
+
+                var live = Path.Combine(_logDirectory!, fileName);
+                if (File.Exists(live))
+                {
+                    File.Move(live, $"{live}.1", overwrite: true);
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[LogService] 滚动 {fileName} 出错: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>关掉并忘掉某个文件句柄；只在 _ioLock 内调用</summary>
+        private static void CloseAndRemoveTarget(string fileName)
+        {
+            if (_openTargets != null && _openTargets.TryGetValue(fileName, out var target))
+            {
+                _openTargets.Remove(fileName);
+                try
+                {
+                    target.Writer.Dispose();
+                }
+                catch
+                {
+                    // 已经坏了的句柄，关不掉也不影响后面重开
+                }
+            }
+        }
+
+        /// <summary>把所有常驻流的缓冲压下去；调用者必须已经持有 _ioLock</summary>
+        private static void FlushStreamsLocked()
+        {
+            if (_openTargets == null)
+            {
+                return;
+            }
+
+            foreach (var target in _openTargets.Values)
+            {
+                try
+                {
+                    // 刷到操作系统就够了：进程崩了不会丢 OS 缓存里的内容，
+                    // 只有断电才丢，而那不是日志该管的事。
+                    target.Writer.Flush();
+                }
+                catch
+                {
+                    // 单个坏流不影响其它文件
+                }
             }
         }
 
@@ -393,6 +737,11 @@ namespace DockedTools.Features.UnifiedCalls.Logging
         /// </summary>
         public static void Flush(int timeoutMs = 2000)
         {
+            if (timeoutMs < 0)
+            {
+                timeoutMs = 0;
+            }
+
             long deadline = Environment.TickCount64 + timeoutMs;
 
             // 两个条件都满足才算排干：队列里没有待写的条目，且写线程不在
@@ -403,10 +752,115 @@ namespace DockedTools.Features.UnifiedCalls.Logging
             {
                 Thread.Sleep(10);
             }
+
+            // 排干之后把 StreamWriter 缓冲也压下去。拿不到锁说明写线程正被磁盘按住，
+            // 这时放弃这次强制刷盘（它自己会写完），绝不能把调用方 —— 通常是 UI 线程 ——
+            // 拖进超出预算的等待：这个方法的调用点全在退出链和崩溃路径上。
+            // 真正要紧的 Error 行本来就是逐条刷盘的，不依赖这一步。
+            long remaining = deadline - Environment.TickCount64;
+            bool lockTaken = false;
+            try
+            {
+                lockTaken = Monitor.TryEnter(_ioLock, remaining > 0 ? (int)remaining : 0);
+                if (lockTaken)
+                {
+                    FlushStreamsLocked();
+                }
+            }
+            catch
+            {
+                // 刷盘失败不该影响退出流程
+            }
+            finally
+            {
+                if (lockTaken)
+                {
+                    Monitor.Exit(_ioLock);
+                }
+            }
         }
 
         /// <summary>
-        /// 清理旧日志（保留最近 N 天）
+        /// 读 logs\level.txt，更新运行期级别。只在写线程上调用。
+        ///
+        /// 文件不存在 / 内容不合法 / 读不了 ⇒ 一律按 Info：
+        /// 排查开关不能反过来变成新的故障来源。
+        /// </summary>
+        private static void PollLevelFile()
+        {
+            try
+            {
+                EnsureLogDirectory();
+
+                if (_logDirectory == null)
+                {
+                    return;
+                }
+
+                var path = Path.Combine(_logDirectory, LevelFileName);
+                if (!File.Exists(path))
+                {
+                    Volatile.Write(ref _minimumLevel, (int)LogLevel.Info);
+                    return;
+                }
+
+                string text;
+                // FileShare.ReadWrite：CLI 或记事本正在写的时候也要能读到已经落下的部分
+                using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (var reader = new StreamReader(stream))
+                {
+                    text = reader.ReadToEnd();
+                }
+
+                ApplyLevelText(text);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[LogService] 读取 {LevelFileName} 失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>解析级别文本（去掉 BOM/空白），只在写线程上调用</summary>
+        private static void ApplyLevelText(string? text)
+        {
+            LogLevel parsed = LogLevel.Info;
+
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                var trimmed = text.Trim().TrimStart('\uFEFF').Trim();
+
+                if (Enum.TryParse(trimmed, ignoreCase: true, out LogLevel candidate) &&
+                    Enum.IsDefined(typeof(LogLevel), candidate))
+                {
+                    parsed = candidate;
+                }
+            }
+
+            int previous = Interlocked.Exchange(ref _minimumLevel, (int)parsed);
+            if (previous != (int)parsed)
+            {
+                System.Diagnostics.Debug.WriteLine($"[LogService] 落盘级别已切换为 {parsed}");
+            }
+        }
+
+        /// <summary>级别文件的完整路径，便于诊断信息和 CLI 提示</summary>
+        public static string? GetLevelFilePath()
+        {
+            var directory = GetLogDirectory();
+            return directory == null ? null : Path.Combine(directory, LevelFileName);
+        }
+
+        /// <summary>
+        /// 清理历史日志（保留最近 N 天）。
+        ///
+        /// 【为什么不能按「所有 *.log 都按时间删」】
+        /// 旧实现就是这样，两个坑：
+        /// 1. 托盘应用可能一周不开，app.log 恰好是「没被写过」的活文件，
+        ///    于是清理把最后一次事故现场删掉了 —— 而用户回来时最需要它的正是那一刻。
+        /// 2. Win32 的 *.log 通配匹配不到 app.log.1 这种滚动档，
+        ///    也就是说该限体积的地方一直没被限住。
+        /// 现在只删历史档：滚动出来的 .log.1 … .log.N，以及旧版本遗留的 debug.log。
+        /// 活文件由滚动自己控制体积，level.txt 是用户手动开关，都不动。
         /// </summary>
         public static void CleanupOldLogs(int keepDays = 7)
         {
@@ -419,23 +873,27 @@ namespace DockedTools.Features.UnifiedCalls.Logging
                     return;
                 }
 
-                var cutoffDate = DateTime.Now.AddDays(-keepDays);
-                var logFiles = Directory.GetFiles(_logDirectory, "*.log");
+                var cutoffDate = DateTime.Now.AddDays(-Math.Max(0, keepDays));
 
-                foreach (var logFile in logFiles)
+                foreach (var logFile in Directory.EnumerateFiles(_logDirectory))
                 {
-                    var fileInfo = new FileInfo(logFile);
-                    if (fileInfo.LastWriteTime < cutoffDate)
+                    var name = Path.GetFileName(logFile);
+                    if (!IsRemovableHistoryFile(name))
                     {
-                        try
+                        continue;
+                    }
+
+                    try
+                    {
+                        if (new FileInfo(logFile).LastWriteTime < cutoffDate)
                         {
                             File.Delete(logFile);
-                            System.Diagnostics.Debug.WriteLine($"[LogService] Deleted old log file: {fileInfo.Name}");
+                            System.Diagnostics.Debug.WriteLine($"[LogService] Deleted old log file: {name}");
                         }
-                        catch
-                        {
-                            // 删除失败，忽略
-                        }
+                    }
+                    catch
+                    {
+                        // 被占用（多半是 CLI 正在 tail）就下次再说
                     }
                 }
             }
@@ -443,6 +901,42 @@ namespace DockedTools.Features.UnifiedCalls.Logging
             {
                 // 清理失败不影响程序运行
             }
+        }
+
+        /// <summary>这个文件是不是「可以按年龄删掉的历史档」</summary>
+        private static bool IsRemovableHistoryFile(string fileName)
+        {
+            if (string.Equals(fileName, LevelFileName, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (LiveFileNames.Contains(fileName))
+            {
+                return false;
+            }
+
+            if (string.Equals(fileName, LegacyDebugLogFileName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            // 滚动档必须是「活文件名 + .数字」：只看后缀是不是数字就删，
+            // 会把别的模块或用户顺手放进同一个目录的编号文件一起带走。
+            int lastDot = fileName.LastIndexOf('.');
+            if (lastDot <= 0 || lastDot == fileName.Length - 1)
+            {
+                return false;
+            }
+
+            var stem = fileName.Substring(0, lastDot);
+            if (!LiveFileNames.Contains(stem))
+            {
+                return false;
+            }
+
+            var suffix = fileName.Substring(lastDot + 1);
+            return int.TryParse(suffix, out int index) && index >= 1 && index <= RolledFileCount;
         }
 
         /// <summary>

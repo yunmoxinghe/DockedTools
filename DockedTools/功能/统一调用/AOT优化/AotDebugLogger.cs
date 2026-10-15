@@ -1,90 +1,50 @@
 using System;
-using System.IO;
-using Windows.Storage;
 
 namespace DockedTools.Features.Shared.AotOptimization
 {
     /// <summary>
     /// AOT 友好的调试日志记录器
-    /// 
+    ///
     /// <para>
-    /// 在 Native AOT 模式下，Debug.WriteLine 可能不会输出到调试器。
-    /// 此日志记录器将日志写入应用本地文件夹，方便排查问题。
+    /// 在 Native AOT 模式下，Debug.WriteLine 可能不会输出到调试器，
+    /// 所以设置读写这类高频路径需要一个「能看到落盘细节」的入口。
     /// </para>
-    /// 
+    ///
     /// <para>
-    /// 日志位置：%LocalAppData%\Packages\{PackageId}\LocalState\debug.log
+    /// ⚠️ 2026-10-16：这里原来自己维护一套「lock + File.AppendAllText 写到 LocalState\debug.log」，
+    /// 和 LogService 修过的坑完全一样 —— 同步落盘发生在调用线程上（设置页在 UI 线程读配置），
+    /// 而且 debug.log 既没有体积上限、也不认运行期级别开关，等于给日志留了第二套无界出口。
+    /// 现在统一转发给 <see cref="UnifiedCalls.Logging.LogService"/>，
+    /// 走那条唯一的写线程、受 app.log 的滚动和 level.txt 控制。
+    /// </para>
+    ///
+    /// <para>
+    /// 【怎么看这些日志】默认级别是 Info，Debug 档不落盘（只进控制台）。
+    /// 要排查设置项读写时，把 LocalState\logs\level.txt 写成 Debug 即可，
+    /// 例如：读取日志.ps1 -SetLevel Debug。
     /// </para>
     /// </summary>
     public static class AotDebugLogger
     {
-        private static readonly string LogFilePath;
-        private static readonly object LockObject = new();
-
-        static AotDebugLogger()
-        {
-            try
-            {
-                // 日志文件路径：LocalState\debug.log
-                var localFolder = ApplicationData.Current.LocalFolder;
-                LogFilePath = Path.Combine(localFolder.Path, "debug.log");
-                
-                // 启动时清空旧日志（可选）
-                // File.WriteAllText(LogFilePath, $"=== Log Started at {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===\n");
-            }
-            catch (Exception ex)
-            {
-                // 初始化失败时使用临时路径
-                LogFilePath = Path.Combine(Path.GetTempPath(), "docked-ai-debug.log");
-                System.Diagnostics.Debug.WriteLine($"[AotDebugLogger] Failed to initialize log file: {ex.Message}");
-            }
-        }
+        /// <summary>日志级别名，和 LogService 的模块名对应</summary>
+        private const string ModuleName = "AOT优化";
 
         /// <summary>
-        /// 写入调试日志（同时输出到 Debug 和文件）
+        /// 写入调试日志（转交 LogService：控制台 + 按 level.txt 决定是否落盘）
         /// </summary>
         public static void Log(string message)
         {
-            try
-            {
-                var logEntry = $"[{DateTime.Now:HH:mm:ss.fff}] {message}";
-                
-                // 1. 输出到 Debug（IDE 调试时可见）
-                System.Diagnostics.Debug.WriteLine(logEntry);
-                
-                // 2. 写入文件（AOT 模式时的主要方法）
-                lock (LockObject)
-                {
-                    File.AppendAllText(LogFilePath, logEntry + Environment.NewLine);
-                }
-            }
-            catch
-            {
-                // 静默失败，避免日志记录影响应用运行
-            }
+            UnifiedCalls.Logging.LogService.Debug(ModuleName, message);
         }
 
         /// <summary>
-        /// 获取日志文件路径
+        /// 写入一条「值得默认落盘」的告警。
+        /// 给确实可能是故障的场景用（类型不匹配、持久化失败等），
+        /// 纯流水账请继续用 <see cref="Log"/>。
         /// </summary>
-        public static string GetLogFilePath() => LogFilePath;
-
-        /// <summary>
-        /// 清空日志文件
-        /// </summary>
-        public static void Clear()
+        public static void Warn(string message)
         {
-            try
-            {
-                lock (LockObject)
-                {
-                    File.WriteAllText(LogFilePath, $"=== Log Cleared at {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===\n");
-                }
-            }
-            catch
-            {
-                // 静默失败
-            }
+            UnifiedCalls.Logging.LogService.Warning(ModuleName, message);
         }
     }
 }
