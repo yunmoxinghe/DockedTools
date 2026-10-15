@@ -307,11 +307,21 @@ namespace DockedTools.Features.Pages.WebApp.EdgeSync
                         // 尝试获取图标，如果没有则为 null
                         favicons.TryGetValue(bookmark.Url, out var iconBytes);
 
+                        // ⚠️ 这里创建的是「从 Edge 书签批量同步过来的条目」，不是用户逐个确认过的网页应用。
+                        // 权限开关若跟着模型默认值全开，一次同步就等于静默给几十上百个站点发了
+                        // 摄像头 / 麦克风 / 定位授权 —— 而本桥接是宿主静默裁决，不再有 WebView2
+                        // 自己的许可弹窗兜底，用户全程不会收到任何提示。
+                        // 所以显式全关：想要的人回详情页按自己的意愿逐个打开。
                         var shortcut = new WebAppShortcut(
                             Guid.NewGuid().ToString(),
                             bookmark.Name,
                             bookmark.Url,
-                            iconBytes
+                            iconBytes,
+                            NotificationsEnabled: false,
+                            GeolocationEnabled: false,
+                            CameraEnabled: false,
+                            MicrophoneEnabled: false,
+                            ClipboardReadEnabled: false
                         );
 
                         newShortcuts.Add(shortcut);

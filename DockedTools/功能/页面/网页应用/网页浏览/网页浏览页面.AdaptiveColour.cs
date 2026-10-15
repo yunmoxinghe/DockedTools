@@ -475,6 +475,10 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             {
                 if (resetOnFailure)
                 {
+                    // 打一条再复位：错误页这类文档上若 ExecuteScript 真取不到，
+                    // 只有这一行能把它和「取到了但被闸门扣掉」区分开。
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[WebBrowserPage] 取色探测无结果，复位栏色 source=\"{WebView.CoreWebView2?.Source}\"");
                     DispatcherQueue.TryEnqueue(() => ResetAdaptiveBarColour());
                 }
 
@@ -495,7 +499,11 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // 它的结果仍会在 ProbeOnceAsync 里走到这里。
             CoreWebView2 core = WebView.CoreWebView2!;
 
-            if (!PageColourProbe.SameLocation(data.Url, core.Source))
+            // 内部文档（错误页那一类）：文档 URL 与 Source 天然不是同一套，
+            // 拿 SameLocation 比必然不等，整份结果会被当成"过期文档"扣掉 ——
+            // 「报错页面不取色」就是这么来的。见 IsInternalDocumentSide 的注释。
+            if (!IsInternalDocumentSide(data.Url, core.Source)
+                && !PageColourProbe.SameLocation(data.Url, core.Source))
             {
                 return;
             }
@@ -514,6 +522,21 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
             DispatcherQueue.TryEnqueue(() => ApplyAdaptiveBarColour(result, data));
         }
+
+        /// <summary>
+        /// 取色结果里的文档 URL 与 <c>CoreWebView2.Source</c> 之间，是否有一方是【浏览器内部文档】。
+        /// </summary>
+        /// <remarks>
+        /// 导航失败时 Chromium 顶上来的错误页文档是 <c>chrome-error://chromewebdata/</c>，
+        /// 而 Source 仍是失败的那个目标地址（或停在导航前的旧地址）—— 两者做同文档比对
+        /// 永远不相等，取色就被三道 URL 闸门当成"上一个文档的迟到结果"扣掉，表现就是
+        /// 报错页面一直不取色（栏色停在默认色或上一个站点的颜色）。
+        /// 这类文档上 URL 闸门没有可比对象，改成只靠文档代次闸门（IsStaleDocument）防串色 ——
+        /// 错误页是新文档，代次必然比被标记为过期的那个更新，能正常放行。
+        /// </remarks>
+        private static bool IsInternalDocumentSide(string? dataUrl, string? sourceUrl)
+            => PageColourProbe.IsInternalDocument(dataUrl)
+                || PageColourProbe.IsInternalDocument(sourceUrl);
 
         /// <summary>最近一次接受的文档代次（<c>performance.timeOrigin</c>）。0 = 还没见过。</summary>
         private double _adaptiveDocOrigin;
@@ -626,10 +649,14 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // 老版本脚本不带 url 字段时 SameLocation 一律放行 —— 拿不到就别拦，
             // 误扣整张本质正常的回传会让自适应彻底不生效，比偶尔串色更难排查。
             string? currentUrl = WebView?.CoreWebView2?.Source;
-            if (!PageColourProbe.SameLocation(data.Url, currentUrl))
+            if (!IsInternalDocumentSide(data.Url, currentUrl)
+                && !PageColourProbe.SameLocation(data.Url, currentUrl))
             {
+                // 带上两边的值：判定"到底是谁在拦"只能靠这两串 —— 尤其是错误页那类
+                // 内部文档，两边天然对不上，光看"URL 不匹配"无法区分误伤与真过期。
                 System.Diagnostics.Debug.WriteLine(
-                    "[WebBrowserPage] 丢弃过期文档的取色回传（URL 不匹配）");
+                    $"[WebBrowserPage] 丢弃过期文档的取色回传（URL 不匹配）" +
+                    $" data=\"{data.Url}\" source=\"{currentUrl}\"");
                 return;
             }
 
@@ -646,7 +673,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             {
                 // Enqueue 之后才上 UI 线程，这里再看一次 Source：
                 // 排队的这一小段时间里又可能已经导航走了，写晚了同样是串色。
-                if (!PageColourProbe.SameLocation(data.Url, WebView?.CoreWebView2?.Source))
+                string? liveUrl = WebView?.CoreWebView2?.Source;
+                if (!IsInternalDocumentSide(data.Url, liveUrl)
+                    && !PageColourProbe.SameLocation(data.Url, liveUrl))
                 {
                     return;
                 }

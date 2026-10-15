@@ -872,12 +872,6 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   <data name="SettingsPage_DisablePluginsHeader.Description" xml:space="preserve">
     <value>禁用浏览器插件（需重启 WebView）</value>
   </data>
-  <data name="SettingsPage_WebNotificationsHeader.Header" xml:space="preserve">
-    <value>网页通知</value>
-  </data>
-  <data name="SettingsPage_WebNotificationsHeader.Description" xml:space="preserve">
-    <value>把网页发出的通知转投到 Windows 系统通知，并允许站点请求通知权限</value>
-  </data>
   <data name="SettingsPage_DiskCacheSizeHeader.Header" xml:space="preserve">
     <value>磁盘缓存大小</value>
   </data>
@@ -994,6 +988,24 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   <data name="WebAppManagementPage_EmptyStateHint.Text" xml:space="preserve">
     <value>点击上方「添加网页应用」按钮开始添加</value>
   </data>
+  <data name="WebAppManagementPage_PermNotifications" xml:space="preserve">
+    <value>通知</value>
+  </data>
+  <data name="WebAppManagementPage_PermGeolocation" xml:space="preserve">
+    <value>定位</value>
+  </data>
+  <data name="WebAppManagementPage_PermCamera" xml:space="preserve">
+    <value>相机</value>
+  </data>
+  <data name="WebAppManagementPage_PermMicrophone" xml:space="preserve">
+    <value>麦克风</value>
+  </data>
+  <data name="WebAppManagementPage_PermClipboard" xml:space="preserve">
+    <value>剪贴板</value>
+  </data>
+  <data name="WebAppManagementPage_PermNone" xml:space="preserve">
+    <value>未授予权限</value>
+  </data>
   <!-- 网页应用详情页 -->
   <data name="WebAppDetailPage_Title.Text" xml:space="preserve">
     <value>编辑网页应用</value>
@@ -1057,6 +1069,51 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   </data>
   <data name="WebAppDetailPage_CookieHeader.Description" xml:space="preserve">
     <value>查看和管理此应用的 Cookie。所有网页应用共用一个数据目录，Cookie 也是共享的</value>
+  </data>
+  <data name="WebAppDetailPage_PermissionSection.Text" xml:space="preserve">
+    <value>站点权限</value>
+  </data>
+  <data name="WebAppDetailPage_NotificationsHeader.Header" xml:space="preserve">
+    <value>通知</value>
+  </data>
+  <data name="WebAppDetailPage_NotificationsHeader.Description" xml:space="preserve">
+    <value>把这个网站发出的通知转投到 Windows 系统通知，并允许它请求通知权限</value>
+  </data>
+  <data name="WebAppDetailPage_GeolocationHeader.Header" xml:space="preserve">
+    <value>地理位置</value>
+  </data>
+  <data name="WebAppDetailPage_GeolocationHeader.Description" xml:space="preserve">
+    <value>允许这个网站获取你的地理位置</value>
+  </data>
+  <data name="WebAppDetailPage_CameraHeader.Header" xml:space="preserve">
+    <value>相机</value>
+  </data>
+  <data name="WebAppDetailPage_CameraHeader.Description" xml:space="preserve">
+    <value>允许这个网站使用相机</value>
+  </data>
+  <data name="WebAppDetailPage_MicrophoneHeader.Header" xml:space="preserve">
+    <value>麦克风</value>
+  </data>
+  <data name="WebAppDetailPage_MicrophoneHeader.Description" xml:space="preserve">
+    <value>允许这个网站使用麦克风</value>
+  </data>
+  <data name="WebAppDetailPage_ClipboardReadHeader.Header" xml:space="preserve">
+    <value>读取剪贴板</value>
+  </data>
+  <data name="WebAppDetailPage_ClipboardReadHeader.Description" xml:space="preserve">
+    <value>允许这个网站读取剪贴板内容</value>
+  </data>
+  <data name="WebAppDetailPage_ResetSitePermissionsHeader.Header" xml:space="preserve">
+    <value>重置站点权限</value>
+  </data>
+  <data name="WebAppDetailPage_ResetSitePermissionsHeader.Description" xml:space="preserve">
+    <value>若改了上面的开关仍不生效，多半是旧决策被浏览器记住了。点此清除该站点已存的权限记录，下次访问重新裁决</value>
+  </data>
+  <data name="WebAppDetailPage_PermissionReset" xml:space="preserve">
+    <value>已清除该站点已存的权限记录，下次访问会重新裁决</value>
+  </data>
+  <data name="WebAppDetailPage_PermissionResetFailed" xml:space="preserve">
+    <value>未能清除该站点的权限记录。若还没打开过网页浏览页，请先打开一次再试</value>
   </data>
   
   <!-- 网页应用详情页 - 键盘映射按钮 -->

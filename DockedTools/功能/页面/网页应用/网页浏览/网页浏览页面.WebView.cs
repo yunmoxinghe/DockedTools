@@ -84,7 +84,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 WebView.CoreWebView2.NewWindowRequested += CoreWebView2_NewWindowRequested;
                 
                 // ⭐ 网页通知 → 系统通知的桥接（内部幂等，重复订阅安全）
-                Services.WebNotificationBridge.Attach(WebView.CoreWebView2);
+                Services.WebPermissionBridge.Attach(WebView.CoreWebView2);
                 
                 // ⭐ 任务 3.2：订阅 ProcessFailed 事件（防止重复订阅）
                 WebView.CoreWebView2.ProcessFailed -= CoreWebView2_ProcessFailed;
@@ -232,7 +232,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     WebView.CoreWebView2.NewWindowRequested += CoreWebView2_NewWindowRequested;
                     
                     // ⭐ 网页通知 → 系统通知的桥接（内部幂等，重复订阅安全）
-                    Services.WebNotificationBridge.Attach(WebView.CoreWebView2);
+                    Services.WebPermissionBridge.Attach(WebView.CoreWebView2);
                     
                     // ⭐ 任务 3.2：订阅 ProcessFailed 事件
                     WebView.CoreWebView2.ProcessFailed += CoreWebView2_ProcessFailed;
@@ -555,7 +555,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     // OnNotificationReceived → 先置 Handled=true 再 Show → 抛 COMException
                     // 被 catch 吞掉。结果是系统通知没弹、WebView2 侧却已被标记为已处理，
                     // 通知静默丢失。Detach 同时会把这个内核挂着的 deferral 收掉。
-                    Services.WebNotificationBridge.Detach(webView.CoreWebView2);
+                    Services.WebPermissionBridge.Detach(webView.CoreWebView2);
 
                     // 停止当前导航
                     webView.CoreWebView2.Stop();

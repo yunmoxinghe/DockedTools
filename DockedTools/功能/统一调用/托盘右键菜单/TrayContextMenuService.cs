@@ -502,7 +502,11 @@ public static partial class TrayContextMenuService
             System.Threading.Tasks.Task.Delay(500).Wait();
             
             System.Diagnostics.Debug.WriteLine("[TrayContextMenu] Force exiting application...");
-            
+
+            // 日志是异步落盘的，硬退出前先把队列压干（500ms 是上限，队列空则立即返回）。
+            // 这条路径常在「UI 已经不响应、用户从托盘强退」时走，最后那几条日志正是排查依据。
+            DockedTools.Features.UnifiedCalls.Logging.LogService.Flush(500);
+
             // 强制退出进程。
             // 退出码用 0：这是用户主动选择的退出，只是没走成优雅路径而已；
             // 用 1 会让 VS / 调试器显示"程序已退出，返回值 1"，看着像崩了，实际不是。

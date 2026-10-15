@@ -387,6 +387,81 @@
                             <FontIcon Glyph="&#xE81C;" />
                         </controls:SettingsCard.HeaderIcon>
                     </controls:SettingsCard>
+
+                    <!-- 站点权限：每个网页应用独立控制。
+                         这五类由宿主静默裁决（见 WebPermissionBridge.OnPermissionRequested），
+                         不再弹 WebView2 自己的许可框 —— 用户装的是「应用」，理应在应用设置里管能力。 -->
+                    <TextBlock
+                        x:Uid="WebAppDetailPage_PermissionSection"
+                        Style="{StaticResource BodyStrongTextBlockStyle}"
+                        Margin="1,16,0,4"/>
+
+                    <!-- 允许通知 -->
+                    <controls:SettingsCard
+                        x:Uid="WebAppDetailPage_NotificationsHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE91C;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <ToggleSwitch
+                            x:Name="NotificationsToggle"
+                            Toggled="OnNotificationsToggled"/>
+                    </controls:SettingsCard>
+
+                    <!-- 允许获取地理位置 -->
+                    <controls:SettingsCard
+                        x:Uid="WebAppDetailPage_GeolocationHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE707;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <ToggleSwitch
+                            x:Name="GeolocationToggle"
+                            Toggled="OnGeolocationToggled"/>
+                    </controls:SettingsCard>
+
+                    <!-- 允许使用相机 -->
+                    <controls:SettingsCard
+                        x:Uid="WebAppDetailPage_CameraHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE722;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <ToggleSwitch
+                            x:Name="CameraToggle"
+                            Toggled="OnCameraToggled"/>
+                    </controls:SettingsCard>
+
+                    <!-- 允许使用麦克风 -->
+                    <controls:SettingsCard
+                        x:Uid="WebAppDetailPage_MicrophoneHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE720;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <ToggleSwitch
+                            x:Name="MicrophoneToggle"
+                            Toggled="OnMicrophoneToggled"/>
+                    </controls:SettingsCard>
+
+                    <!-- 允许读取剪贴板 -->
+                    <controls:SettingsCard
+                        x:Uid="WebAppDetailPage_ClipboardReadHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE77F;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <ToggleSwitch
+                            x:Name="ClipboardReadToggle"
+                            Toggled="OnClipboardReadToggled"/>
+                    </controls:SettingsCard>
+
+                    <!-- 重置该站点已持久化的权限（修复「开了还不行」） -->
+                    <controls:SettingsCard
+                        x:Uid="WebAppDetailPage_ResetSitePermissionsHeader">
+                        <controls:SettingsCard.HeaderIcon>
+                            <FontIcon Glyph="&#xE894;" />
+                        </controls:SettingsCard.HeaderIcon>
+                        <Button
+                            x:Uid="WebAppDetailPage_Reset"
+                            Click="OnResetSitePermissionsClick"
+                            HorizontalAlignment="Left"/>
+                    </controls:SettingsCard>
                 </StackPanel>
 
                 <Border Height="40" />

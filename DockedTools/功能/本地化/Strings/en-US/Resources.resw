@@ -848,12 +848,6 @@ Error Message: {1}</value>
   <data name="SettingsPage_DisablePluginsHeader.Description" xml:space="preserve">
     <value>Disable browser plugins (requires WebView restart)</value>
   </data>
-  <data name="SettingsPage_WebNotificationsHeader.Header" xml:space="preserve">
-    <value>Web Notifications</value>
-  </data>
-  <data name="SettingsPage_WebNotificationsHeader.Description" xml:space="preserve">
-    <value>Relay web notifications to Windows system notifications and let sites request notification permission</value>
-  </data>
   <data name="SettingsPage_DiskCacheSizeHeader.Header" xml:space="preserve">
     <value>Disk Cache Size</value>
   </data>
@@ -994,6 +988,24 @@ Error Message: {1}</value>
   <data name="WebAppManagementPage_EmptyStateHint.Text" xml:space="preserve">
     <value>Click "Add Web App" button above to get started</value>
   </data>
+  <data name="WebAppManagementPage_PermNotifications" xml:space="preserve">
+    <value>Notifications</value>
+  </data>
+  <data name="WebAppManagementPage_PermGeolocation" xml:space="preserve">
+    <value>Location</value>
+  </data>
+  <data name="WebAppManagementPage_PermCamera" xml:space="preserve">
+    <value>Camera</value>
+  </data>
+  <data name="WebAppManagementPage_PermMicrophone" xml:space="preserve">
+    <value>Microphone</value>
+  </data>
+  <data name="WebAppManagementPage_PermClipboard" xml:space="preserve">
+    <value>Clipboard</value>
+  </data>
+  <data name="WebAppManagementPage_PermNone" xml:space="preserve">
+    <value>No permissions granted</value>
+  </data>
   <!-- Web App Detail Page -->
   <data name="WebAppDetailPage_Title.Text" xml:space="preserve">
     <value>Edit Web App</value>
@@ -1057,6 +1069,51 @@ Error Message: {1}</value>
   </data>
   <data name="WebAppDetailPage_CookieHeader.Description" xml:space="preserve">
     <value>View and manage cookies for this app. All web apps share one data folder, so cookies are shared too</value>
+  </data>
+  <data name="WebAppDetailPage_PermissionSection.Text" xml:space="preserve">
+    <value>Site permissions</value>
+  </data>
+  <data name="WebAppDetailPage_NotificationsHeader.Header" xml:space="preserve">
+    <value>Notifications</value>
+  </data>
+  <data name="WebAppDetailPage_NotificationsHeader.Description" xml:space="preserve">
+    <value>Relay notifications from this site to Windows system notifications and let it request notification permission</value>
+  </data>
+  <data name="WebAppDetailPage_GeolocationHeader.Header" xml:space="preserve">
+    <value>Location</value>
+  </data>
+  <data name="WebAppDetailPage_GeolocationHeader.Description" xml:space="preserve">
+    <value>Let this site access your location</value>
+  </data>
+  <data name="WebAppDetailPage_CameraHeader.Header" xml:space="preserve">
+    <value>Camera</value>
+  </data>
+  <data name="WebAppDetailPage_CameraHeader.Description" xml:space="preserve">
+    <value>Let this site use the camera</value>
+  </data>
+  <data name="WebAppDetailPage_MicrophoneHeader.Header" xml:space="preserve">
+    <value>Microphone</value>
+  </data>
+  <data name="WebAppDetailPage_MicrophoneHeader.Description" xml:space="preserve">
+    <value>Let this site use the microphone</value>
+  </data>
+  <data name="WebAppDetailPage_ClipboardReadHeader.Header" xml:space="preserve">
+    <value>Clipboard read</value>
+  </data>
+  <data name="WebAppDetailPage_ClipboardReadHeader.Description" xml:space="preserve">
+    <value>Let this site read the clipboard</value>
+  </data>
+  <data name="WebAppDetailPage_ResetSitePermissionsHeader.Header" xml:space="preserve">
+    <value>Reset site permissions</value>
+  </data>
+  <data name="WebAppDetailPage_ResetSitePermissionsHeader.Description" xml:space="preserve">
+    <value>If changing the switches above does not take effect, an old decision is probably remembered by the browser. Clear the stored permissions for this site here and they will be decided again on your next visit</value>
+  </data>
+  <data name="WebAppDetailPage_PermissionReset" xml:space="preserve">
+    <value>Cleared the stored permissions for this site. They will be decided again on your next visit</value>
+  </data>
+  <data name="WebAppDetailPage_PermissionResetFailed" xml:space="preserve">
+    <value>Could not clear the stored permissions. If you have not opened the web browsing page yet, open it once and try again</value>
   </data>
   
   <!-- Web App Detail Page - Keyboard Mapping Buttons -->

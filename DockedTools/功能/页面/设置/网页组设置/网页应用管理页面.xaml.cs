@@ -1,3 +1,4 @@
+using DockedTools.Features.Localization;
 using DockedTools.Features.Pages.WebApp.Shared;
 using DockedTools.Features.UnifiedCalls.TopAppBar;
 using DockedTools.Features.UnifiedCalls.InAppDialog;
@@ -7,6 +8,7 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Navigation;
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -124,6 +126,60 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
             UpdateVisualState();
         }
 
+        /// <summary>
+        /// 卡片描述：URL 后面并一行「这个应用开了哪些能力」。
+        ///
+        /// <para><b>为什么把权限并进列表页。</b>逐站开关相对浏览器弹窗的最大好处是「可审查」——
+        /// 一眼能看出哪个应用悄悄拿着麦克风。可如果只有点进详情页才看得到，
+        /// 这份可审查性等于不存在：没人会为了审计权限把每个应用都点开一遍。</para>
+        ///
+        /// <para>⚠️ <b>加载和刷新必须走同一个构造器</b>。<see cref="RefreshAppsAsync"/> 是拿
+        /// 卡片上的旧字符串和新字符串比对再决定是否赋值，两边格式只要写不一致，
+        /// 结果就是从详情页改完权限返回、列表摘要纹丝不动 —— 比不显示还糟，
+        /// 因为用户会以为改动没生效。</para>
+        /// </summary>
+        private static string BuildCardDescription(WebAppShortcut app)
+        {
+            string summary = BuildPermissionSummary(app);
+            return string.IsNullOrEmpty(summary) ? app.Url : $"{app.Url} · {summary}";
+        }
+
+        /// <summary>把五个权限开关压成一行短标签；一个都没开时返回「未授予」。</summary>
+        private static string BuildPermissionSummary(WebAppShortcut app)
+        {
+            var granted = new List<string>(5);
+
+            if (app.NotificationsEnabled)
+            {
+                granted.Add(LocalizationHelper.GetString("WebAppManagementPage_PermNotifications"));
+            }
+            if (app.GeolocationEnabled)
+            {
+                granted.Add(LocalizationHelper.GetString("WebAppManagementPage_PermGeolocation"));
+            }
+            if (app.CameraEnabled)
+            {
+                granted.Add(LocalizationHelper.GetString("WebAppManagementPage_PermCamera"));
+            }
+            if (app.MicrophoneEnabled)
+            {
+                granted.Add(LocalizationHelper.GetString("WebAppManagementPage_PermMicrophone"));
+            }
+            if (app.ClipboardReadEnabled)
+            {
+                granted.Add(LocalizationHelper.GetString("WebAppManagementPage_PermClipboard"));
+            }
+
+            // 一个都没开也要显示出来：「未授予」是一个有价值的结论，
+            // 空字符串则会让人以为「这里没显示 = 状态未知」。
+            if (granted.Count == 0)
+            {
+                return LocalizationHelper.GetString("WebAppManagementPage_PermNone");
+            }
+
+            return string.Join(" · ", granted);
+        }
+
         private async Task LoadAppsAsync()
         {
             try
@@ -145,7 +201,7 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
                     {
                         HorizontalAlignment = HorizontalAlignment.Stretch,
                         Header = shortcut.Name,
-                        Description = shortcut.Url,
+                        Description = BuildCardDescription(shortcut),
                         IsClickEnabled = true,
                         Tag = shortcut
                     };
@@ -224,9 +280,13 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
                             {
                                 card.Header = newShortcut.Name;
                             }
-                            if (card.Description?.ToString() != newShortcut.Url)
+                            // ⚠️ 必须走 BuildCardDescription，不能拿 newShortcut.Url 直接比：
+                            // 卡片上现在存的是「URL · 权限摘要」，用纯 URL 比对永远不相等，
+                            // 于是每次刷新都白白赋值一次，而且格式和加载时不一致。
+                            string newDescription = BuildCardDescription(newShortcut);
+                            if (card.Description?.ToString() != newDescription)
                             {
-                                card.Description = newShortcut.Url;
+                                card.Description = newDescription;
                             }
 
                             // ⭐ 更新图标（检测三种情况）

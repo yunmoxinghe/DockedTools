@@ -186,6 +186,12 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 {
                     RecreateWebView();
                     _needsWebViewRecreation = false;
+
+                    // 这条路径自己就把「重建 + 重新初始化 + 导航」整条走完了（见下面
+                    // !_isWebViewReady 分支），所以后台期间欠下的恢复待办在这里清掉，
+                    // 不能再让 RestoreWebViewFromIdleState 里的补做逻辑重建第二次。
+                    _deferredRecoveryReason = null;
+                    _deferredRecoveryNeedsRecreation = false;
                 }
                 else
                 {
@@ -504,6 +510,20 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[RestoreWebViewFromIdleState] 恢复可见性失败: {ex.Message}");
+            }
+
+            // ⭐ 补做后台期间欠下的进程失败恢复（Reload / 重建）。
+            // 必须放在「Resume + 恢复可见性」之后：那时候控件已经回到能接住导航的状态，
+            // 也覆盖了「窗口收起→再滑出来」这条【不走导航】的路径 —— 走导航那条路径
+            // 在 OnNavigatedTo 里就把待办清了，这里看不到东西可做。
+            // 刻意放在下面的 early return 之前：核心被挂起过与否都不该影响补做。
+            try
+            {
+                TryRunDeferredRecovery();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[RestoreWebViewFromIdleState] 补做恢复失败: {ex.Message}");
             }
 
             if (core == null || !wasSuspended)

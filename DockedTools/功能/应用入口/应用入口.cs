@@ -288,9 +288,9 @@ namespace DockedTools
                 //    表现为「点了通知，应用被叫起来了，但不知道该跳哪儿」。
                 //    同理，Activated 的订阅也要在 Register 之前挂好：应用没在跑时系统走 COM 激活，
                 //    Register 的那一刻起事件就可能开始投递。
-                DockedTools.Features.Pages.WebApp.Browser.Services.WebNotificationBridge.Activated +=
+                DockedTools.Features.Pages.WebApp.Browser.Services.WebPermissionBridge.Activated +=
                     OnWebNotificationActivated;
-                DockedTools.Features.Pages.WebApp.Browser.Services.WebNotificationBridge.EnsurePlatformRegistered();
+                DockedTools.Features.Pages.WebApp.Browser.Services.WebPermissionBridge.EnsurePlatformRegistered();
 
                 // Check for ShareTarget activation
                 //
@@ -476,7 +476,7 @@ namespace DockedTools
             Microsoft.Windows.AppNotifications.AppNotificationActivatedEventArgs args)
         {
             string? origin = DockedTools.Features.Pages.WebApp.Browser.Services
-                .WebNotificationBridge.ReadOrigin(args);
+                .WebPermissionBridge.ReadOrigin(args);
 
             if (origin is null)
             {
@@ -692,6 +692,20 @@ namespace DockedTools
         {
             _isExiting = true;
 
+            // ⭐ 停狗必须在关闭任何窗口之前。
+            // 顺序原来是"先关掉主窗口/keep-alive（阶段一），再到线程池里的阶段二
+            // CleanupBackgroundServicesAsync 才 StopAsync"。中间那段里探测句柄已经失效、
+            // 主线程正忙着收尾，看门狗看到的是"连续无响应"，于是用户点退出反而被
+            // 判成卡死并重启回托盘。Stop() 只发取消信号、不阻塞，UI 线程上调用安全。
+            try
+            {
+                _uiThreadWatchdog?.Stop();
+            }
+            catch (Exception ex)
+            {
+                LogService.Error("应用入口", "停止 UI 线程看门狗失败（继续退出流程）", ex);
+            }
+
             // ── 阶段一：UI 线程同步收尾 ──────────────────────────────
             // 这些调用本身是同步的，不存在 continuation 排不回的问题。
             // ShutdownUiResources 内部已逐步兜错，这里再包一层只为绝对保证：
@@ -766,6 +780,11 @@ namespace DockedTools
                     $"Application.Exit() 已完成优雅收尾（WinUI 3 不负责退进程），" +
                     $"等待 {ForcedExitGraceMs}ms 后由 Environment.Exit(0) 收尾（当前线程数={threadCount}）");
 
+                // ⭐ 日志现在是「后台线程异步落盘」，硬退出会连同写线程一起带走。
+                //    退出前必须把队列压干，否则最后这几条（恰恰是最有排查价值的）永远进不了文件，
+                //    WER 附上的 app.log 也会停在退出之前。
+                LogService.Flush(1500);
+
                 // Environment.Exit 也可能被 finalizer 拖住，再挂一道硬终止保险。
                 // 这个线程是后台线程，不会阻止进程退出；只有进程真的赖着不走时才起作用。
                 //
@@ -782,6 +801,9 @@ namespace DockedTools
                     LogService.Warning(
                         "应用入口",
                         $"退出已超过 {KillGuardDelayMs}ms 仍未完成，执行进程硬终止（Environment.Exit 被 finalizer 拖住）");
+
+                    // 硬终止前给日志线程最后 300ms 把这条告警写下去 —— TerminateProcess 不等人。
+                    LogService.Flush(300);
 
                     if (!Features.AppEntry.AppEntryWin32Api.HardKillSelf(0))
                     {
@@ -1030,6 +1052,13 @@ namespace DockedTools
             if (hwnd != IntPtr.Zero)
             {
                 AppEntryWin32Api.ShowWindow(hwnd, AppEntryWin32Api.SW_HIDE);
+
+                // ⭐ 把看门狗的探测目标换到这个新句柄。
+                // keep-alive 窗口一旦重建（自愈路径），旧 HWND 就永久失效了；
+                // 不换绑的话 SendMessageTimeout 对废句柄恒返回 0，宽限期一过
+                // 必然判成"UI 线程冻结"并自动重启 —— 而 UI 其实完全健康。
+                // 这里是 UI 线程，取 WinUI 对象的句柄合法；看门狗后台线程自己不能取。
+                _uiThreadWatchdog?.Retarget(hwnd);
             }
 
             // 订阅 Closed 事件以实现自愈能力（任务 5.2）
@@ -1147,6 +1176,13 @@ namespace DockedTools
             {
                 e.Handled = true;
             }
+            else
+            {
+                // 这条异常会把进程带走，而日志现在是异步落盘的 —— 不等一下就等于
+                // 「崩在最关键的一条记录还没写下去的那一刻」。
+                // 800ms 是上限而非必等：队列空了立刻返回。
+                LogService.Flush(800);
+            }
         }
 
         private void CurrentDomain_UnhandledException(object? sender, System.UnhandledExceptionEventArgs e)
@@ -1162,6 +1198,12 @@ namespace DockedTools
                     $"未处理的应用程序域异常\nIsTerminating: {isTerminating}", 
                     ex
                 );
+
+                // 同上：进程要被这条异常带走时，先把日志队列压干。
+                if (e.IsTerminating)
+                {
+                    LogService.Flush(800);
+                }
             }
         }
 

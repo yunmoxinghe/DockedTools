@@ -1,16 +1,28 @@
-using DockedTools.Features.Pages.Settings;
+using DockedTools.Features.Pages.WebApp.Shared;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Windows.AppNotifications;
 using Microsoft.Windows.AppNotifications.Builder;
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 
 namespace DockedTools.Features.Pages.WebApp.Browser.Services;
 
 /// <summary>
-/// 把网页里的 Web Notification 转投成 Windows 系统通知（toast）。
+/// 网页能力的宿主接管层，做两件事：
+/// ① 把网页里的 Web Notification 转投成 Windows 系统通知（toast）；
+/// ② 按「网页应用」逐站决定 WebView2 的权限请求（通知 / 地理位置 / 相机 / 麦克风 / 剪贴板）。
 ///
-/// <para><b>为什么需要这一层。</b>WebView2 内置的那套默认通知 UI 是运行时的自绘窗口，
+/// <para><b>为什么改了名字。</b>这个类原本只管通知，叫 WebNotificationBridge。
+/// 后来逐站权限从通知扩到五类，继续叫「通知桥接」会让后来人以为相机请求跟这里没关系 ——
+/// 名字必须跟着职责走，不然注释写得再细也会被类名带偏。</para>
+///
+/// <para><b>逐站权限为什么不交给 WebView2 自己弹窗。</b>
+/// WebView2 的默认行为是运行时弹自己的许可框。对浏览器合适，对这里不合适：
+/// 用户是「安装」了一个网页应用，期望在应用设置里管它有哪些能力，而不是每次被拦一下。
+/// 所以受管的五类一律由宿主静默裁决：开了就 Allow，没开就 Default（等同拒绝但不留痕）。</para>
+///
+/// <para><b>为什么需要这一层（通知部分）。</b>WebView2 内置的那套默认通知 UI 是运行时的自绘窗口，
 /// 不属于系统通知中心：不会进「通知和操作」历史、不跟随系统的免打扰 / 专注助手、
 /// 应用退出后也一并消失。宿主接管之后改走 <c>Microsoft.Windows.AppNotifications</c>，
 /// 才算是真正落到系统里。</para>
@@ -26,6 +38,16 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services;
 ///    反过来也一样：Handled 还是 false 时调 Report* 会直接抛
 ///    <c>HRESULT_FROM_WIN32(ERROR_INVALID_STATE)</c>。</para>
 ///
+/// <para><b>权限裁决的三条铁律。</b>
+/// ① <b>只碰受管的五类</b>：不是受管种类的（传感器、MIDI、本地字体等）原样放行，
+///    交给 WebView2 自己处理。顺手把它们也改写成 Allow/Deny 等于无声改掉了别的能力的行为，
+///    属于典型的「顺手」，能惹祸就不好了。
+/// ② <b>拒绝时不留痕</b>：<c>SavesInProfile</c> 默认 true，会把这次拒绝写进 profile 持久化，
+///    而「状态持久化后浏览器可能不再触发 PermissionRequested」—— 一旦拒绝落盘，
+///    用户之后在设置里打开开关也救不回来。所以拒绝分支必须显式置 false。
+/// ③ <b>枚举名要写对</b>：是 <c>Notifications</c>（复数）、<c>ClipboardRead</c>，
+///    写错名字要么编译不过，要么静默放行了别的能力。</para>
+///
 /// <para><b>关于持久通知（Service Worker 发出的那种）。</b>
 /// 早期的设计方案里提到 CoreWebView2Profile 上会有一条 <c>NotificationReceived</c>，
 /// 用来接持久通知；但截至本机依赖的 WebView2 1.0.3719.77，Profile 的成员里并没有这条事件
@@ -38,7 +60,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services;
 /// https://learn.microsoft.com/windows/apps/windows-app-sdk/notifications/app-notifications/app-notifications-quickstart
 /// </para>
 /// </summary>
-public static class WebNotificationBridge
+public static class WebPermissionBridge
 {
     /// <summary>通知归属分组的前缀 —— 用来把不同站点的 tag 隔开，见 <see cref="Build"/></summary>
     private const string GroupPrefix = "web:";
@@ -76,6 +98,13 @@ public static class WebNotificationBridge
     private static readonly object _registerLock = new();
 
     private static bool _platformRegistered;
+
+    /// <summary>
+    /// 最近一次 <see cref="Attach"/> 时抓到的 WebView2 profile。全应用共用一个
+    /// <c>CoreWebView2Environment</c>，所有内核共享同一份 profile，所以抓一份就够
+    /// 给 <see cref="ResetSitePermissionsAsync"/> 当句柄用。
+    /// </summary>
+    private static CoreWebView2Profile? _profile;
 
     private static readonly object _pendingLock = new();
 
@@ -162,7 +191,7 @@ public static class WebNotificationBridge
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[WebNotificationBridge] 通知平台注册失败: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[WebPermissionBridge] 通知平台注册失败: {ex.Message}");
             }
         }
     }
@@ -174,7 +203,7 @@ public static class WebNotificationBridge
     private static void OnNotificationInvoked(AppNotificationManager sender, AppNotificationActivatedEventArgs args)
     {
         System.Diagnostics.Debug.WriteLine(
-            $"[WebNotificationBridge] 通知被点击: {string.Join(", ", args.Arguments)}");
+            $"[WebPermissionBridge] 通知被点击: {string.Join(", ", args.Arguments)}");
 
         // ⭐ 先把回执做掉，再交给订阅方。
         // 顺序反了的话，订阅方里任何一个异常都会让网页永远收不到 click 事件 ——
@@ -190,7 +219,7 @@ public static class WebNotificationBridge
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[WebNotificationBridge] 回执失败: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[WebPermissionBridge] 回执失败: {ex.Message}");
         }
 
         try
@@ -199,7 +228,7 @@ public static class WebNotificationBridge
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[WebNotificationBridge] 通知订阅方抛异常: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[WebPermissionBridge] 通知订阅方抛异常: {ex.Message}");
         }
     }
 
@@ -244,7 +273,7 @@ public static class WebNotificationBridge
             // 内核已经关掉（页面被淘汰 / 进程退出）时 Report* 会抛。
             // 这时网页侧本来也收不到事件了，记一笔就够，不能让它冒出去。
             System.Diagnostics.Debug.WriteLine(
-                $"[WebNotificationBridge] Report{(clicked ? "Clicked" : "Closed")} 失败: {ex.Message}");
+                $"[WebPermissionBridge] Report{(clicked ? "Clicked" : "Closed")} 失败: {ex.Message}");
         }
         finally
         {
@@ -256,7 +285,7 @@ public static class WebNotificationBridge
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[WebNotificationBridge] deferral Complete 失败: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[WebPermissionBridge] deferral Complete 失败: {ex.Message}");
             }
         }
     }
@@ -304,11 +333,52 @@ public static class WebNotificationBridge
 
         EnsurePlatformRegistered();
 
+        // ⭐ 预热网页应用快照 —— 这不是性能优化，是正确性前提。
+        // 桥接的权限决策（IsPermissionAllowedForOrigin）跑在同步回调里、不能 await，
+        // 只能查 Store 的内存快照；快照为 null 时会被保守判为「未登记 → 拒绝」。
+        // 而快照只在有人调过 LoadAsync 之后才有值，启动时并没有一处无条件预热
+        // （导航栏/主页那几处都是事件回调）。若不在这里补一次，冷启动后第一次
+        // requestPermission 就会拿到 denied —— 正好复现「开了开关还不行」。
+        //
+        // 选 Attach 作为时机的理由：它在内核初始化时跑，必然早于页面加载完、
+        // JS 调到 requestPermission（中间隔着导航 + 脚本执行，通常几百毫秒），
+        // 一次读盘远在这之前就完成了。
+        _ = WarmUpStoreAsync();
+
+        // ⭐ 抓一份 profile 句柄给「重置站点权限」用（共享环境，多内核同一份）。
+        try
+        {
+            _profile = core.Profile;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[WebPermissionBridge] 抓取 profile 失败: {ex.Message}");
+        }
+
         core.PermissionRequested -= OnPermissionRequested;
         core.PermissionRequested += OnPermissionRequested;
 
         core.NotificationReceived -= OnNotificationReceived;
         core.NotificationReceived += OnNotificationReceived;
+    }
+
+    /// <summary>
+    /// 预热网页应用快照，让同步权限回调能查到数据。见 <see cref="Attach"/> 里的说明。
+    ///
+    /// <para>刻意做成「发了不管」：预热早一步算赚到，晚一步也只是退回原行为，
+    /// 没有任何调用方需要等它的结果。异常必须在这里吞掉 —— 一个没人 await 的
+    /// Task 里抛出未观察异常，会在 GC  finalize 时炸进程。</para>
+    /// </summary>
+    private static async Task WarmUpStoreAsync()
+    {
+        try
+        {
+            await WebAppShortcutStore.LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[WebPermissionBridge] 预热网页应用快照失败: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -350,37 +420,222 @@ public static class WebNotificationBridge
     }
 
     /// <summary>
-    /// 权限请求。<b>只碰通知这一项</b> —— 其余种类原样放行。
-    /// 早先这里压根没有订阅者，那些种类一直走的是 WebView2 的默认处理；
-    /// 顺手把它们也改写成 Allow/Deny 等于无声地改掉了相机、麦克风、剪贴板的行为，
+    /// 受本桥接管、由网页应用开关逐站控制的权限种类。
+    /// 与 <see cref="WebAppShortcut"/> 上的 <c>*Enabled</c> 字段一一对应。
+    /// </summary>
+    private enum SitePermission
+    {
+        Notifications,
+        Geolocation,
+        Camera,
+        Microphone,
+        ClipboardRead
+    }
+
+    /// <summary>
+    /// 受管权限对应的 WebView2 种类，给「重置站点权限」遍历用。
+    /// 和 <see cref="ToSitePermission"/> 是同一张表的两个方向，改一处必须两处都改。
+    /// </summary>
+    private static readonly CoreWebView2PermissionKind[] ManagedKinds =
+    {
+        CoreWebView2PermissionKind.Notifications,
+        CoreWebView2PermissionKind.Geolocation,
+        CoreWebView2PermissionKind.Camera,
+        CoreWebView2PermissionKind.Microphone,
+        CoreWebView2PermissionKind.ClipboardRead
+    };
+
+    /// <summary>
+    /// WebView2 权限种类 → 受管权限。返回 false 表示「这一项不归我们管」，
+    /// 调用方应原样放行，让 WebView2 走它自己的默认处理。
+    ///
+    /// <para>⚠️ 枚举名必须照抄 WinRT 定义的拼写：<c>Notifications</c> 是复数、
+    /// 剪贴板是 <c>ClipboardRead</c>。这里写错名字不会有警告，只会静默放行了别的能力。</para>
+    /// </summary>
+    private static bool ToSitePermission(CoreWebView2PermissionKind kind, out SitePermission permission)
+    {
+        switch (kind)
+        {
+            case CoreWebView2PermissionKind.Notifications:
+                permission = SitePermission.Notifications;
+                return true;
+            case CoreWebView2PermissionKind.Geolocation:
+                permission = SitePermission.Geolocation;
+                return true;
+            case CoreWebView2PermissionKind.Camera:
+                permission = SitePermission.Camera;
+                return true;
+            case CoreWebView2PermissionKind.Microphone:
+                permission = SitePermission.Microphone;
+                return true;
+            case CoreWebView2PermissionKind.ClipboardRead:
+                permission = SitePermission.ClipboardRead;
+                return true;
+            default:
+                permission = default;
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// 权限请求。<b>只碰受管的五类</b> —— 其余种类（传感器、MIDI、本地字体、自动播放等）
+    /// 原样放行。早先这里压根没有订阅者，那些种类一直走的是 WebView2 的默认处理；
+    /// 顺手把它们也改写成 Allow/Deny 等于无声地改掉了别的能力的行为，
     /// 属于典型的「顺手」，能惹祸就不好了。
     /// </summary>
     private static void OnPermissionRequested(CoreWebView2 sender, CoreWebView2PermissionRequestedEventArgs args)
     {
-        // ⚠️ 枚举值是 Notifications（复数），不是 Notification —— 写错版本的名称只会拿到
-        // 一个编译错误还好，写成别的 kind 就变成静默放行别的权限了。
-        if (args.PermissionKind != CoreWebView2PermissionKind.Notifications)
+        if (!ToSitePermission(args.PermissionKind, out SitePermission permission))
         {
             return;
         }
 
-        // ⚠️ 开关关闭时必须是 Default，**不能写成 Deny**。
-        // WebView2 的 profile 里只持久化「非 Default」的权限决策（IDL 对 PermissionSetting
-        // 集合的措辞就是 "nondefault permission settings ... persisted across sessions"）。
-        // 写成 Deny 的话「这个站点被拒绝」会落盘，用户之后在设置里把开关打开也救不回来 ——
-        // 站点权限已经是 denied，不会再问第二次，通知永久静默。
-        // 而 Default 在通知这条上本身就等同拒绝，效果一样但不留痕。
-        args.State = ExperimentalSettings.WebNotificationsEnabled
+        // ⭐ 按站点（origin）决定是否放行：只有「登记过且开了这项」的网页应用才允许，
+        // 未登记的 origin（第三方 iframe 等）保守拒绝。不再用全局开关。
+        bool allowed = IsPermissionAllowedForOrigin(args.Uri, permission);
+
+        // ⚠️ SavesInProfile 默认 true：事件里设的状态会写进 WebView2 profile、跨会话持久化，
+        //    并变成该 origin 的默认行为；而且「状态持久化后，浏览器启发式可能不再触发
+        //    PermissionRequested 事件」。这正是「开了开关还不行」的头号根因 —— 一旦某个
+        //    拒绝被持久化，之后打开开关事件也不再触发，站点永久 denied。
+        //    所以：**拒绝时务必不落盘（false），允许时才落盘（true，一次授权长期有效）。**
+        args.State = allowed
             ? CoreWebView2PermissionState.Allow
             : CoreWebView2PermissionState.Default;
+        args.SavesInProfile = allowed;
 
         System.Diagnostics.Debug.WriteLine(
-            $"[WebNotificationBridge] 通知权限 {args.Uri} → {args.State}");
+            $"[WebPermissionBridge] {args.PermissionKind} 权限 {args.Uri} → {args.State} (SavesInProfile={args.SavesInProfile})");
+    }
+
+    /// <summary>
+    /// 这个 origin 是否允许指定的权限：在已登记的网页应用里找匹配项，看它对应的
+    /// <c>*Enabled</c> 字段。找不到（第三方 / 未登记）则拒绝。
+    ///
+    /// <para>同步查内存快照（<see cref="WebAppShortcutStore.TryGetCachedApps"/>），
+    /// 因为权限事件是同步回调、不能 await。快照在应用启动加载快捷方式后就一直是最新的。</para>
+    /// </summary>
+    private static bool IsPermissionAllowedForOrigin(string? origin, SitePermission permission)
+    {
+        if (string.IsNullOrWhiteSpace(origin))
+        {
+            return false;
+        }
+
+        string? target = AuthorityOf(origin);
+        if (target is null)
+        {
+            return false;
+        }
+
+        IReadOnlyList<WebAppShortcut>? apps = WebAppShortcutStore.TryGetCachedApps();
+        if (apps is null)
+        {
+            // 快照还没加载。Attach 里已经发过一次预热，走到这里说明这次请求来得更早
+            // （内核初始化后极短时间内就发起了 requestPermission）。
+            // 保守拒绝，但不落盘（见 OnPermissionRequested 的 SavesInProfile），
+            // 所以下次请求仍会重新走这里，不会把拒绝钉死。
+            // ⚠️ 真在日志里看到这行，说明预热还是输了，需要把预热再往前挪。
+            System.Diagnostics.Debug.WriteLine(
+                $"[WebPermissionBridge] 快照未就绪，{target} 本次保守拒绝（预热未完成）");
+            return false;
+        }
+
+        foreach (WebAppShortcut app in apps)
+        {
+            string? appAuthority = AuthorityOf(app.Url);
+            if (appAuthority is not null &&
+                string.Equals(appAuthority, target, StringComparison.OrdinalIgnoreCase))
+            {
+                return IsEnabledOn(app, permission);
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>读出某个网页应用上指定权限的开关值。</summary>
+    private static bool IsEnabledOn(WebAppShortcut app, SitePermission permission) => permission switch
+    {
+        SitePermission.Notifications => app.NotificationsEnabled,
+        SitePermission.Geolocation => app.GeolocationEnabled,
+        SitePermission.Camera => app.CameraEnabled,
+        SitePermission.Microphone => app.MicrophoneEnabled,
+        SitePermission.ClipboardRead => app.ClipboardReadEnabled,
+        _ => false
+    };
+
+    /// <summary>
+    /// 把 URL 或 origin 统一规整成 authority（scheme://host[:port]），用于比对。
+    /// <c>args.Uri</c> 已经是 origin 形式，<c>app.Url</c> 是完整地址，两者都取 authority 即可对齐。
+    /// </summary>
+    private static string? AuthorityOf(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        if (!Uri.TryCreate(raw, UriKind.Absolute, out Uri? uri))
+        {
+            return null;
+        }
+
+        return uri.GetLeftPart(UriPartial.Authority);
+    }
+
+    /// <summary>
+    /// 清除某个 origin 在 WebView2 profile 里已持久化的<b>全部受管权限</b>决策（Allow 或 Deny），
+    /// 恢复成默认行为。用于「开了开关还是不行」——多半是旧决策被持久化卡住了，清掉后
+    /// 下一次站点再请求时会重新走桥接决策。
+    ///
+    /// <para>来源：<c>CoreWebView2Profile.SetPermissionStateAsync(kind, origin, Default)</c>，
+    /// 文档明确「设为 Default 会擦掉 profile 里已存的该站点状态」。</para>
+    ///
+    /// <para>为什么<b>一次清全部</b>而不是按权限分别给按钮：用户的心智是「这个站点记着我了，
+    /// 清掉重来」，不是「我只想清相机的那份」。而且 <see cref="ManagedKinds"/> 已经枚举了一切，
+    /// 遍历一遍比让用户理解五种权限的持久化差异简单得多。</para>
+    ///
+    /// <para>返回是否全部清掉了。<b>没清掉时必须如实回报</b>：
+    /// profile 只有在 <see cref="Attach"/> 跑过之后才有值，也就是用户至少打开过一次网页浏览页。
+    /// 从没打开过时这个句柄是空的，此时说「已清除」纯属撒谎 —— 用户照着提示刷新页面只会再撞一次墙。</para>
+    /// </summary>
+    public static async Task<bool> ResetSitePermissionsAsync(string origin)
+    {
+        CoreWebView2Profile? profile = _profile;
+        if (profile is null)
+        {
+            System.Diagnostics.Debug.WriteLine("[WebPermissionBridge] 重置站点权限失败：profile 未就绪（尚未打开过网页浏览页）");
+            return false;
+        }
+
+        bool allCleared = true;
+
+        // 逐项清，不用 Task.WhenAll：SetPermissionStateAsync 写的是同一个 profile，
+        // 并发写同一个底层存储是自找麻烦；而且失败要能定位到具体哪一项。
+        foreach (CoreWebView2PermissionKind kind in ManagedKinds)
+        {
+            try
+            {
+                await profile.SetPermissionStateAsync(kind, origin, CoreWebView2PermissionState.Default);
+            }
+            catch (Exception ex)
+            {
+                allCleared = false;
+                System.Diagnostics.Debug.WriteLine($"[WebPermissionBridge] 重置 {kind} 权限失败: {ex.Message}");
+            }
+        }
+
+        System.Diagnostics.Debug.WriteLine(
+            $"[WebPermissionBridge] 重置站点权限 {origin}: {(allCleared ? "全部清除" : "部分失败")}");
+        return allCleared;
     }
 
     private static void OnNotificationReceived(CoreWebView2 sender, CoreWebView2NotificationReceivedEventArgs args)
     {
-        if (!ExperimentalSettings.WebNotificationsEnabled)
+        // ⭐ 按站点决定是否接管：该应用没开通知就交还 WebView2 默认行为（等于拒绝，不弹系统通知）。
+        // 不再依赖全局开关。
+        if (!IsPermissionAllowedForOrigin(args.SenderOrigin, SitePermission.Notifications))
         {
             // 不置 Handled：交还给 WebView2 的默认通知 UI，行为和没这层桥接时一致。
             // 这里按 GetDeferral 与否都不影响 —— 没有异步工作要做。
@@ -430,7 +685,7 @@ public static class WebNotificationBridge
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[WebNotificationBridge] 转发网页通知失败: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[WebPermissionBridge] 转发网页通知失败: {ex.Message}");
 
             // 失败时必须把 deferral 放掉，否则这起事件永远挂着。
             // 注意：Handled 已经是 true（置了就撤不回来），所以这条通知对网页来说
@@ -441,7 +696,7 @@ public static class WebNotificationBridge
             }
             catch (Exception completeEx)
             {
-                System.Diagnostics.Debug.WriteLine($"[WebNotificationBridge] deferral Complete 失败: {completeEx.Message}");
+                System.Diagnostics.Debug.WriteLine($"[WebPermissionBridge] deferral Complete 失败: {completeEx.Message}");
             }
         }
 

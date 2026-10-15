@@ -153,12 +153,22 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                                     {
                                         if (item.Id != null && !existingIds.Contains(item.Id))
                                         {
+                                            // ⚠️ 字段必须逐个带上：早先这里只传了四个必填参数，
+                                            // 合并进来的条目会把键盘映射配置静默丢成默认值
+                                            // （通知开关同理，老包里没存则按 Store 的默认 true 处理）。
                                             merged.Add(new WebAppShortcut(
                                                 item.Id,
                                                 item.Name ?? string.Empty,
                                                 item.Url ?? string.Empty,
-                                                item.IconBytes
-                                            ));
+                                                item.IconBytes,
+                                                item.LeftButtonConfig,
+                                                item.RightButtonConfig,
+                                                item.NotificationsEnabled ?? true,
+                                                item.GeolocationEnabled ?? true,
+                                                item.CameraEnabled ?? true,
+                                                item.MicrophoneEnabled ?? true,
+                                                item.ClipboardReadEnabled ?? true)
+                                            );
                                         }
                                     }
 

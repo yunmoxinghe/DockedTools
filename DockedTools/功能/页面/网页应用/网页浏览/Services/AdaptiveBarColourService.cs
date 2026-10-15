@@ -64,11 +64,18 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
         /// <summary>图片查看器背景（ATBC: IMAGE_VIEWER）</summary>
         public Windows.UI.Color ImageViewer { get; set; } = FromCss("#212121");
 
-        /// <summary>纯文本文档背景（亮，ATBC: PLAINTEXT）</summary>
-        public Windows.UI.Color PlainTextLight { get; set; } = FromCss("#ffffff");
+        /// <summary>
+        /// 纯文本文档背景（亮，ATBC: PLAINTEXT）。
+        /// 同 FallbackLight 的口径，取 WinUI 的 <c>#F3F3F3</c> 而不是 ATBC 上游的纯白。
+        /// </summary>
+        public Windows.UI.Color PlainTextLight { get; set; } = FromCss("#f3f3f3");
 
-        /// <summary>纯文本文档背景（暗，ATBC: PLAINTEXT）</summary>
-        public Windows.UI.Color PlainTextDark { get; set; } = FromCss("#1c1b22");
+        /// <summary>
+        /// 纯文本文档背景（暗，ATBC: PLAINTEXT）。
+        /// ATBC 上游那版 <c>#1c1b22</c> 是 Firefox 的暗底（偏紫），与 FallbackDark 一样
+        /// 换成 WinUI 的 <c>#202020</c>。
+        /// </summary>
+        public Windows.UI.Color PlainTextDark { get; set; } = FromCss("#202020");
 
         /// <summary>SVG 文档背景（ATBC: SVG）</summary>
         public Windows.UI.Color Svg { get; set; } = FromCss("#ffffff");
@@ -224,7 +231,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
             // WebView2 的 PDF 预览是内嵌的阅读器页面，探针脚本在那里要么拿不到可用的
             // 页面色、要么整个探测超时（data 为 null），而 URL 后缀是确凿的 ——
             // 放在 data 判定之前，PDF 才不会退化成兜底色。
-            if (ResolveSpecialByUrl(url) == "pdf")
+            if (!PageColourProbe.IsInternalDocument(data?.Url) && ResolveSpecialByUrl(url) == "pdf")
             {
                 return Build(AdaptiveColour.FromColor(options.PdfViewer), scheme, options, "PDF_VIEWER");
             }
@@ -439,6 +446,14 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
 
         private static string ResolveSpecial(AdaptiveTabColourData data, string? url)
         {
+            // 内部文档（错误页 chrome-error://chromewebdata/）：传进来的 url 是【失败的目标地址】，
+            // 屏幕上显示的却不是那份文档 —— 按它判 PDF / 纯文本 / 图片会张冠李戴
+            // （例如打不开的 .pdf 会被套上 PDF 阅读器的灰底）。一律按普通页面取色。
+            if (PageColourProbe.IsInternalDocument(data.Url))
+            {
+                return "none";
+            }
+
             if (data.Special != "none")
             {
                 return data.Special;

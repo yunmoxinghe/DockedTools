@@ -1,4 +1,5 @@
 using DockedTools.Features.Pages.WebApp.Shared;
+using DockedTools.Features.Pages.WebApp.Browser.Services;
 using DockedTools.Features.UnifiedCalls.TopAppBar;
 using DockedTools.Features.Localization;
 using DockedTools.Features.MainWindow.Entry;
@@ -105,6 +106,20 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
         private KeyboardMappingButtonConfig? _originalLeftButtonConfig;
         private KeyboardMappingButtonConfig? _originalRightButtonConfig;
         private bool _hasChanges;
+
+        // ⭐ 站点权限开关：原始值与当前值（详情页是「改完点保存」模型，和名称/URL 一样走暂存）。
+        // 五个字段一一对应 WebAppShortcut 上的 *Enabled，加新权限时记得三处同步：
+        // 这里一对、WebPermissionBridge 的 SitePermission 枚举与 ManagedKinds、以及 XAML 的卡片。
+        private bool _originalNotificationsEnabled = true;
+        private bool _currentNotificationsEnabled = true;
+        private bool _originalGeolocationEnabled = true;
+        private bool _currentGeolocationEnabled = true;
+        private bool _originalCameraEnabled = true;
+        private bool _currentCameraEnabled = true;
+        private bool _originalMicrophoneEnabled = true;
+        private bool _currentMicrophoneEnabled = true;
+        private bool _originalClipboardReadEnabled = true;
+        private bool _currentClipboardReadEnabled = true;
 
         // 保存按钮：新顶栏收的是按钮数据，所以这里只记 Id 与"当前是否可用"，
         // 真正的禁用外观与点击拦截由 AppTopBar 负责。
@@ -330,6 +345,16 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
                 _currentIconBytes = app.IconBytes;
                 _originalLeftButtonConfig = app.LeftButtonConfig;
                 _originalRightButtonConfig = app.RightButtonConfig;
+                _originalNotificationsEnabled = app.NotificationsEnabled;
+                _currentNotificationsEnabled = app.NotificationsEnabled;
+                _originalGeolocationEnabled = app.GeolocationEnabled;
+                _currentGeolocationEnabled = app.GeolocationEnabled;
+                _originalCameraEnabled = app.CameraEnabled;
+                _currentCameraEnabled = app.CameraEnabled;
+                _originalMicrophoneEnabled = app.MicrophoneEnabled;
+                _currentMicrophoneEnabled = app.MicrophoneEnabled;
+                _originalClipboardReadEnabled = app.ClipboardReadEnabled;
+                _currentClipboardReadEnabled = app.ClipboardReadEnabled;
                 
                 LogDebug($"原始数据已保存: Name={_originalName}, Url={_originalUrl}");
 
@@ -359,6 +384,14 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
                 LogDebug("开始加载右侧按钮配置...");
                 LoadRightButtonConfig(app.RightButton);
                 LogDebug("✅ 右侧按钮配置已加载");
+
+                // 填充站点权限开关
+                SetToggleSilently(NotificationsToggle, OnNotificationsToggled, app.NotificationsEnabled);
+                SetToggleSilently(GeolocationToggle, OnGeolocationToggled, app.GeolocationEnabled);
+                SetToggleSilently(CameraToggle, OnCameraToggled, app.CameraEnabled);
+                SetToggleSilently(MicrophoneToggle, OnMicrophoneToggled, app.MicrophoneEnabled);
+                SetToggleSilently(ClipboardReadToggle, OnClipboardReadToggled, app.ClipboardReadEnabled);
+                LogDebug("✅ 站点权限开关已加载");
                 
                 LogDebug("LoadAppDataAsync 完成");
             }
@@ -409,6 +442,96 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
             CheckForChanges();
         }
 
+        /// <summary>
+        /// 给一个开关赋值，赋值期间摘掉 Toggled 订阅。
+        ///
+        /// <para>不摘的后果很具体：设置 <c>IsOn</c> 本身会触发一次 Toggled → CheckForChanges，
+        /// 页面刚加载完就被判成「有改动」，保存按钮白白亮起来，
+        /// 用户什么都没动却看到一个待保存状态。</para>
+        /// </summary>
+        // ⚠️ 委托类型是 RoutedEventHandler，不是 UWP 时代的 ToggledEventHandler ——
+        // WinUI 3 把 ToggleSwitch.Toggled 换成了 RoutedEventHandler，写旧名字直接编译不过。
+        private static void SetToggleSilently(ToggleSwitch toggle, RoutedEventHandler handler, bool value)
+        {
+            toggle.Toggled -= handler;
+            toggle.IsOn = value;
+            toggle.Toggled += handler;
+        }
+
+        /// <summary>
+        /// 权限开关翻转：暂存入对应字段，走和名称/URL 一样的「改完点保存」模型。
+        /// 五个开关共用同一套模式，各自只改自己那一个字段。
+        /// </summary>
+        private void OnNotificationsToggled(object sender, RoutedEventArgs e)
+        {
+            if (sender is ToggleSwitch toggle)
+            {
+                _currentNotificationsEnabled = toggle.IsOn;
+                CheckForChanges();
+            }
+        }
+
+        private void OnGeolocationToggled(object sender, RoutedEventArgs e)
+        {
+            if (sender is ToggleSwitch toggle)
+            {
+                _currentGeolocationEnabled = toggle.IsOn;
+                CheckForChanges();
+            }
+        }
+
+        private void OnCameraToggled(object sender, RoutedEventArgs e)
+        {
+            if (sender is ToggleSwitch toggle)
+            {
+                _currentCameraEnabled = toggle.IsOn;
+                CheckForChanges();
+            }
+        }
+
+        private void OnMicrophoneToggled(object sender, RoutedEventArgs e)
+        {
+            if (sender is ToggleSwitch toggle)
+            {
+                _currentMicrophoneEnabled = toggle.IsOn;
+                CheckForChanges();
+            }
+        }
+
+        private void OnClipboardReadToggled(object sender, RoutedEventArgs e)
+        {
+            if (sender is ToggleSwitch toggle)
+            {
+                _currentClipboardReadEnabled = toggle.IsOn;
+                CheckForChanges();
+            }
+        }
+
+        /// <summary>
+        /// 立即清除该站点在 WebView2 profile 里已持久化的<b>全部受管权限</b>决策。
+        /// 不依赖保存：即使没改开关，也能修「开了还提示启用通知失败」这种被旧决策卡住的情况。
+        /// </summary>
+        private async void OnResetSitePermissionsClick(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrEmpty(_originalUrl) ||
+                !Uri.TryCreate(_originalUrl, UriKind.Absolute, out Uri? originUri))
+            {
+                ShowStatus(LocalizationHelper.GetString("WebAppDetailPage_InvalidUrl"), InfoBarSeverity.Warning);
+                return;
+            }
+
+            string origin = originUri.GetLeftPart(UriPartial.Authority);
+            bool cleared = await WebPermissionBridge.ResetSitePermissionsAsync(origin);
+
+            // 清不掉时要如实说：profile 还没就绪（没打开过网页浏览页）是最常见的原因，
+            // 这时候报「已清除」会让用户白刷新一次还以为功能坏了。
+            ShowStatus(
+                LocalizationHelper.GetString(cleared
+                    ? "WebAppDetailPage_PermissionReset"
+                    : "WebAppDetailPage_PermissionResetFailed"),
+                cleared ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
+        }
+
         private void OnNameCardClick(object sender, RoutedEventArgs e)
         {
             NameTextBox?.Focus(FocusState.Programmatic);
@@ -426,6 +549,20 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
                                                (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
         }
 
+        /// <summary>
+        /// 五个权限开关里有没有任何一个和原始值不同。
+        /// 抽成一个方法而不是内联五个比较：比较清单和「保存时判断要不要重置站点权限」
+        /// 用的是同一组字段，放在一起才不会加了新权限却漏改一处。
+        /// </summary>
+        private bool ArePermissionsChanged()
+        {
+            return _currentNotificationsEnabled != _originalNotificationsEnabled ||
+                   _currentGeolocationEnabled != _originalGeolocationEnabled ||
+                   _currentCameraEnabled != _originalCameraEnabled ||
+                   _currentMicrophoneEnabled != _originalMicrophoneEnabled ||
+                   _currentClipboardReadEnabled != _originalClipboardReadEnabled;
+        }
+
         private void CheckForChanges()
         {
             string currentName = NameTextBox.Text?.Trim() ?? string.Empty;
@@ -436,8 +573,9 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
             bool iconChanged = !ByteArrayEquals(_currentIconBytes, _originalIconBytes);
             bool leftButtonChanged = IsLeftButtonConfigChanged();
             bool rightButtonChanged = IsRightButtonConfigChanged();
+            bool permissionsChanged = ArePermissionsChanged();
 
-            _hasChanges = nameChanged || urlChanged || iconChanged || leftButtonChanged || rightButtonChanged;
+            _hasChanges = nameChanged || urlChanged || iconChanged || leftButtonChanged || rightButtonChanged || permissionsChanged;
 
             SetSaveButtonEnabled(_hasChanges
                 && !string.IsNullOrWhiteSpace(currentName)
@@ -678,7 +816,12 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
                         uri.AbsoluteUri,
                         _currentIconBytes,
                         leftButtonConfig,
-                        rightButtonConfig);
+                        rightButtonConfig,
+                        _currentNotificationsEnabled,
+                        _currentGeolocationEnabled,
+                        _currentCameraEnabled,
+                        _currentMicrophoneEnabled,
+                        _currentClipboardReadEnabled);
 
                     return updatedShortcuts;
                 });
@@ -690,13 +833,43 @@ namespace DockedTools.Features.Pages.Settings.WebSettings
                     WebAppUpdateService.NotifyUpdate(_appId, updateType);
                 }
 
-                // 更新原始数据
+                // 更新原始数据。⚠️ 权限的变更判断必须在覆盖原始值**之前**算出来，
+                // 否则改完就永远相等了 —— 保存后的重置动作会被静默跳过。
+                bool permissionsChanged = ArePermissionsChanged();
                 _originalName = name;
                 _originalUrl = uri.AbsoluteUri;
                 _originalIconBytes = _currentIconBytes;
                 _originalLeftButtonConfig = GetCurrentLeftButtonConfig();
                 _originalRightButtonConfig = GetCurrentRightButtonConfig();
+                _originalNotificationsEnabled = _currentNotificationsEnabled;
+                _originalGeolocationEnabled = _currentGeolocationEnabled;
+                _originalCameraEnabled = _currentCameraEnabled;
+                _originalMicrophoneEnabled = _currentMicrophoneEnabled;
+                _originalClipboardReadEnabled = _currentClipboardReadEnabled;
                 _hasChanges = false;
+
+                // ⭐ 任一权限开关变了：清掉该站点在 WebView2 profile 里已存的权限决策。
+                // 否则若之前被持久化拒绝过，「开了开关还不行」会复现——持久化拒绝会让
+                // 浏览器不再触发 PermissionRequested，桥接的 Allow 永远轮不到。清掉后下次
+                // 访问重新走桥接决策（见 WebPermissionBridge.ResetSitePermissionsAsync）。
+                if (permissionsChanged)
+                {
+                    string? resetOrigin = null;
+                    if (!string.IsNullOrWhiteSpace(_originalUrl) &&
+                        Uri.TryCreate(_originalUrl, UriKind.Absolute, out Uri? originUri))
+                    {
+                        resetOrigin = originUri.GetLeftPart(UriPartial.Authority);
+                    }
+
+                    if (resetOrigin is not null)
+                    {
+                        // 这里失败不阻断保存：开关值本身已经落盘，权限重置只是「让新值立刻生效」
+                        // 的辅助动作。而 profile 为空意味着用户压根没打开过网页浏览页，
+                        // 那种情况下本来也不存在已持久化的旧决策，清不掉并无实际损失。
+                        bool cleared = await WebPermissionBridge.ResetSitePermissionsAsync(resetOrigin);
+                        LogDebug($"重置站点权限 {resetOrigin}: cleared={cleared}");
+                    }
+                }
 
                 LogDebug("OnSaveClick: Save successful");
                 ShowStatus(LocalizationHelper.GetString("WebAppDetailPage_SaveSuccess"), InfoBarSeverity.Success);

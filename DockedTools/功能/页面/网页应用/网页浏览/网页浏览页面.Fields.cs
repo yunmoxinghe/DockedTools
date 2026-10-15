@@ -30,6 +30,22 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         private int _unresponsiveCount; // ⭐ 任务 3.4：记录 RenderProcessUnresponsive 连续次数
         private bool _isRecoveringWebView; // ⭐ 任务 3.5：防重入 guard，多个进程事件同时触发时只执行一次恢复
 
+        // ── 进程失败恢复的节流记账（见 网页浏览页面.Constants.cs 同名单元说明）──
+        /// <summary>连续自愈尝试次数；导航成功或回到前台后清零</summary>
+        private int _consecutiveRecoveryAttempts;
+
+        /// <summary>上一次真正执行恢复动作的时刻（退避窗口按它算）</summary>
+        private DateTime _lastRecoveryUtc = DateTime.MinValue;
+
+        /// <summary>退避定时器是否已排 —— 防止同一页在冷却期里排出多份重试</summary>
+        private bool _recoveryRetryScheduled;
+
+        /// <summary>页面在后台时记下的待办恢复原因（回到前台时补做，见 RestoreWebViewFromIdleState）</summary>
+        private string? _deferredRecoveryReason;
+
+        /// <summary>待办恢复是否需要重建控件（true）还是 Reload 就够（false）</summary>
+        private bool _deferredRecoveryNeedsRecreation;
+
         // 快捷键上报脚本挂在 CoreWebView2 上（和取色脚本一样随内核走）：
         // 记住注入时的内核实例，内核被重建（崩溃恢复 / 页面重建）时能发现「脚本没了」并重新注入。
         private CoreWebView2? _shortcutScriptCore;

@@ -528,6 +528,32 @@ namespace DockedTools.Features.Pages.WebApp.Browser.Services
                 StringComparison.OrdinalIgnoreCase);
         }
 
+        /// <summary>
+        /// 这个 URL 是否属于浏览器【内部文档】（错误页 / 内置页）。
+        /// </summary>
+        /// <remarks>
+        /// 典型是导航失败后 Chromium 顶上来的 <c>chrome-error://chromewebdata/</c>。
+        /// 这类文档的 <c>location.href</c> 与 <c>CoreWebView2.Source</c> 天然不是同一套：
+        /// Source 仍是【失败的那个目标地址】（也可能停在导航前的旧地址），而文档本身是
+        /// 内部页 —— 拿这两者做同文档比对，结果永远是不匹配，取色就被当成"过期文档"扣掉，
+        /// 表现就是「报错页面不取色」。所以内部文档必须走单独一路，见调用点的处理。
+        /// </remarks>
+        public static bool IsInternalDocument(string? url)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                return false;
+            }
+
+            return url.StartsWith("chrome-error:", StringComparison.OrdinalIgnoreCase)
+                || url.StartsWith("chromewebdata:", StringComparison.OrdinalIgnoreCase)
+                || url.StartsWith("chrome:", StringComparison.OrdinalIgnoreCase)
+                || url.StartsWith("edge:", StringComparison.OrdinalIgnoreCase)
+                || url.StartsWith("devtools:", StringComparison.OrdinalIgnoreCase)
+                || url.StartsWith("about:", StringComparison.OrdinalIgnoreCase)
+                || url.StartsWith("view-source:", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static string Normalise(string url)
         {
             int hash = url.IndexOf('#');

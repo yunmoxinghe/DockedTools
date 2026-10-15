@@ -228,6 +228,16 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             
             // ⭐ 任务 3.4：导航成功后重置无响应计数器
             _unresponsiveCount = 0;
+
+            // 导航成功就等于「这一页现在能用」—— 连续自愈的计数必须在这里清零，
+            // 否则一次偶发崩溃会让后面每隔更久的下一次崩溃都更难自愈
+            // （上限是 3 次，见 RequestWebViewRecovery 的闸门②）。
+            if (e.IsSuccess)
+            {
+                _consecutiveRecoveryAttempts = 0;
+                _deferredRecoveryReason = null;
+                _deferredRecoveryNeedsRecreation = false;
+            }
             
             // 平滑隐藏加载条：先停止动画，等待当前周期完成，再隐藏
             await HideLoadingProgressBarSmoothlyAsync();

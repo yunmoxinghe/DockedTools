@@ -102,6 +102,20 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         }
 
         /// <summary>
+        /// 同步读内存快照（不加锁、不读盘）。
+        ///
+        /// <para>给 WebView2 权限回调这种「必须同步给结论」的路径用：权限事件里不能 await，
+        /// 只能同步查。返回的是最近一次 Publish 的列表（任何 Store 写都会更新它），
+        /// 所以反映的是最新内存状态，不是过期磁盘值。</para>
+        ///
+        /// <para>返回 null 表示 Store 还没加载过（应用刚起、还没人读过快照）——调用方应保守处理。</para>
+        /// </summary>
+        public static IReadOnlyList<WebAppShortcut>? TryGetCachedApps()
+        {
+            return _snapshot?.Items;
+        }
+
+        /// <summary>
         /// 全量覆盖写入。
         /// 只在调用方已经持有完整列表时使用；要做「读出来改一点再写回」请改用 UpdateAsync。
         /// </summary>
@@ -226,7 +240,12 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                             s.Url!,
                             s.IconBytes,
                             s.LeftButtonConfig,
-                            s.RightButtonConfig))
+                            s.RightButtonConfig,
+                            s.NotificationsEnabled ?? true,
+                            s.GeolocationEnabled ?? true,
+                            s.CameraEnabled ?? true,
+                            s.MicrophoneEnabled ?? true,
+                            s.ClipboardReadEnabled ?? true))
                         .ToList(),
                     stamp);
             }
@@ -258,7 +277,12 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                     Url = s.Url,
                     IconBytes = s.IconBytes,
                     LeftButtonConfig = s.LeftButtonConfig,
-                    RightButtonConfig = s.RightButtonConfig
+                    RightButtonConfig = s.RightButtonConfig,
+                    NotificationsEnabled = s.NotificationsEnabled,
+                    GeolocationEnabled = s.GeolocationEnabled,
+                    CameraEnabled = s.CameraEnabled,
+                    MicrophoneEnabled = s.MicrophoneEnabled,
+                    ClipboardReadEnabled = s.ClipboardReadEnabled
                 })
                 .ToList();
 
@@ -329,6 +353,33 @@ namespace DockedTools.Features.Pages.WebApp.Shared
             /// 右侧键盘映射按钮配置（可选，默认为 null 表示使用默认禁用配置）
             /// </summary>
             public KeyboardMappingButtonConfig? RightButtonConfig { get; set; }
+
+            /// <summary>
+            /// 是否允许该站点通过 WebView2 请求并转投 Windows 系统通知。
+            /// 可空：老数据没有这一项时为 null，读盘时按「默认开启(true)」处理，
+            /// 这样存量应用升级后不会突然收不到通知。新写入的条目会带明确值。
+            /// </summary>
+            public bool? NotificationsEnabled { get; set; }
+
+            /// <summary>
+            /// 是否允许该站点获取地理位置。可空语义同 <see cref="NotificationsEnabled"/>。
+            /// </summary>
+            public bool? GeolocationEnabled { get; set; }
+
+            /// <summary>
+            /// 是否允许该站点使用相机。可空语义同 <see cref="NotificationsEnabled"/>。
+            /// </summary>
+            public bool? CameraEnabled { get; set; }
+
+            /// <summary>
+            /// 是否允许该站点使用麦克风。可空语义同 <see cref="NotificationsEnabled"/>。
+            /// </summary>
+            public bool? MicrophoneEnabled { get; set; }
+
+            /// <summary>
+            /// 是否允许该站点读取剪贴板。可空语义同 <see cref="NotificationsEnabled"/>。
+            /// </summary>
+            public bool? ClipboardReadEnabled { get; set; }
         }
     }
 }

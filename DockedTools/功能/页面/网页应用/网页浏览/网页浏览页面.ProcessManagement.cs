@@ -1,6 +1,7 @@
 using DockedTools.Features.UnifiedCalls.Logging;
 using Microsoft.Web.WebView2.Core;
 using System;
+using System.Threading.Tasks;
 
 namespace DockedTools.Features.Pages.WebApp.Browser
 {
@@ -91,10 +92,15 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 var reason = e.Reason;
                 
                 // ✅ 记录当前 URL
+                // ⚠️ 刻意读 WebView.Source（XAML 依赖属性，本地值）而不是
+                //    WebView.CoreWebView2.Source（一次跨进程 COM 调用）——
+                //    微软文档写明：这些失败 handler 执行期间底层浏览器进程是被 block 的，
+                //    此时调 CoreWebView2 的 API 既可能抛、也可能干脆不回。
+                //    日志里少一个精确 URL 无所谓，在处理器里等一个不回的对象是要命。
                 string? currentUrl = null;
                 try
                 {
-                    currentUrl = WebView?.CoreWebView2?.Source ?? _pendingNavigationUri?.ToString() ?? "未知";
+                    currentUrl = WebView?.Source?.AbsoluteUri ?? _pendingNavigationUri?.ToString() ?? "未知";
                 }
                 catch
                 {
@@ -164,127 +170,28 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                         switch (processFailedKind)
                         {
                             case CoreWebView2ProcessFailedKind.RenderProcessExited:
-                                // ⭐ 渲染进程退出：优先调用 Reload（需求：3.2.1）
-                                System.Diagnostics.Debug.WriteLine("[CoreWebView2_ProcessFailed] 检测到 RenderProcessExited，尝试 Reload");
-                                
-                                // ⭐ 任务 3.5：设置恢复标志
-                                _isRecoveringWebView = true;
-                                
-                                if (WebView?.CoreWebView2 != null)
-                                {
-                                    try
-                                    {
-                                        WebView.CoreWebView2.Reload();
-                                        System.Diagnostics.Debug.WriteLine("[CoreWebView2_ProcessFailed] ✅ Reload 已调用");
-                                        
-                                        // 重置无响应计数器（Reload 后重置）
-                                        _unresponsiveCount = 0;
-                                    }
-                                    catch (Exception reloadEx)
-                                    {
-                                        System.Diagnostics.Debug.WriteLine($"[CoreWebView2_ProcessFailed] ❌ Reload 失败: {reloadEx.Message}");
-                                        Features.UnifiedCalls.Logging.LogService.Error(
-                                            "WebView2.ProcessFailed.Reload",
-                                            "渲染进程退出后尝试 Reload 失败",
-                                            reloadEx);
-                                    }
-                                    finally
-                                    {
-                                        // ⭐ 任务 3.5：恢复结束后重置 guard
-                                        _isRecoveringWebView = false;
-                                        System.Diagnostics.Debug.WriteLine("[CoreWebView2_ProcessFailed] ✅ 恢复标志已重置（RenderProcessExited）");
-                                    }
-                                }
-                                else
-                                {
-                                    // WebView 不可用，重置标志
-                                    _isRecoveringWebView = false;
-                                }
+                                // 渲染进程退出：内核还在，交给统一恢复入口（Reload，带上限与退避）。
+                                // ⚠️ 这里绝不再直接 Reload —— 旧写法无次数上限、无冷却，
+                                //    一个必崩的页面会 Reload→崩→Reload 无限转，每轮都在 UI 线程上重新起进程。
+                                RequestWebViewRecovery("渲染进程退出", recreate: false);
                                 break;
-                            
+
                             case CoreWebView2ProcessFailedKind.BrowserProcessExited:
-                                // ⭐ 主浏览器进程退出：标记需要重建，关闭旧 WebView（需求：3.2.2）
-                                System.Diagnostics.Debug.WriteLine("[CoreWebView2_ProcessFailed] 检测到 BrowserProcessExited，标记需要重建 WebView");
-                                
-                                // ⭐ 任务 3.5：设置恢复标志
-                                _isRecoveringWebView = true;
-                                
-                                _needsWebViewRecreation = true;
-                                
-                                // 关闭旧 WebView（清理资源）
-                                try
-                                {
-                                    if (WebView?.CoreWebView2 != null)
-                                    {
-                                        WebView.CoreWebView2.ProcessFailed -= CoreWebView2_ProcessFailed;
-                                        WebView.Close();
-                                        System.Diagnostics.Debug.WriteLine("[CoreWebView2_ProcessFailed] ✅ 旧 WebView 已关闭");
-                                    }
-                                    
-                                    // 重新创建 WebView
-                                    RecreateWebView();
-                                    _needsWebViewRecreation = false;
-                                    
-                                    System.Diagnostics.Debug.WriteLine("[CoreWebView2_ProcessFailed] ✅ WebView 已重建");
-                                }
-                                catch (Exception recreateEx)
-                                {
-                                    System.Diagnostics.Debug.WriteLine($"[CoreWebView2_ProcessFailed] ❌ 重建 WebView 失败: {recreateEx.Message}");
-                                    Features.UnifiedCalls.Logging.LogService.Error(
-                                        "WebView2.ProcessFailed.Recreate",
-                                        "主浏览器进程退出后尝试重建 WebView 失败",
-                                        recreateEx);
-                                }
-                                finally
-                                {
-                                    // ⭐ 任务 3.5：恢复结束后重置 guard
-                                    _isRecoveringWebView = false;
-                                    System.Diagnostics.Debug.WriteLine("[CoreWebView2_ProcessFailed] ✅ 恢复标志已重置（BrowserProcessExited）");
-                                }
+                                // 主浏览器进程退出：内核已成空壳，必须重建控件。
+                                // ⚠️ 旧写法是在这里当场 Close + RecreateWebView，属于「在进程失败的恢复路径里
+                                //    同步往 XAML 树塞新 WebView2」；整组进程消失时 LRU 里每个页面都会各来一次，
+                                //    现在统一走 RequestWebViewRecovery（前台页延后一步重建、后台页只标记）。
+                                RequestWebViewRecovery("浏览器进程退出", recreate: true);
                                 break;
-                            
+
                             case CoreWebView2ProcessFailedKind.RenderProcessUnresponsive:
-                                // ⭐ 渲染进程无响应：记录次数，连续多次后 reload（需求：3.2.3）
+                                // 渲染进程无响应：累计次数，连续多次后走同一条恢复入口（需求：3.2.3）
                                 _unresponsiveCount++;
                                 System.Diagnostics.Debug.WriteLine($"[CoreWebView2_ProcessFailed] 检测到 RenderProcessUnresponsive，计数: {_unresponsiveCount}/{MaxUnresponsiveCountBeforeReload}");
-                                
+
                                 if (_unresponsiveCount >= MaxUnresponsiveCountBeforeReload)
                                 {
-                                    System.Diagnostics.Debug.WriteLine($"[CoreWebView2_ProcessFailed] 连续无响应达到 {MaxUnresponsiveCountBeforeReload} 次，触发 Reload");
-                                    
-                                    // ⭐ 任务 3.5：设置恢复标志
-                                    _isRecoveringWebView = true;
-                                    
-                                    if (WebView?.CoreWebView2 != null)
-                                    {
-                                        try
-                                        {
-                                            WebView.CoreWebView2.Reload();
-                                            System.Diagnostics.Debug.WriteLine("[CoreWebView2_ProcessFailed] ✅ Reload 已调用（无响应恢复）");
-                                            
-                                            // 重置计数器
-                                            _unresponsiveCount = 0;
-                                        }
-                                        catch (Exception reloadEx)
-                                        {
-                                            System.Diagnostics.Debug.WriteLine($"[CoreWebView2_ProcessFailed] ❌ Reload 失败（无响应恢复）: {reloadEx.Message}");
-                                            Features.UnifiedCalls.Logging.LogService.Error(
-                                                "WebView2.ProcessFailed.UnresponsiveReload",
-                                                $"连续无响应 {MaxUnresponsiveCountBeforeReload} 次后尝试 Reload 失败",
-                                                reloadEx);
-                                        }
-                                        finally
-                                        {
-                                            // ⭐ 任务 3.5：恢复结束后重置 guard
-                                            _isRecoveringWebView = false;
-                                            System.Diagnostics.Debug.WriteLine("[CoreWebView2_ProcessFailed] ✅ 恢复标志已重置（RenderProcessUnresponsive）");
-                                        }
-                                    }
-                                    else
-                                    {
-                                        // WebView 不可用，重置标志
-                                        _isRecoveringWebView = false;
-                                    }
+                                    RequestWebViewRecovery($"渲染进程连续无响应 {MaxUnresponsiveCountBeforeReload} 次", recreate: false);
                                 }
                                 break;
                             
@@ -324,7 +231,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             {
                 // ✅ 捕获处理器内部异常，避免二次崩溃（需求：2.3.2）
                 System.Diagnostics.Debug.WriteLine($"[CoreWebView2_ProcessFailed] ⚠️ 处理器内部异常: {ex.Message}");
-                
+
                 // 记录处理器自身的异常
                 try
                 {
@@ -338,6 +245,312 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     // 如果日志服务本身失败，也不抛出异常
                 }
             }
+        }
+
+        /// <summary>
+        /// 统一的进程失败恢复入口 —— 把「要不要立刻自愈、能自愈几次、隔多久再来一次」集中管起来。
+        ///
+        /// <para><b>必须从 UI 线程调用</b>（<see cref="CoreWebView2_ProcessFailed"/> 已经用
+        /// <c>DispatcherQueue.TryEnqueue</c> 把恢复动作整体挪到了 handler 栈之外，正是微软
+        /// 对「事件回调串行、不要在回调里重入」的要求）。</para>
+        ///
+        /// <para><b>三道闸门，目的都是少占 UI 线程：</b>① 页面不在前台就不动作（整组进程
+        /// 消失时，LRU 里每个缓存页各自重建会把主线程按住很久）；② 连续自愈有上限；
+        /// ③ 每次自愈之间按指数退避冷却。三道之后才轮到真正的 Reload / 重建。</para>
+        /// </summary>
+        /// <param name="reason">写进日志的原因</param>
+        /// <param name="recreate">true = 内核已成空壳必须重建控件；false = 内核还在，Reload 即可</param>
+        private void RequestWebViewRecovery(string reason, bool recreate)
+        {
+            if (_isDisposed)
+            {
+                return;
+            }
+
+            // 重入闸门：一次恢复没跑完之前不再叠加第二套动作
+            if (_isRecoveringWebView)
+            {
+                LogService.Warning("WebView2.Recovery", $"{reason}：上一次恢复仍在进行中，本次忽略");
+                return;
+            }
+
+            // ── 闸门①：后台页不动作 ────────────────────────────────
+            if (!_isPageActive)
+            {
+                _deferredRecoveryReason = reason;
+                _deferredRecoveryNeedsRecreation |= recreate;
+
+                if (recreate)
+                {
+                    // 内核已是空壳：ready 必须打掉，其它路径才不会拿它去调用；
+                    // 同时置待重建，让 OnNavigatedTo 那条现成的重建路径也能接住它。
+                    _needsWebViewRecreation = true;
+                    _isWebViewReady = false;
+                }
+
+                LogService.Warning("WebView2.Recovery",
+                    $"{reason}：页面不在前台，本次不做恢复，记为待办（回到前台补做，实例 {_instanceId}）");
+                return;
+            }
+
+            // ── 闸门②：连续自愈上限 ────────────────────────────────
+            if (_consecutiveRecoveryAttempts >= MaxConsecutiveRecoveryAttempts)
+            {
+                if (recreate)
+                {
+                    _needsWebViewRecreation = true;
+                    _isWebViewReady = false;
+                }
+
+                LogService.Warning("WebView2.Recovery",
+                    $"{reason}：连续自愈已达上限（{MaxConsecutiveRecoveryAttempts} 次），已停止自动恢复。" +
+                    $"继续踢只会在 UI 线程上反复拉起进程树。导航成功后计数自动清零（实例 {_instanceId}）");
+                return;
+            }
+
+            // ── 闸门③：指数退避冷却 ────────────────────────────────
+            int backoffMs = ComputeRecoveryBackoffMs(_consecutiveRecoveryAttempts);
+            double elapsedMs = (DateTime.UtcNow - _lastRecoveryUtc).TotalMilliseconds;
+            double remainingMs = backoffMs - elapsedMs;
+
+            if (remainingMs > 0)
+            {
+                if (_recoveryRetryScheduled)
+                {
+                    LogService.Info("WebView2.Recovery",
+                        $"{reason}：退避冷却中（剩余 {remainingMs:F0}ms），重试已在排，本次不重复排队");
+                    return;
+                }
+
+                // 先按 double 比大小，再限幅取整 —— 首次恢复时 _lastRecoveryUtc 是
+                // DateTime.MinValue，elapsed 是个天文数字，直接 (int) 强转一个负的 double
+                // 依赖的是溢出饱和语义，不该让恢复逻辑踩在这种细节上。
+                ScheduleRecoveryRetry(reason, recreate, (int)Math.Clamp(remainingMs, 1, int.MaxValue));
+                return;
+            }
+
+            ExecuteWebViewRecovery(reason, recreate);
+        }
+
+        /// <summary>
+        /// 退避时长 = 基数 × 2^(已连续自愈次数)，封顶 <see cref="RecoveryBackoffMaxMs"/>。
+        /// </summary>
+        private static int ComputeRecoveryBackoffMs(int attempts)
+        {
+            int shifts = Math.Min(attempts, 10); // 卡住移位，避免 long 溢出
+            long backoff = (long)RecoveryBackoffBaseMs << shifts;
+            return (int)Math.Min(backoff, RecoveryBackoffMaxMs);
+        }
+
+        /// <summary>
+        /// 冷却期到点后补做一次恢复。
+        ///
+        /// 用「延时 + 回投递 UI 线程」而不是 DispatcherQueueTimer：
+        /// 不必新增一个需要随页面释放的定时器字段，而 <c>_isDisposed</c> 检查足够兜住
+        /// 「延时期间页面被 LRU 淘汰」这段窗口。
+        /// </summary>
+        private void ScheduleRecoveryRetry(string reason, bool recreate, int delayMs)
+        {
+            _recoveryRetryScheduled = true;
+
+            LogService.Info("WebView2.Recovery",
+                $"{reason}：进入退避冷却，{delayMs}ms 后重试" +
+                $"（已连续自愈 {_consecutiveRecoveryAttempts}/{MaxConsecutiveRecoveryAttempts} 次）");
+
+            _ = Task.Delay(delayMs).ContinueWith(_ =>
+            {
+                bool queued = false;
+                try
+                {
+                    queued = DispatcherQueue?.TryEnqueue(() =>
+                    {
+                        _recoveryRetryScheduled = false;
+
+                        if (_isDisposed)
+                        {
+                            return;
+                        }
+
+                        RequestWebViewRecovery(reason + "（退避后重试）", recreate);
+                    }) ?? false;
+                }
+                catch
+                {
+                    queued = false;
+                }
+
+                if (!queued)
+                {
+                    // 投递失败（队列已关闭等）时必须自己清标志，
+                    // 否则页面永久认为「重试还在排着」，再也不会尝试恢复。
+                    _recoveryRetryScheduled = false;
+                }
+            }, TaskScheduler.Default);
+        }
+
+        /// <summary>
+        /// 真正动手恢复。只在 UI 线程、且过了上面三道闸门后调用。
+        /// </summary>
+        private void ExecuteWebViewRecovery(string reason, bool recreate)
+        {
+            _isRecoveringWebView = true;
+            _recoveryRetryScheduled = false;
+            _consecutiveRecoveryAttempts++;
+            _lastRecoveryUtc = DateTime.UtcNow;
+            _deferredRecoveryReason = null;
+            _deferredRecoveryNeedsRecreation = false;
+
+            try
+            {
+                if (recreate)
+                {
+                    RecreateAfterBrowserProcessLoss(reason);
+                }
+                else if (WebView?.CoreWebView2 != null)
+                {
+                    WebView.CoreWebView2.Reload();
+                    _unresponsiveCount = 0;
+
+                    LogService.Info("WebView2.Recovery",
+                        $"{reason}：已触发 Reload（第 {_consecutiveRecoveryAttempts}/{MaxConsecutiveRecoveryAttempts} 次自愈）");
+                }
+                else
+                {
+                    // 控件还在但内核为空 ⇒ 与重建同一条路：直接把初始化拉起来
+                    _isWebViewReady = false;
+
+                    LogService.Warning("WebView2.Recovery",
+                        $"{reason}：控件存在但内核为空，直接重新初始化（第 {_consecutiveRecoveryAttempts}/{MaxConsecutiveRecoveryAttempts} 次自愈）");
+                    KickWebViewReinitialization();
+                }
+            }
+            catch (Exception ex)
+            {
+                LogService.Error("WebView2.Recovery", $"{reason}：恢复动作失败", ex);
+            }
+            finally
+            {
+                _isRecoveringWebView = false;
+            }
+        }
+
+        /// <summary>
+        /// 浏览器进程整组没了之后的重建：摘掉死控件 → 换新实例 → 重新初始化 → 回原 URL。
+        ///
+        /// <para>旧代码在 ProcessFailed 的 case 里就地做完这一整套，且只置了
+        /// <c>_needsWebViewRecreation = false</c> 而没有重新初始化新控件 —— 结果是
+        /// 「换上去的 WebView2 其实从没被拉起」，用户看到的是一块空白。这里把初始化补上，
+        /// 并把崩溃现场的 URL 先存进 <see cref="_pendingNavigationUri"/>，恢复完直接导航回去。</para>
+        /// </summary>
+        private void RecreateAfterBrowserProcessLoss(string reason)
+        {
+            // 崩溃现场 URL 先存下来：Close 之后 WebView.Source 可能已经读不到
+            try
+            {
+                Uri? dyingUrl = WebView?.Source;
+                if (dyingUrl != null && _pendingNavigationUri == null)
+                {
+                    _pendingNavigationUri = dyingUrl;
+                }
+            }
+            catch
+            {
+                // 读不到就算了，后面按 _currentShortcut 的路子恢复
+            }
+
+            try
+            {
+                if (WebView?.CoreWebView2 != null)
+                {
+                    WebView.CoreWebView2.ProcessFailed -= CoreWebView2_ProcessFailed;
+                }
+
+                WebView?.Close();
+            }
+            catch (Exception closeEx)
+            {
+                // 浏览器进程已经没了，摘控件抛异常属于正常（COM 对象是空壳），不能让它挡住重建
+                LogService.Warning("WebView2.Recovery",
+                    $"关闭失效 WebView 时抛异常（忽略并继续重建）: {closeEx.GetType().Name}: {closeEx.Message}");
+            }
+
+            RecreateWebView();
+            _needsWebViewRecreation = false;
+            _isWebViewReady = false;
+
+            LogService.Warning("WebView2.Recovery",
+                $"{reason}：已重建 WebView 控件，重新初始化内核（第 {_consecutiveRecoveryAttempts}/{MaxConsecutiveRecoveryAttempts} 次自愈）");
+
+            KickWebViewReinitialization();
+        }
+
+        /// <summary>
+        /// 把初始化拉起来，完成后回 UI 线程导航。
+        ///
+        /// ⚠️ <c>EnsureWebViewInitializedAsync</c> 必须在 UI 线程发起（碰 XAML 与 STA 的
+        /// WebView2）；它的续体刻意调度回 UI 线程再导航 —— 官方线程模型写明跨线程
+        /// 使用 WebView2 是不安全的。
+        /// </summary>
+        private void KickWebViewReinitialization()
+        {
+            _ = EnsureWebViewInitializedAsync().ContinueWith(t =>
+            {
+                try
+                {
+                    bool queued = DispatcherQueue?.TryEnqueue(() =>
+                    {
+                        if (_isDisposed)
+                        {
+                            return;
+                        }
+
+                        if (t.IsCompletedSuccessfully)
+                        {
+                            TryNavigatePendingUri();
+                        }
+                        else
+                        {
+                            Exception? root = t.Exception?.GetBaseException();
+                            LogService.Error("WebView2.Recovery", "恢复后的内核重新初始化失败",
+                                root ?? new InvalidOperationException("初始化任务未成功完成（无异常对象）"));
+                        }
+                    }) ?? false;
+
+                    if (!queued)
+                    {
+                        LogService.Warning("WebView2.Recovery", "恢复初始化完成，但投递回 UI 线程失败（队列已关闭？），本次不导航");
+                    }
+                }
+                catch
+                {
+                    // 恢复路径上的任何异常都到此为止，不许外溢
+                }
+            }, TaskScheduler.Default);
+        }
+
+        /// <summary>
+        /// 页面回到前台时，补做后台期间欠下的恢复（由 RestoreWebViewFromIdleState 调用）。
+        ///
+        /// <para>走 <c>INavigationAware.OnNavigatedTo</c> 的切页路径不需要它 —— 那条路径
+        /// 自己会消费 <c>_needsWebViewRecreation</c> 完成重建，并在重建时清空待办标记。
+        /// 这里专门兜住「窗口收起→再滑出来」那条不做导航的路径。</para>
+        /// </summary>
+        private void TryRunDeferredRecovery()
+        {
+            string? reason = _deferredRecoveryReason;
+            bool recreate = _deferredRecoveryNeedsRecreation || _needsWebViewRecreation;
+
+            if (reason == null && !recreate)
+            {
+                return;
+            }
+
+            _deferredRecoveryReason = null;
+            _deferredRecoveryNeedsRecreation = false;
+
+            // 回前台补做的这一次不计入「连续自愈」退避：后台期间本来就没动作，
+            // 而用户现在正等着这块内容出来，直接执行。
+            ExecuteWebViewRecovery($"{reason ?? "页面在后台期间内核失效"}（回到前台补做）", recreate);
         }
     }
 }

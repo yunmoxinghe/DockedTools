@@ -33,5 +33,16 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         
         // WebView 无响应检测相关
         private const int MaxUnresponsiveCountBeforeReload = 3; // ⭐ 连续无响应多少次后触发 Reload
+
+        // ── WebView2 进程失败恢复的节流参数（2026-10-15 新增）────────────────
+        // 【为什么必须有上限和退避】
+        // 旧策略是「见到事件就立刻 Reload / 当场 Close+重建控件」。一个必崩的页面
+        // 会被无限次 Reload；而浏览器进程组一旦整组消失（Runtime 后台自更新是最常见的
+        // 外部诱因），LRU 里每个缓存页都会在同一时刻各自重建控件、各自拉起一棵进程树 ——
+        // 全部发生在 UI 线程上。UI 线程被按住不泵消息，托盘看门狗就判卡死并静默重启，
+        // 用户看到的正是「软件反复重启」。所以这里改成：有限次自愈 + 指数退避 + 后台页不动作。
+        private const int MaxConsecutiveRecoveryAttempts = 3; // 连续自愈次数上限，达到即停止自动恢复
+        private const int RecoveryBackoffBaseMs = 1500;       // 首次退避时长，之后每次翻倍
+        private const int RecoveryBackoffMaxMs = 30000;       // 退避封顶，避免指数增长后等出分钟级空洞
     }
 }
