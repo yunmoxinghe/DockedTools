@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     DockedTools 的 git worktree 初始化 / 包身份体检脚本。
 
@@ -73,14 +73,19 @@ $BaseIdentity = '8B8CC4F4.482486777ECD9'
 $CsprojRel    = 'DockedTools\DockedTools.csproj'
 $ManifestRel  = 'DockedTools\Package.Debug.appxmanifest'
 $IdentityRel  = 'DockedTools\功能\应用入口\WorktreeIdentity.g.cs'
-$AppFolderRel = 'DockedTools\bin\x64\Debug\net10.0-windows10.0.22621.0\win-x64'
 $Ports        = 17829..17839   # 桥接服务盲扫区间，多实例时会互相挤
+# 产物目录一律不写死 —— 见下方 Get-AppOutputFolder：TFM 会跟着 csproj 升级，写死的路径必然过期
 
 # ---------------------------------------------------------------- 小工具
 function Write-Head([string]$t) { Write-Host ''; Write-Host ('=== {0} ===' -f $t) -ForegroundColor Cyan }
 function Write-Ok([string]$t)   { Write-Host ('  OK   {0}' -f $t) -ForegroundColor Green }
 function Write-Warn([string]$t) { Write-Host ('  WARN {0}' -f $t) -ForegroundColor Yellow }
-function Write-Bad([string]$t)  { Write-Host ('  FAIL {0}' -f $t) -ForegroundColor Red }
+function Write-Bad([string]$t)  {
+    Write-Host ('  FAIL {0}' -f $t) -ForegroundColor Red
+    # 标了 FAIL 就得让调用方看出来：体检判出「后缀撞车」「csproj 没接种隔离逻辑」这类问题，
+    # 光在屏幕上标红、退出码还是 0，上层（包括哥哥自己写批处理时）没法据此停下来。
+    $script:BadReported = $true
+}
 function Write-Info([string]$t) { Write-Host ('       {0}' -f $t) -ForegroundColor DarkGray }
 
 <# 从目录名派生后缀：main-ffb0958c -> .WTFFB0 #>
@@ -126,24 +131,61 @@ function Get-PkgAnnote($p, [string]$root) {
     return ''
 }
 
-# 中途结束一律用 return：脚本里直接 exit 会把调用者的终端一起关掉。
-# 只有真正失败时才在脚本末尾 exit 1，给调用方一个非零退出码。
+<#
+  构建产物目录：从 csproj 的 <TargetFramework> 现推，不写死。
+
+  【为什么之前必须改】写死的是 net10.0-windows10.0.22621.0，而 TFM 在 60ec6f6（2026-10-03）
+  升到了 net10.0-windows10.0.26100.0，本脚本最后一次改动是前一天（d999871，10-02）没跟上。
+  新旧两个目录同时存在（旧目录里还躺着 10-03 的 DockedTools.exe），Test-Path 校验照样过，
+  于是 -Build -Run 变成「构建进 26100、启动 22621 里的旧程序」，一声不响跑错版本 ——
+  验证改动时踩这个坑，看到的全是上一个版本的行为。
+#>
+function Get-AppOutputFolder([string]$root) {
+    $csprojPath = Join-Path $root $CsprojRel
+    if (-not (Test-Path $csprojPath)) { return $null }
+
+    $m = [regex]::Match((Get-Content $csprojPath -Raw), '<TargetFramework>([^<]+)</TargetFramework>')
+    if (-not $m.Success) { return $null }
+
+    $tfm = $m.Groups[1].Value.Trim()
+    return @{ Tfm = $tfm; Folder = (Join-Path $root ('DockedTools\bin\x64\Debug\' + $tfm + '\win-x64')) }
+}
+
+# 正常收工用 return（脚本末尾不 exit，免得给成功运行也带上退出码）。
+# 失败走 Fail-AndExit：早先每个失败分支都是 return，永远走不到末尾那句 exit 1，
+# 实测 -Unregister 一个不存在的包 —— 打了 FAIL，$LASTEXITCODE 仍是 0，上层没法判失败。
+# 【exit 会不会关掉调用者的终端】实测（PS 5.1.26100）：用 & 调用 .ps1，脚本里的 exit
+# 只结束脚本自己的作用域（调用方的后续语句照常执行），同时把 $LASTEXITCODE 置成指定值。
 $script:Failed = $false
+$script:BadReported = $false
+
+function Fail-AndExit([string]$msg) {
+    Write-Bad $msg
+    $script:Failed = $true
+    exit 1
+}
+
+# 正常收尾前都要过一道：动作失败（Failed）或体检判出 FAIL（BadReported）都给非零退出码，
+# 干净就 fall through 到调用方的 return。写在函数里是为了不让每个出口各抄一遍判断。
+function Complete-Script {
+    if ($script:Failed -or $script:BadReported) { exit 1 }
+}
 
 # ---------------------------------------------------------------- 定位仓库
 $repoRoot = Get-RepoRoot
 if (-not $repoRoot) {
-    Write-Bad '没找到仓库根目录（当前目录及其上级都没有 .git）。请在 DockedTools 仓库内运行。'
-    $script:Failed = $true
-    return
+    Fail-AndExit '没找到仓库根目录（当前目录及其上级都没有 .git）。请在 DockedTools 仓库内运行。'
 }
 $dirName = Split-Path $repoRoot -Leaf
 
-# 后缀优先级：显式 -Suffix  >  目录名派生  >  环境变量 WORKTREE_SUFFIX
+# 后缀优先级：显式 -Suffix  >  环境变量 WORKTREE_SUFFIX  >  目录名派生
+# 【为什么把 env 放在目录名前面】DockedTools.csproj 第 179~180 行就是这个顺序，
+# 体检脚本必须和被检查的对象同源，否则「设了 WORKTREE_SUFFIX 又在带 hash 的目录里跑 -Status」
+# 会报出另一个后缀，体检结论直接误导（真构建用的是 env 那个）。
 $dirSuffix  = Get-DirSuffix $dirName
 $envSuffix  = Format-Suffix $env:WORKTREE_SUFFIX
 $explicit   = Format-Suffix $Suffix
-$effSuffix  = if ($explicit) { $explicit } elseif ($dirSuffix) { $dirSuffix } elseif ($envSuffix) { $envSuffix } else { '' }
+$effSuffix  = if ($explicit) { $explicit } elseif ($envSuffix) { $envSuffix } elseif ($dirSuffix) { $dirSuffix } else { '' }
 
 Write-Host ''
 Write-Host 'DockedTools · worktree 工具' -ForegroundColor Cyan
@@ -163,18 +205,18 @@ if ($ListPackages) {
     }
     Write-Info ('共 {0} 个。注销用：-Unregister <PackageFullName>' -f $pkgs.Count)
     # 只有「光列表」这一个意图时才到此为止；同时带 -Status 就继续往下体检
-    if (-not ($Build -or $Run -or $New -or $Status -or $Unregister)) { return }
+    if (-not ($Build -or $Run -or $New -or $Status -or $Unregister)) { Complete-Script; return }
 }
 
 # ---------------------------------------------------------------- -Unregister
 if ($Unregister) {
     Write-Head ('注销包: {0}' -f $Unregister)
     $p = Get-AppxPackage | Where-Object { $_.PackageFullName -eq $Unregister } | Select-Object -First 1
-    if (-not $p) { Write-Bad '找不到这个包，用 -ListPackages 看准确名字'; $script:Failed = $true; return }
+    if (-not $p) { Fail-AndExit '找不到这个包，用 -ListPackages 看准确名字' }
     Write-Warn '注销后该包的安装目录会被删除。若它正在运行请先退出。'
     $p | Remove-AppxPackage
     Write-Ok '已注销'
-    if (-not ($Build -or $Run -or $New -or $Status)) { return }
+    if (-not ($Build -or $Run -or $New -or $Status)) { Complete-Script; return }
 }
 
 # ---------------------------------------------------------------- -New
@@ -182,7 +224,7 @@ if ($New) {
     Write-Head ('新建 worktree: {0}' -f $New)
 
     $git = Get-Command git -ErrorAction SilentlyContinue
-    if (-not $git) { Write-Bad '找不到 git'; $script:Failed = $true; return }
+    if (-not $git) { Fail-AndExit '找不到 git' }
 
     if (-not $Root) {
         # 主仓库的上一级；若当前已在 worktree 里，就用它所在的那层目录
@@ -195,7 +237,7 @@ if ($New) {
     $wtPath  = Join-Path $Root $wtName
     $wtSuffix = '.WT' + $hash.Substring(0, 4).ToUpperInvariant()
 
-    if (Test-Path $wtPath) { Write-Bad ('目标目录已存在: {0}' -f $wtPath); $script:Failed = $true; return }
+    if (Test-Path $wtPath) { Fail-AndExit ('目标目录已存在: {0}' -f $wtPath) }
 
     Write-Info ('目录名   : {0}   （带 hash 才会触发身份隔离，别手改成别的名字）' -f $wtName)
     Write-Info ('包身份   : {0}.Debug{1}' -f $BaseIdentity, $wtSuffix)
@@ -212,14 +254,12 @@ if ($New) {
         Write-Host '  接下来（DryRun 未真正创建）：' -ForegroundColor Cyan
         Write-Host ('    cd "{0}"' -f $wtPath)
         Write-Host '    .\脚本工具\worktree.ps1 -Build -Run'
-        return
+        Complete-Script; return
     }
 
     & git @gitArgs
     if ($LASTEXITCODE -ne 0) {
-        Write-Bad ('git worktree add 失败（exit {0}）' -f $LASTEXITCODE)
-        $script:Failed = $true
-        return
+        Fail-AndExit ('git worktree add 失败（exit {0}）' -f $LASTEXITCODE)
     }
 
     Write-Ok ('已创建: {0}' -f $wtPath)
@@ -232,12 +272,16 @@ if ($New) {
         Write-Host '    .\脚本工具\worktree.ps1 -Build -Run'
     }
 
-    if (-not ($Build -or $Run)) { return }
+    if (-not ($Build -or $Run)) { Complete-Script; return }
 
     # 继续在当前目录构建/运行的话没意义，切进新 worktree
     Set-Location $wtPath
     $repoRoot  = $wtPath
     $dirName   = $wtName
+    # 跟着换的必须是派生出来的后缀，不能只换 dirName ——
+    # 之前 $dirSuffix 还是旧目录算出来的空串，体检会对一个明明带 hash 的新目录
+    # 报「目录名不含 hash 段」，属于脚本自己造的假告警。
+    $dirSuffix = Get-DirSuffix $wtName
     $effSuffix = $wtSuffix
 }
 
@@ -311,9 +355,15 @@ if (Test-Path $g) {
 $installed = @(Get-AppxPackage | Where-Object { $_.Name -eq $identity })
 if ($installed.Count -gt 0) {
     $loc = $installed[0].InstallLocation
-    $mine = $loc -and $repoRoot -and $loc.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)
+    # Staged / 未完全安装的包 InstallLocation 是空串，而 Test-Path '' 在
+    # $ErrorActionPreference='Stop' 下会直接抛 ParameterBindingValidationException（实测），
+    # 体检就会在最后一步崩掉 —— 先判空再碰路径。Get-PkgAnnote 里本来就有这层保护，这里漏了。
+    $hasLoc = -not [string]::IsNullOrWhiteSpace($loc)
+    $mine = $hasLoc -and $repoRoot -and $loc.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)
     if ($mine) {
         Write-Ok ('本身份已安装，且归属当前 worktree: {0}' -f $installed[0].PackageFullName)
+    } elseif (-not $hasLoc) {
+        Write-Warn '本身份已注册但没有安装目录（Staged / 残缺状态），建议 -Unregister 掉再构建'
     } elseif (-not (Test-Path $loc)) {
         Write-Warn ('本身份已注册但目录已不存在（孤儿包）: {0}' -f $loc)
         Write-Info '先 -Unregister 再构建，否则可能注册不上'
@@ -339,43 +389,54 @@ if ($stale.Count -gt 0) {
 }
 
 # 8) 端口占用（桥接服务盲扫区间，多实例会抢）
+# 【为什么要先查命令存在性】-ErrorAction SilentlyContinue 只对 cmdlet 自己写的错误有效，
+# 「命令根本不存在」抛的是 CommandNotFoundException，它照样会把 Stop 模式的脚本打死（实测）。
 $busy = @()
-foreach ($p in $Ports) {
-    $c = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
-    if ($c) { $busy += $p }
-}
-if ($busy.Count -gt 0) {
-    Write-Warn ('桥接端口被占: {0}（多半是另一个实例在跑，扩展会连到它）' -f ($busy -join ', '))
+if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
+    foreach ($p in $Ports) {
+        # 同一端口 IPv4 + IPv6 各一条监听，不去重的话告警里会把同一个端口印两遍
+        $c = @(Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue)
+        if ($c.Count -gt 0 -and $busy -notcontains $p) { $busy += $p }
+    }
+    if ($busy.Count -gt 0) {
+        Write-Warn ('桥接端口被占: {0}（多半是另一个实例在跑，扩展会连到它）' -f ($busy -join ', '))
+    } else {
+        Write-Ok ('桥接端口 {0}~{1} 全空' -f $Ports[0], $Ports[-1])
+    }
 } else {
-    Write-Ok ('桥接端口 {0}~{1} 全空' -f $Ports[0], $Ports[-1])
+    Write-Warn '这台机器没有 Get-NetTCPConnection（NetTCPIP 模块缺失），端口检查跳过'
 }
+# 提醒：桥接收端目前是关着的（功能/浏览器扩展/桥接配置.cs 的 BridgeConfig.Enabled = false），
+# 所以这里读到「被占」更可能是别的进程，而不是本应用的另一个实例。
 
-if (-not ($Build -or $Run)) { return }
+# 体检判出 FAIL（后缀撞车、csproj 没接种隔离逻辑等）也要给非零码 ——
+# 别继续「屏幕上一片红、退出码 0」，那和这次修 Fail-AndExit 的目的是同一件事。
+if (-not ($Build -or $Run)) { Complete-Script; return }
 
 # ---------------------------------------------------------------- -Build
 if ($Build) {
     Write-Head '构建 Debug'
 
     $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
-    if (-not $dotnet) { Write-Bad '找不到 dotnet'; $script:Failed = $true; return }
+    if (-not $dotnet) { Fail-AndExit '找不到 dotnet' }
 
-    # 显式后缀走命令行传给 MSBuild，global property 优先级高于 csproj 内的赋值，
-    # 包身份与 WorktreeIdentity.g.cs 会一起跟着变
-    $env:WORKTREE_SUFFIX = $effSuffix
+    # 后缀一律走命令行 global property 传给 MSBuild：优先级高于 csproj 内的任何赋值，
+    # 包身份与 WorktreeIdentity.g.cs 会一起跟着变。
+    # 【为什么不再写 $env:WORKTREE_SUFFIX】环境变量会留在调用方的 shell 里，而体检现在按
+    # 「显式 > env > 目录名」取后缀（与 csproj 同源）—— 同一个窗口里 cd 到下一个 worktree
+    # 接着构建，就会继承上一个 worktree 的后缀，两个包身份互相顶掉，正是本脚本要抓的事故。
+    # 何况 -p:WorktreeSuffix= 已经把后缀传到位了，env 那条纯属多余。
     $buildArgs = @('build', (Join-Path $repoRoot $CsprojRel), '-c', 'Debug', '-p:Platform=x64')
     if ($effSuffix) { $buildArgs += ('-p:WorktreeSuffix={0}' -f $effSuffix) }
 
     if ($DryRun) {
-        Write-Info ('[DryRun] $env:WORKTREE_SUFFIX = "{0}"' -f $effSuffix)
         Write-Info ('[DryRun] dotnet {0}' -f ($buildArgs -join ' '))
     } else {
         Push-Location $repoRoot
         try {
             & dotnet @buildArgs
             if ($LASTEXITCODE -ne 0) {
-                Write-Bad ('构建失败（exit {0}）' -f $LASTEXITCODE)
-                $script:Failed = $true
-                return
+                Fail-AndExit ('构建失败（exit {0}）' -f $LASTEXITCODE)
             }
         } finally { Pop-Location }
     }
@@ -394,25 +455,57 @@ if ($Run) {
     Write-Head '启动'
 
     $winapp = Get-Command winapp -ErrorAction SilentlyContinue
-    if (-not $winapp) { Write-Bad '找不到 winapp CLI（Windows App SDK CLI）'; $script:Failed = $true; return }
+    if (-not $winapp) { Fail-AndExit '找不到 winapp CLI（Windows App SDK CLI）' }
 
-    $appFolder = Join-Path $repoRoot $AppFolderRel
-    if (-not (Test-Path $appFolder)) { Write-Bad ('产物目录不存在，先构建: {0}' -f $appFolder); $script:Failed = $true; return }
+    # 产物目录跟着 csproj 的 TargetFramework 现推；推不出来就明说，
+    # 绝不回落到某个「看起来也在」的旧 TFM 目录 —— 那正是静默跑错版本的来源
+    $layout = Get-AppOutputFolder $repoRoot
+    if (-not $layout) { Fail-AndExit ('读不到 {0} 里的 <TargetFramework>，无法确定产物目录' -f $CsprojRel) }
 
+    $appFolder = $layout.Folder
+    Write-Info ('TFM     : {0}' -f $layout.Tfm)
     Write-Info ('应用目录: {0}' -f $appFolder)
-    Write-Info ('包身份  : {0}' -f $identity)
-    Write-Info '退出后自动注销（--unregister-on-exit）'
 
     $runArgs = @('run', $appFolder, '--debug-output', '--unregister-on-exit')
+
     if ($DryRun) {
+        # 预演必须能看见命令：DryRun 的承诺是「只打印将要执行的命令，不真的跑」，
+        # 那就不该因为「还没构建」被存在性检查拦在半路 —— 这里只 WARN 一句再走。
+        if (-not (Test-Path $appFolder)) { Write-Warn '该目录现在还不存在，真跑之前要先 -Build' }
         Write-Info ('[DryRun] winapp {0}' -f ($runArgs -join ' '))
-        return
+        Complete-Script; return
     }
+
+    if (-not (Test-Path $appFolder)) {
+        # 把 Debug 下现有哪些 TFM 列出来：写死路径的年代，旧 TFM 目录的存在恰好把
+        # 「跑错版本」完全掩盖掉，现在至少让人一眼看见差在哪
+        # 【注意要往上两层】$appFolder 是 ..\<tfm>\win-x64，退一层只到 <tfm>，
+        # 列出来的是 ref/cs/native，不是想要的「同级其它 TFM」
+        $tfmRoot  = Split-Path (Split-Path $appFolder -Parent) -Parent
+        $siblings = @(Get-ChildItem $tfmRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+        $hint = if ($siblings.Count -gt 0) { ($siblings -join ', ') } else { '（一个都还没有）' }
+        Fail-AndExit ('产物目录不存在，先 -Build: {0}   Debug 下现有: {1}' -f $appFolder, $hint)
+    }
+
+    # 防呆：exe 比 csproj 还旧，基本等于「构建产物没跟上源码」，提醒一句再启动
+    $csprojPath = Join-Path $repoRoot $CsprojRel
+    $exePath    = Join-Path $appFolder 'DockedTools.exe'
+    if ((Test-Path $exePath) -and (Test-Path $csprojPath)) {
+        $exeTime  = (Get-Item $exePath).LastWriteTime
+        $srcTime  = (Get-Item $csprojPath).LastWriteTime
+        if ($exeTime -lt $srcTime) {
+            Write-Warn ('产物 exe 是 {0:MM-dd HH:mm}，csproj 改于 {1:MM-dd HH:mm} —— exe 比源码旧，确认这是想要的构建' -f $exeTime, $srcTime)
+        }
+    }
+
+    Write-Info ('包身份  : {0}' -f $identity)
+    Write-Info '退出后自动注销（--unregister-on-exit）'
 
     Push-Location $repoRoot
     try { & winapp @runArgs }
     finally { Pop-Location }
 }
 
-# 只有失败才在这里结束进程，给调用方非零退出码；成功时不 exit，免得关掉调用者的终端
-if ($script:Failed) { exit 1 }
+# 兜底：中途的失败路径都由 Fail-AndExit / Complete-Script 收走了，这里保证
+# 走到最后一行时，只要出现过 Failed 或体检 FAIL 仍给出非零退出码。
+Complete-Script

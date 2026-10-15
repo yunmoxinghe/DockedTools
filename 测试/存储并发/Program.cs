@@ -140,6 +140,48 @@ namespace DockedTools.StoreTests
                     loaded[0].RightButtonConfig is null);
             }
 
+            // ⭐ 逐站权限开关的往返。这五个字段是后加的，只要 Load/Save 有一边漏了映射、
+            // 或者 JSON 字段名写岔，就会静默退化成「全开」——用户看到的现象是
+            // 「我明明关了麦克风，重开应用它又开了」。这种 bug 不会报错，只能靠断言兜住。
+            await WebAppShortcutStore.SaveAsync(new List<WebAppShortcut>
+            {
+                new WebAppShortcut(
+                    "id-perm", "权限条目", "https://perm.example/", null,
+                    null, null,
+                    NotificationsEnabled: true,
+                    GeolocationEnabled: false,
+                    CameraEnabled: false,
+                    MicrophoneEnabled: false,
+                    ClipboardReadEnabled: true)
+            });
+
+            var permAll = await WebAppShortcutStore.LoadAsync();
+            var permItem = permAll.Count == 1 ? permAll[0] : null;
+            Check("五项权限开关往返一致（关掉的没被静默改回开启）",
+                permItem is not null &&
+                permItem.NotificationsEnabled && !permItem.GeolocationEnabled &&
+                !permItem.CameraEnabled && !permItem.MicrophoneEnabled &&
+                permItem.ClipboardReadEnabled,
+                permItem is null
+                    ? "条目丢了"
+                    : $"通知={permItem.NotificationsEnabled} 定位={permItem.GeolocationEnabled} " +
+                      $"相机={permItem.CameraEnabled} 麦克风={permItem.MicrophoneEnabled} " +
+                      $"剪贴板={permItem.ClipboardReadEnabled}");
+
+            // 老数据里没有这些字段 → 读回来必须是「默认全开」而不是全关。
+            // 这条决定了存量用户升级后会不会突然收不到通知 ——
+            // 默认成 false 的话，一次升级就会静默掐掉所有人的通知。
+            File.WriteAllText(FilePath,
+                "[{\"id\":\"legacy\",\"name\":\"老条目\",\"url\":\"https://legacy.example/\"}]");
+
+            var legacyAll = await WebAppShortcutStore.LoadAsync();
+            var legacyItem = legacyAll.Count == 1 ? legacyAll[0] : null;
+            Check("老数据缺权限字段: 按默认全开读回（存量应用升级后不会突然收不到通知）",
+                legacyItem is not null &&
+                legacyItem.NotificationsEnabled && legacyItem.GeolocationEnabled &&
+                legacyItem.CameraEnabled && legacyItem.MicrophoneEnabled &&
+                legacyItem.ClipboardReadEnabled);
+
             // 全量覆盖语义：Save 传 1 条，就是 1 条
             await WebAppShortcutStore.SaveAsync(new List<WebAppShortcut> { Item(9) });
             var overwritten = await WebAppShortcutStore.LoadAsync();
