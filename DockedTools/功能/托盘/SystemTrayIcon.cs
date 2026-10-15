@@ -404,6 +404,43 @@ namespace DockedTools.Features.Tray
 
             try
             {
+                // ⭐ 关机 / 注销 / 重启通知。
+                // 官方口径：收到这条要"立刻返回 TRUE 或 FALSE，清理留给 WM_ENDSESSION"，
+                // 5 秒内不答复就会被系统列进"正在阻止关闭"并允许用户强杀这个线程。
+                // DefWindowProc 本来也返回 TRUE，但这里有件事必须自己顺手做掉：
+                // 通知 UI 线程看门狗闭嘴 —— 主线程此刻正被会话结束消息占着、
+                // 必然不响应心跳探测，不拦的话狗会在会话拆除阶段弹通知、
+                // 包唤起一个新实例、再写脏重启冷却戳记。
+                // 这个 HWND 是常驻的顶层窗口，是整个进程里最早、最稳定的通知入口
+                // （keep-alive 窗口会被关掉重建，不适合挂这类钩子）。
+                // lParam 是位掩码，只按位测，别写 == 比较（详见常量区的注释）。
+                // 三类来源要分开对待：
+                //   ① ENDSESSION_CLOSEAPP 且没有 LOGOFF/CRITICAL —— 这不是关机，是
+                //      Restart Manager / 包安装 servicing 在腾文件（MSIX 更新走这条）。
+                //      只需要让路， suppress 窗口给短一点，更新失败还能自己恢复判定。
+                //   ② 其余（含 LOGOFF、CRITICAL、以及 lParam=0 的常规关机/重启）——
+                //      会话真的要拆，给足窗口期，别在拆除阶段复活。
+                // 两条路都必须 return TRUE，绝不阻塞；分别只影响看门狗抑制多久。
+                if (uMsg == WM_QUERYENDSESSION)
+                {
+                    var endSessionFlags = (uint)(lParam.ToInt64() & 0xFFFFFFFFL);
+                    var detail =
+                        $"托盘线程 0x{hWnd.ToInt64():X} 收到 WM_QUERYENDSESSION（lParam=0x{endSessionFlags:X8}）";
+
+                    if ((endSessionFlags & ENDSESSION_CLOSEAPP) != 0 &&
+                        (endSessionFlags & (ENDSESSION_LOGOFF | ENDSESSION_CRITICAL)) == 0)
+                    {
+                        global::DockedTools.Features.Tray.UIThreadWatchdog.SuppressForAppReplacement(detail);
+                    }
+                    else
+                    {
+                        global::DockedTools.Features.Tray.UIThreadWatchdog.SuppressForSessionEnd(detail);
+                    }
+
+                    // TRUE：放行，尊重调用方意图，不阻塞关机也不阻塞更新
+                    return (IntPtr)1;
+                }
+
                 if (uMsg == WM_GETMINMAXINFO)
                 {
                     var mmi = Marshal.PtrToStructure<MINMAXINFO>(lParam);
@@ -642,6 +679,15 @@ namespace DockedTools.Features.Tray
         private const uint WM_RBUTTONDOWN = 0x0204;
         private const uint WM_RBUTTONUP = 0x0205;  // 🛠️ 添加 WM_RBUTTONUP
         private const uint WM_NULL = 0x0000;  // 🛠️ 添加 WM_NULL
+        // 系统在结束会话（关机 / 重启 / 注销）前问每一句"你能不能走"。
+        // 这是发给**进程中每个有消息泵的线程**的顶层窗口的，托盘这种 WS_POPUP 窗口也在名单里；
+        // message-only（HWND_MESSAGE）窗口收不到，所以我们这个真窗口是唯一能提前拿到通知的位置。
+        private const uint WM_QUERYENDSESSION = 0x0011;
+        // WM_QUERYENDSESSION / WM_ENDSESSION 的 lParam 是**位掩码**，官方明确要求按位测试、不要等值比较。
+        // 0 表示"系统在关机或重启（分不清是哪一个）"。
+        private const uint ENDSESSION_CLOSEAPP = 0x00000001;  // 应用占用的文件需要被替换 / 系统 servicing / 资源耗尽
+        private const uint ENDSESSION_CRITICAL = 0x40000000;  // 被强制关闭
+        private const uint ENDSESSION_LOGOFF = 0x80000000;    // 用户注销
         private const int SW_SHOW = 5;
         private const uint WM_GETMINMAXINFO = 0x0024;
         // NOTIFYICON_VERSION_4 专用通知：explorer 悬停/移出图标时下发。

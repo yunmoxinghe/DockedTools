@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace DockedTools.Features.UnifiedCalls.Logging
 {
@@ -21,8 +23,49 @@ namespace DockedTools.Features.UnifiedCalls.Logging
     /// </summary>
     public static class LogService
     {
-        private static readonly object _fileLock = new object();
         private static string? _logDirectory;
+
+        // ⭐ 为什么必须把写盘挪出调用线程（2026-10-15）
+        // 旧实现是 File.AppendAllText + 全局 lock，直接在调用线程上同步落盘。
+        // 而 WebView2 的 ProcessFailed 处理器、页面初始化失败路径都在 UI 线程上调
+        // Error()，于是「磁盘停顿 / 杀软扫描 / MSIX 容器里的重定向写入」会经由日志
+        // 把 UI 线程按住 —— 而 UI 线程一停泵，托盘看门狗就判卡死并静默重启。
+        // 日志本身不值得为此冒无响应风险，所以这里改成：调用方只做一次入队，
+        // 真正的磁盘 IO 全部由唯一一条写线程串行完成。
+        //
+        // 【有界队列】宁可丢日志，也不能让积压吃掉内存或在关闭时无限等待。
+        // 溢出按「丢最旧」处理并计数，计数会在下一次成功入队时补一条告警。
+        private const int MaxQueuedEntries = 4096;
+
+        private static readonly BlockingCollection<LogEntry> _queue =
+            new(new ConcurrentQueue<LogEntry>(), MaxQueuedEntries);
+
+        /// <summary>写线程只启一次（首次真正写日志时惰性启动，不拖累启动阶段）</summary>
+        private static int _writerStarted;
+
+        /// <summary>因队列溢出被丢弃的条数（近似值，只用于告警）</summary>
+        private static long _droppedEntries;
+
+        /// <summary>
+        /// 写线程是否正处在「已出队、还没写完」的那一段（1 = 正在写）。
+        /// Flush 必须连这个状态一起等 —— 队列 Count 归零并不等于最后一条已经落盘，
+        /// 出队和写完之间有一个窄窗口，进程正好在这里退出就会截断最后一行。
+        /// </summary>
+        private static int _writerBusy;
+
+        /// <summary>一条待落盘的日志</summary>
+        private readonly struct LogEntry
+        {
+            public LogEntry(string message, string fileName)
+            {
+                Message = message;
+                FileName = fileName;
+            }
+
+            public string Message { get; }
+
+            public string FileName { get; }
+        }
 
         /// <summary>
         /// 日志级别
@@ -226,14 +269,102 @@ namespace DockedTools.Features.UnifiedCalls.Logging
         }
 
         /// <summary>
-        /// 写入日志文件
+        /// 写入日志：调用线程只负责入队，落盘由写线程完成。
+        /// 本方法在任何情况下都不做磁盘 IO，也不允许阻塞。
         /// </summary>
         private static void WriteLog(string message, string fileName)
         {
-            // 总是输出到调试控制台
+            // 总是输出到调试控制台（Release 下等价于近乎无开销）
             System.Diagnostics.Debug.WriteLine(message);
 
-            // 尝试写入文件
+            EnsureWriterStarted();
+
+            try
+            {
+                if (!_queue.TryAdd(new LogEntry(message, fileName)))
+                {
+                    // 队列满：丢最旧的一条，给最新的让位。
+                    // 积压到这个程度说明磁盘已经不对劲了，绝不能在这里等它。
+                    Interlocked.Increment(ref _droppedEntries);
+                    try
+                    {
+                        _queue.TryTake(out _);
+                    }
+                    catch
+                    {
+                        // 队列已被 CompleteAdding 之类情况拒绝，忽略
+                    }
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                // 队列已关闭（进程正在退出），放弃这条即可
+            }
+            catch
+            {
+                // 日志路径上的任何异常都不该外溢到业务代码
+            }
+        }
+
+        /// <summary>首次写入时惰性起一条串行写线程（长寿命、后台，不阻止进程退出）</summary>
+        private static void EnsureWriterStarted()
+        {
+            if (Interlocked.CompareExchange(ref _writerStarted, 1, 0) != 0)
+            {
+                return;
+            }
+
+            var thread = new Thread(WriterLoop)
+            {
+                IsBackground = true,
+                Name = "LogService.Writer",
+                Priority = ThreadPriority.Lowest
+            };
+            thread.Start();
+        }
+
+        /// <summary>
+        /// 唯一的落盘线程。串行消费 ⇒ 天然保证写入顺序，也保证不会有两个线程抢同一个文件。
+        /// </summary>
+        private static void WriterLoop()
+        {
+            try
+            {
+                foreach (LogEntry entry in _queue.GetConsumingEnumerable())
+                {
+                    // 出队之后、写完之前算「忙」—— Flush 要连这一段一起等，
+                    // 否则「Count 已归零」和「最后一行真的落盘」之间还差一次写。
+                    Interlocked.Exchange(ref _writerBusy, 1);
+                    try
+                    {
+                        AppendToFile(entry);
+
+                        long dropped = Interlocked.Read(ref _droppedEntries);
+                        if (dropped > 0)
+                        {
+                            // 补一条丢日志告警，避免「文件里什么都没记」变成更难查的第二个坑
+                            Interlocked.Exchange(ref _droppedEntries, 0);
+                            AppendToFile(new LogEntry(
+                                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [Warning] [LogService] " +
+                                $"写盘跟不上产生速度，此前丢弃 {dropped} 条日志（队列上限 {MaxQueuedEntries}）",
+                                "app.log"));
+                        }
+                    }
+                    finally
+                    {
+                        Interlocked.Exchange(ref _writerBusy, 0);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[LogService] 写线程异常退出: {ex.Message}");
+            }
+        }
+
+        /// <summary>真正碰磁盘的地方，只在写线程上调用</summary>
+        private static void AppendToFile(LogEntry entry)
+        {
             try
             {
                 EnsureLogDirectory();
@@ -243,17 +374,34 @@ namespace DockedTools.Features.UnifiedCalls.Logging
                     return; // 无法创建日志目录，只输出控制台
                 }
 
-                var logFilePath = Path.Combine(_logDirectory, fileName);
-
-                lock (_fileLock)
-                {
-                    File.AppendAllText(logFilePath, message + Environment.NewLine);
-                }
+                var logFilePath = Path.Combine(_logDirectory, entry.FileName);
+                File.AppendAllText(logFilePath, entry.Message + Environment.NewLine);
             }
             catch
             {
                 // 写入日志失败不应影响程序运行
-                // 已经输出到控制台，不再处理
+            }
+        }
+
+        /// <summary>
+        /// 把队列里已排队的日志压到磁盘上，最多等 timeoutMs。
+        ///
+        /// 【什么时候必须调】进程要用 Environment.Exit / TerminateProcess 硬退的时候。
+        /// 后台线程会被一起带走，不 flush 就等于「崩溃当场的最后几条日志没落盘」，
+        /// 而那几条恰恰是排查依据（也是 WER 附件想要的东西）。
+        /// 正常退出链同样建议在关闭前调一次，成本只是等几百毫秒内排空。
+        /// </summary>
+        public static void Flush(int timeoutMs = 2000)
+        {
+            long deadline = Environment.TickCount64 + timeoutMs;
+
+            // 两个条件都满足才算排干：队列里没有待写的条目，且写线程不在
+            // 「已出队、正在写」的窗口里。只等第一个会把最后一行截在写入途中。
+            // 这里只轮询等待，不参与写入，不会和写线程抢文件。
+            while ((_queue.Count > 0 || Volatile.Read(ref _writerBusy) == 1) &&
+                Environment.TickCount64 < deadline)
+            {
+                Thread.Sleep(10);
             }
         }
 
