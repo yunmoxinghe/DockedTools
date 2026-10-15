@@ -421,6 +421,7 @@ namespace DockedTools.Features.Tray
                 //   ② 其余（含 LOGOFF、CRITICAL、以及 lParam=0 的常规关机/重启）——
                 //      会话真的要拆，给足窗口期，别在拆除阶段复活。
                 // 两条路都必须 return TRUE，绝不阻塞；分别只影响看门狗抑制多久。
+                // 真正的清理不在这里，在下面那条 WM_ENDSESSION 分支（官方口径）。
                 if (uMsg == WM_QUERYENDSESSION)
                 {
                     var endSessionFlags = (uint)(lParam.ToInt64() & 0xFFFFFFFFL);
@@ -439,6 +440,35 @@ namespace DockedTools.Features.Tray
 
                     // TRUE：放行，尊重调用方意图，不阻塞关机也不阻塞更新
                     return (IntPtr)1;
+                }
+
+                // 官方口径的"清理留给 WM_ENDSESSION"就是这一条 —— 之前只做了上面那条
+                // （闭嘴 + 放行），这条压根没接，等于让位全靠系统强杀：
+                // 强杀本身没问题，问题是这个进程还攥着单实例 Mutex。包更新完用户点新图标，
+                // 新实例发现 Mutex 还在（旧进程没交代）、又没有 --restart，
+                // 就去激活那个注定要死的旧进程再自己退出 —— 表现为「更新后点图标没反应」。
+                // wParam 是刚才 WM_QUERYENDSESSION 的答复值：非 0 才会真的结束会话；
+                // 为 0 表示有别的窗口否决了这次结束，会话照常继续，绝不能动手。
+                // 这里的调用刻意保持轻量（交 Mutex + 投递退出 + 有界刷日志），
+                // 不阻塞本线程的消息泵。
+                if (uMsg == WM_ENDSESSION)
+                {
+                    if (wParam.ToInt64() != 0)
+                    {
+                        var endSessionFlags = (uint)(lParam.ToInt64() & 0xFFFFFFFFL);
+
+                        // 与 WM_QUERYENDSESSION 同样的口径：按位测，别写 == 比较。
+                        var reason =
+                            (endSessionFlags & ENDSESSION_CLOSEAPP) != 0 &&
+                            (endSessionFlags & (ENDSESSION_LOGOFF | ENDSESSION_CRITICAL)) == 0
+                                ? "包 servicing / Restart Manager 要腾文件"
+                                : "关机 / 重启 / 注销";
+
+                        global::DockedTools.App.HandleSystemEndSession(
+                            $"lParam=0x{endSessionFlags:X8}，{reason}");
+                    }
+
+                    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
                 }
 
                 if (uMsg == WM_GETMINMAXINFO)
@@ -683,6 +713,9 @@ namespace DockedTools.Features.Tray
         // 这是发给**进程中每个有消息泵的线程**的顶层窗口的，托盘这种 WS_POPUP 窗口也在名单里；
         // message-only（HWND_MESSAGE）窗口收不到，所以我们这个真窗口是唯一能提前拿到通知的位置。
         private const uint WM_QUERYENDSESSION = 0x0011;
+        // 上一位的答复拿到 TRUE 之后，系统再发这条告知"会话真的要结束了"。
+        // 官方说清理动作挂在这里，而不是挂在 WM_QUERYENDSESSION 上。
+        private const uint WM_ENDSESSION = 0x0016;
         // WM_QUERYENDSESSION / WM_ENDSESSION 的 lParam 是**位掩码**，官方明确要求按位测试、不要等值比较。
         // 0 表示"系统在关机或重启（分不清是哪一个）"。
         private const uint ENDSESSION_CLOSEAPP = 0x00000001;  // 应用占用的文件需要被替换 / 系统 servicing / 资源耗尽

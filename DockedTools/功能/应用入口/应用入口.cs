@@ -119,6 +119,15 @@ namespace DockedTools
         private const string MutexName = @"Local\DockedAI_SingleInstance_Mutex" + global::WorktreeIdentity.Suffix;
 #endif
 
+        // 进程内唯一的 App 实例引用。
+        // 为什么不用 Application.Current：托盘跑在第二个 XAML 线程上，那里拿到的 Current
+        // 不保证是主线程那个实例（见 UIDispatcherQueue 的注释），而系统结束会话时
+        // 通知是从托盘线程的窗口进来的 —— 那条路径必须能在任意线程上找回退出链。
+        private static App? _current;
+
+        // WM_ENDSESSION 一次会话结束只处理一遍的闸门（Interlocked 保证只放行一次）。
+        private static int _endSessionHandled;
+
         // 应用退出状态标志（防止主动退出时 keep-alive 自愈重新创建窗口）
         private bool _isExiting = false;
 
@@ -154,6 +163,10 @@ namespace DockedTools
         /// </summary>
         public App()
         {
+            // 先记下实例：后面托盘线程的 WM_ENDSESSION 要靠这个静态引用找回退出链，
+            // 而构造函数是 _current 唯一的赋值点（本应用是单例 App，不存在第二个实例）。
+            _current = this;
+
             // ⭐ 把日志挂到 Windows 错误报告上，越早越好。
             //    放这里是刻意的：崩溃也可能发生在启动阶段（本轮实测那次 0xc0000409
             //    就卡在这下面几行的 LaunchArguments 上）—— 晚注册等于漏掉这一类。
@@ -986,6 +999,83 @@ namespace DockedTools
             {
                 LogService.Warning("应用入口", $"释放单实例 Mutex 时 Dispose 失败：{ex.GetType().Name} {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// 系统结束会话（关机 / 重启 / 注销）或包 servicing 要求本进程腾位时的收尾入口。
+        ///
+        /// 【为什么必须有这一步】
+        /// 官方对 WM_QUERYENDSESSION 的口径是「立刻答复 TRUE/FALSE，清理留给 WM_ENDSESSION」。
+        /// 我们原先只挂了 QUERYENDSESSION（让看门狗闭嘴 + return TRUE），WM_ENDSESSION 一条都没接，
+        /// 于是"让位"完全靠系统强杀。强杀本身没问题，问题是这个进程手里攥着单实例 Mutex：
+        /// 包更新完，用户点新图标 → 新实例 CreateMutex 拿到 ERROR_ALREADY_EXISTS →
+        /// 它认定"已经有主实例在跑"，于是去激活那个注定要死的旧进程，然后自己退出。
+        /// 表现就是「更新后点图标没反应 / 托盘上还是旧版本」。
+        ///
+        /// 【为什么顺序是 Mutex → 退出 → 刷日志】
+        /// Mutex 是新实例唯一在等的东西，必须第一个交出去，不能被任何清理耗时（包括日志落盘）挡在后面。
+        /// ReleaseSingleInstanceMutex 幂等，退出链里再释放一次也无害。
+        ///
+        /// 这个方法从托盘线程的 WndProc 直接调用，所以内部不许长阻塞：
+        /// 退出请求只是投递到主线程，不等结果。
+        /// </summary>
+        /// <param name="reason">触发来源的文字说明，由托盘侧按 lParam 位掩码翻译，仅用于日志</param>
+        public static void HandleSystemEndSession(string reason)
+        {
+            // 只处理一次：会话结束消息会发给进程中每个顶层窗口，重复进退出链只会产出噪音日志。
+            if (Interlocked.Exchange(ref _endSessionHandled, 1) != 0)
+            {
+                return;
+            }
+
+            LogService.Info(
+                "应用入口",
+                $"收到系统结束会话通知（{reason}），主动让位：先交出单实例 Mutex，再请求正常退出链");
+
+            // ① 交出单实例 Mutex —— 这一步是本次修复的全部意义所在。
+            //    在非拥有者线程上 ReleaseMutex 会抛 ApplicationException，
+            //    ReleaseSingleInstanceMutex 内部已经接住并回落到 Dispose（关内核句柄同样是"交出"）。
+            ReleaseSingleInstanceMutex();
+
+            // ② 请求走正常退出链（清理热键、托盘、扩展桥接，最后 Environment.Exit 收尾）。
+            //    刻意用投递而不是同步调用：主线程此刻可能正被会话拆除占着，
+            //    托盘这条线程一秒都不能陪它等。
+            var app = _current;
+            var dispatcher = UIDispatcherQueue;
+            if (app != null && dispatcher != null && !app._isExiting)
+            {
+                var enqueued = dispatcher.TryEnqueue(() =>
+                {
+                    try
+                    {
+                        app.ExitApplicationPublic();
+                    }
+                    catch (Exception ex)
+                    {
+                        LogService.Error("应用入口", "结束会话时执行退出链失败", ex);
+                    }
+                });
+
+                if (!enqueued)
+                {
+                    LogService.Warning(
+                        "应用入口",
+                        "结束会话时无法把退出请求投递到主线程（队列已停），Mutex 已交出，进程交由系统收尾");
+                }
+            }
+            else
+            {
+                // 走到这里说明主线程还没起来（或已经在退出中）。Mutex 已经交出去了，
+                // 新实例不会因此被挡；本进程由系统在拆除阶段收尾。
+                LogService.Warning(
+                    "应用入口",
+                    $"结束会话时没找到可用的主实例退出入口（App 实例={app != null}，" +
+                    $"主线程队列={dispatcher != null}，正在退出={app?._isExiting ?? false}），仅交出 Mutex");
+            }
+
+            // ③ 日志现在是后台线程异步落盘的，进程马上就没，队列不压干这几条就永远进不了文件。
+            //    Flush 内部是 TryEnter + 预算上限，最坏等 600ms 就放弃，不会拖住托盘消息泵。
+            LogService.Flush(600);
         }
 
         /// <summary>
