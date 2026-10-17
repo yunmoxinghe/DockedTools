@@ -48,7 +48,8 @@ namespace DockedTools.Features.UnifiedCalls.Logging
         private static string? _logDirectory;
 
         // 【有界队列】宁可丢日志，也不能让积压吃掉内存或在关闭时无限等待。
-        // 溢出按「丢最旧」处理并计数，计数会在下一次成功入队时补一条告警。
+        // 溢出的取舍是「保 Error、丢普通条目」，理由见 Enqueue；丢掉的条数会记下来，
+        // 并在维护轮里补一条告警，免得「文件里什么都没记」变成更难查的第二个坑。
         private const int MaxQueuedEntries = 4096;
 
         private static readonly BlockingCollection<LogEntry> _queue =
@@ -61,9 +62,11 @@ namespace DockedTools.Features.UnifiedCalls.Logging
         private static long _droppedEntries;
 
         /// <summary>
-        /// 写线程是否正处在「已出队、还没写完」的那一段（1 = 正在写）。
+        /// 写线程是否正处在「已取走条目、还没写完」的那一段（1 = 正在写）。
         /// Flush 必须连这个状态一起等 —— 队列 Count 归零并不等于最后一条已经落盘，
         /// 出队和写完之间有一个窄窗口，进程正好在这里退出就会截断最后一行。
+        /// 所以记账放在取用之前；空闲阻塞在 TryTake 上的那 5 秒不算 busy，
+        /// 否则 Flush 每次都会白等满超时（它多半跑在 UI 线程的退出链上）。
         /// </summary>
         private static int _writerBusy;
 
@@ -75,6 +78,16 @@ namespace DockedTools.Features.UnifiedCalls.Logging
         // 为什么不是「按天切」：托盘应用常年不重启，按天切等于又一个无界文件。
         private const long MaxLogBytesPerFile = 5L * 1024 * 1024;
         private const int RolledFileCount = 4;
+
+        // 【单条上限必须独立于单文件上限】滚动之后新文件的记账从 0 开始，
+        // 所以「一条日志有多大」和「一个文件有多大」是两个必须分别守住的量：
+        // 只拿单文件上限（5MB）当裁剪门槛时，一条 3~4.9MB 的日志根本不会被裁，
+        // 可它每来一条都要撞一次滚动 —— 4 份历史档几轮之内就被冲干净，
+        // 想保住的事故现场恰恰是被它毁掉的。
+        // 为什么是 256KB：正常条目（带模块、时间戳、堆栈）多在一两 KB 以内，
+        // 一条把整个 JSON 正文回显出来的异常也在几十 KB 量级；256KB 既装得下
+        // 完整堆栈 + 内部异常，又保证连着 20 条才够滚一次，历史档不会被单条吃掉。
+        private const int MaxLogBytesPerEntry = 256 * 1024;
 
         // 运行期级别开关所在的文件名（放在日志目录里，和日志一起被导出）。
         private const string LevelFileName = "level.txt";
@@ -91,9 +104,20 @@ namespace DockedTools.Features.UnifiedCalls.Logging
         // 用的，改完等 5 秒完全能接受，不值得为它牺牲整机的空闲功耗。
         private const int TakeTimeoutMs = 5000;
 
-        // 一轮最多压这么多条就停下来看看开关、顺带把缓冲刷下去，
-        // 免得日志洪峰把运行期级别切换挤到后面去。
+        // 一轮最多压这么多条就歇一下（顺带补溢出告警），
+        // 免得日志洪峰把磁盘一直占在一条超长的批里。
         private const int DrainBatchLimit = 128;
+
+        // 待执行的旧档清理（-1 = 没有待办）。清理只在写线程上做，见 CleanupOldLogs。
+        private const int NoPendingCleanup = -1;
+        private static int _pendingCleanupDays = NoPendingCleanup;
+
+        // 滚动被外部句柄挡住（例如有人用记事本打开了 app.log）之后的重试冷却。
+        // 没有冷却的话，超限期间的每条日志都要白撞一轮「改名 → 拒绝访问」，
+        // 磁盘已经不对劲的时候再去放大 IO。冷却期内照旧追加，占用一松开就回到限额内。
+        // 只在写线程上读写，不需要原子。
+        private const long RollRetryDelayMs = 30000;
+        private static long _rollRetryAfterTick;
 
         // 当前最低落盘级别。默认 Info —— 保持原有行为，不因为这次改造
         // 让既有排查习惯突然少日志。低于该级别的调用连字符串都不拼。
@@ -336,7 +360,7 @@ namespace DockedTools.Features.UnifiedCalls.Logging
 
             if (toFile)
             {
-                Enqueue(logMessage, "app.log", requiresImmediateFlush: false);
+                Enqueue(LogLevel.Debug, logMessage, "app.log", requiresImmediateFlush: false);
             }
         }
 
@@ -397,29 +421,64 @@ namespace DockedTools.Features.UnifiedCalls.Logging
             // 总是输出到调试控制台（Release 下等价于近乎无开销）
             System.Diagnostics.Debug.WriteLine(message);
 
-            Enqueue(message, fileName, requiresImmediateFlush);
+            Enqueue(level, message, fileName, requiresImmediateFlush);
         }
 
-        /// <summary>入队（队列满就丢最旧的一条，绝不等待）</summary>
-        private static void Enqueue(string message, string fileName, bool requiresImmediateFlush)
+        /// <summary>
+        /// 入队（队列满时按「保 Error、丢普通条目」取舍，绝不等待）。
+        /// level 只用来决定溢出时该丢谁，落盘级别判断在 WriteLog 里已经做过。
+        /// </summary>
+        private static void Enqueue(
+            LogLevel level,
+            string message,
+            string fileName,
+            bool requiresImmediateFlush)
         {
             EnsureWriterStarted();
 
+            var entry = new LogEntry(message, fileName, requiresImmediateFlush);
+
             try
             {
-                if (!_queue.TryAdd(new LogEntry(message, fileName, requiresImmediateFlush)))
+                if (_queue.TryAdd(entry))
                 {
-                    // 积压到这个程度说明磁盘已经不对劲了，绝不能在这里等它。
-                    Interlocked.Increment(ref _droppedEntries);
-                    try
-                    {
-                        _queue.TryTake(out _);
-                    }
-                    catch
-                    {
-                        // 队列已被 CompleteAdding 之类情况拒绝，忽略
-                    }
+                    return;
                 }
+
+                // 官方口径：有界队列已满时 TryAdd(T) 立即返回 false 且**不会**添加项，
+                // 所以想让新这条进队，必须自己腾位。
+                //
+                // 【为什么要按级别取舍】磁盘停顿期间涌进来的多半是 Debug/Info 流水账，
+                // 而堵在队头等不到落盘的，往往正是崩溃前那几条 Error —— 它们是这次
+                // 改造最想保住的东西，却会被后面的流水账一条条挤出队列。所以：
+                //
+                // 1) 来的是 Error ⇒ 腾掉队头再把这条放进来。被腾掉的也可能是 Error，
+                //    这是有意的：队列已经满到挤不进第二条 Error 时，紧挨崩溃的那条比
+                //    最早的那条更有取证价值。关键是这种淘汰只可能由 Error 触发。
+                // 2) 来的是普通条目 ⇒ 直接丢新来的这条，绝不碰队头。
+                //    为什么不是「一直丢队头直到找到非 Error」：BlockingCollection 只能
+                //    从头部取，取出来的 Error 只能回到队尾，error.log 的时间顺序就被
+                //    打乱了；为一条 Debug 牺牲 Error 的顺序不划算。
+                //    代价是说清楚过的：长时间停顿期间，队列保持满状态，后续普通条目
+                //    会连续被丢（原先是丢最旧、保最新）。这部分靠 _droppedEntries 告警
+                //    留下痕迹，不至于静默。
+                if (level == LogLevel.Error)
+                {
+                    if (_queue.TryTake(out _))
+                    {
+                        Interlocked.Increment(ref _droppedEntries);
+                    }
+
+                    if (!_queue.TryAdd(entry))
+                    {
+                        // 多个线程同时在挤这一位，重试仍可能落空
+                        Interlocked.Increment(ref _droppedEntries);
+                    }
+
+                    return;
+                }
+
+                Interlocked.Increment(ref _droppedEntries);
             }
             catch (InvalidOperationException)
             {
@@ -451,21 +510,46 @@ namespace DockedTools.Features.UnifiedCalls.Logging
         /// <summary>
         /// 唯一的落盘线程。串行消费 ⇒ 天然保证写入顺序，也保证不会有两个线程抢同一个文件。
         ///
-        /// 用「带超时的 TryTake」而不是 GetConsumingEnumerable：
-        /// 空闲的这段时间正好用来轮询 level.txt，运行期级别开关才可能生效。
+        /// 用「带超时的 TryTake」而不是 GetConsumingEnumerable：空闲的这段时间正好用来
+        /// 轮询 level.txt 和执行待办的清理，运行期级别开关才可能生效。
+        ///
+        /// 维护动作（补丢日志告警 / 读 level.txt / 清理旧档）按**时间**调度，不看写了多少条：
+        /// 日志洪峰下 TryTake 会立刻返回，用条数计数的话轮询会被挤到不知多久以后才发生。
         /// </summary>
         private static void WriterLoop()
         {
-            int entriesSinceLevelCheck = 0;
+            int entriesSinceBatchReport = 0;
+            long nextMaintenanceAt = Environment.TickCount64;
 
             while (true)
             {
-                bool gotEntry = false;
+                bool gotEntry;
+                LogEntry entry;
                 try
                 {
-                    gotEntry = _queue.TryTake(out LogEntry entry, TakeTimeoutMs);
+                    // busy 必须在条目离开队列**之前**记账，否则 Flush 会看见
+                    // 「Count 已归零、条目却还在写线程手里」的空隙，最后一行就可能截在缓冲里。
+                    // 本服务只有一条写线程（生产者从不 Take），所以 Count>0 时零超时取用必成。
+                    // 反过来，空闲那 5 秒绝不能挂着 busy —— Flush 是在 UI 线程上等它的，
+                    // 挂上去就等于每次退出都白等满一遍超时。
+                    if (_queue.Count > 0)
+                    {
+                        Interlocked.Exchange(ref _writerBusy, 1);
+                        gotEntry = _queue.TryTake(out entry, 0);
+                        if (!gotEntry)
+                        {
+                            Interlocked.Exchange(ref _writerBusy, 0);
+                        }
+                    }
+                    else
+                    {
+                        gotEntry = _queue.TryTake(out entry, TakeTimeoutMs);
+                        if (gotEntry)
+                        {
+                            Interlocked.Exchange(ref _writerBusy, 1);
+                        }
+                    }
 
-                    Interlocked.Exchange(ref _writerBusy, 1);
                     try
                     {
                         if (gotEntry)
@@ -475,13 +559,13 @@ namespace DockedTools.Features.UnifiedCalls.Logging
                             {
                                 AppendToFile(entry);
                                 written++;
-                                entriesSinceLevelCheck++;
+                                entriesSinceBatchReport++;
 
                                 // 溢出告警：避免「文件里什么都没记」变成更难查的第二个坑
-                                if (entriesSinceLevelCheck >= DrainBatchLimit)
+                                if (entriesSinceBatchReport >= DrainBatchLimit)
                                 {
                                     ReportDroppedEntries();
-                                    entriesSinceLevelCheck = 0;
+                                    entriesSinceBatchReport = 0;
                                 }
                             }
                             while (written < DrainBatchLimit && _queue.TryTake(out entry, 0));
@@ -498,11 +582,12 @@ namespace DockedTools.Features.UnifiedCalls.Logging
                             }
                         }
 
-                        if (entriesSinceLevelCheck >= DrainBatchLimit || !gotEntry)
+                        if (!gotEntry || Environment.TickCount64 >= nextMaintenanceAt)
                         {
                             ReportDroppedEntries();
                             PollLevelFile();
-                            entriesSinceLevelCheck = 0;
+                            RunPendingCleanup();
+                            nextMaintenanceAt = Environment.TickCount64 + TakeTimeoutMs;
                         }
                     }
                     finally
@@ -574,7 +659,17 @@ namespace DockedTools.Features.UnifiedCalls.Logging
                     // 按字符算会把体积估小三分之一。
                     int payloadBytes = Encoding.UTF8.GetByteCount(entry.Message) + Environment.NewLine.Length;
 
-                    if (target.BytesWritten + payloadBytes > MaxLogBytesPerFile)
+                    // 先按**单条**上限裁，再按**单文件**上限判滚动 —— 两个量不能混用，
+                    // 理由见 MaxLogBytesPerEntry 的注释。裁剪后的重算只遍历那 15000 字符，
+                    // 不会再碰原始的大串。
+                    if (payloadBytes > MaxLogBytesPerEntry)
+                    {
+                        entry = ClampOversizedEntry(entry, payloadBytes);
+                        payloadBytes = Encoding.UTF8.GetByteCount(entry.Message) + Environment.NewLine.Length;
+                    }
+
+                    if (target.BytesWritten + payloadBytes > MaxLogBytesPerFile &&
+                        Environment.TickCount64 >= _rollRetryAfterTick)
                     {
                         var rotated = RotateTarget(target);
                         if (rotated == null)
@@ -583,6 +678,10 @@ namespace DockedTools.Features.UnifiedCalls.Logging
                         }
 
                         target = rotated.Value;
+
+                        // 滚动出来的新句柄必须马上登记：写失败时的清理是按字典找句柄的，
+                        // 登记晚了这条就成了没人认领的漏句柄，下一条还会再开一个流写到同一个文件上。
+                        targets[entry.FileName] = target;
                     }
 
                     try
@@ -611,6 +710,52 @@ namespace DockedTools.Features.UnifiedCalls.Logging
             {
                 // 写入日志失败不应影响程序运行
             }
+        }
+
+        /// <summary>
+        /// 单条日志超过 <see cref="MaxLogBytesPerEntry"/> 时，只掐中间。
+        ///
+        /// 【为什么要截，而不是直接丢】异常消息把整个 JSON 正文回显出来这种事真会发生，
+        /// 一条几 MB 的日志只要连着来几条，就能让「每条都触发一次滚动」成立，
+        /// 几轮之内把 app.log.1 … .4 全冲掉 —— 为了保住事故现场，代价反而是毁掉全部历史。
+        /// 直接丢掉这一条更不行，它多半正是本次要查的那条。
+        /// 【为什么留头也留尾】头部是时间戳/级别/模块，尾部那行「位置: 」是读取日志.ps1
+        /// 判定条目结束的唯一标志，把它截没了 CLI 就会把后面所有条目连成一条。
+        /// 【为什么这里不按字节精算】保留的两段合计不超过 15000 字符，UTF-8 最坏
+        /// （全是 3 字节汉字）约 45KB，仍不到单条上限 256KB 的五分之一，
+        /// 所以只要保证「远小于上限」就够，真实字节数由调用方重算一次拿到。
+        /// </summary>
+        private static LogEntry ClampOversizedEntry(LogEntry entry, int originalBytes)
+        {
+            const int headChars = 12000;
+            const int tailChars = 3000;
+
+            var text = entry.Message;
+            var marker = $"\n[LogService] 本条原始 {originalBytes / 1024}KB，超过单条上限，中间已省略\n";
+
+            if (text.Length <= headChars + tailChars)
+            {
+                return entry;
+            }
+
+            // 阈值下调后这条路径会被经常走到，正好把「劈开代理对」补上：
+            // 半个代理项编成 UTF-8 会变成一个 '?'，排查时看着像正文本身坏了。
+            // 留头这边退一格，起尾那边进一格，两头都落在完整的码点上。
+            int head = headChars;
+            if (char.IsHighSurrogate(text[head - 1]))
+            {
+                head--;
+            }
+
+            int tailStart = text.Length - tailChars;
+            if (char.IsLowSurrogate(text[tailStart]))
+            {
+                tailStart++;
+            }
+
+            var clamped = text.Substring(0, head) + marker + text.Substring(tailStart);
+
+            return new LogEntry(clamped, entry.FileName, entry.RequiresImmediateFlush);
         }
 
         /// <summary>打开（或重开）某个日志文件的常驻追加流；只在写线程 + _ioLock 内调用</summary>
@@ -651,6 +796,7 @@ namespace DockedTools.Features.UnifiedCalls.Logging
             {
                 System.Diagnostics.Debug.WriteLine(
                     $"[LogService] {current.FileName} 已达上限但滚动失败（可能被外部占用），本条改为继续追加");
+                _rollRetryAfterTick = Environment.TickCount64 + RollRetryDelayMs;
             }
 
             return OpenTarget(current.FileName);
@@ -861,9 +1007,32 @@ namespace DockedTools.Features.UnifiedCalls.Logging
         ///    也就是说该限体积的地方一直没被限住。
         /// 现在只删历史档：滚动出来的 .log.1 … .log.N，以及旧版本遗留的 debug.log。
         /// 活文件由滚动自己控制体积，level.txt 是用户手动开关，都不动。
+        ///
+        /// 【为什么只是登记待办、由写线程去删】
+        /// 调用点在启动链上（UI 线程）。直接删就是「调用线程做磁盘 IO」，
+        /// 与这个服务「调用方不碰磁盘」的立身之本冲突；更要命的是它和滚动改名的
+        /// 是同目录同一批文件，两边无锁就会互相抢：清理正把 app.log.1 删掉，
+        /// 滚动那边正要把它改名成 .2，结果历史档白白少一档。
+        /// 挪到写线程上做，天然和滚动串行，最多晚一个轮询周期执行。
         /// </summary>
         public static void CleanupOldLogs(int keepDays = 7)
         {
+            Volatile.Write(ref _pendingCleanupDays, Math.Max(0, keepDays));
+
+            // 写线程还没起来时（启动阶段一条日志都没写过）先把它唤起，
+            // 否则这份待办要等到第一条日志才有人认领，清理一直不执行。
+            EnsureWriterStarted();
+        }
+
+        /// <summary>执行待办的清理；只在写线程上调用</summary>
+        private static void RunPendingCleanup()
+        {
+            int keepDays = Interlocked.Exchange(ref _pendingCleanupDays, NoPendingCleanup);
+            if (keepDays == NoPendingCleanup)
+            {
+                return;
+            }
+
             try
             {
                 EnsureLogDirectory();
@@ -873,7 +1042,7 @@ namespace DockedTools.Features.UnifiedCalls.Logging
                     return;
                 }
 
-                var cutoffDate = DateTime.Now.AddDays(-Math.Max(0, keepDays));
+                var cutoffDate = DateTime.Now.AddDays(-keepDays);
 
                 foreach (var logFile in Directory.EnumerateFiles(_logDirectory))
                 {
