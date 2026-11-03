@@ -28,7 +28,9 @@ namespace Svg
         private SvgPaintServer _concreteServer;
         private SvgPaintServer _fallbackServer;
 
-        [Obsolete("Will be removed.")]
+        // 上游把这两个成员标了 [Obsolete("Will be removed.")]，但在这个本地覆盖里它们
+        // 正是补丁的承重墙（见文件头）：<use> 临时改父节点后靠它锚定解析文档。
+        // 自己依赖、且不会移除的成员继续挂 Obsolete，只会让每次构建刷 6 条 CS0618。
         public SvgDocument Document { get; set; }
 
         public string DeferredId { get; set; }
@@ -39,7 +41,7 @@ namespace Svg
         {
         }
 
-        [Obsolete("Will be removed.")]
+        // 同上：本地覆盖需要的重载，不再挂 Obsolete。
         public SvgDeferredPaintServer(SvgDocument document, string id)
         {
             Document = document;

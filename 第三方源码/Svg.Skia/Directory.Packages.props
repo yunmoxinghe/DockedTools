@@ -39,7 +39,10 @@
     <PackageVersion Include="System.Text.Json" Version="9.0.9" />
     <PackageVersion Include="System.CommandLine" Version="2.0.0-beta1.20371.2" />
     <PackageVersion Include="Jint" Version="4.8.0" />
-    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="8.0.0" />
+    <!-- 8.0.0 传递引入的 Microsoft.Build.Tasks.Git 8.0.0 命中 CVE-2026-62900
+         （GHSA-23fw-v26w-5fgq，构建期信息泄露，NU1902）。10.0.403 的依赖
+         ≥10.0.403，已不在任何受影响区间内。只影响构建期工具，不进应用产物。 -->
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.403" />
     <PackageVersion Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" />
     <PackageVersion Include="SixLabors.ImageSharp" Version="3.1.11" />
     <PackageVersion Include="BenchmarkDotNet" Version="0.13.12" />

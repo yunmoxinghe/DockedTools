@@ -1,0 +1,17 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Condition="'$(UseProGpuSkiaSharpShim)' != 'true'">
+    <PackageReference Include="SkiaSharp" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseProGpuSkiaSharpShim)' == 'true' and '$(TargetFramework)' == 'net10.0'">
+    <ProjectReference Include="$(ProGpuSourceRoot)\src\SkiaSharp\SkiaSharp.csproj" />
+  </ItemGroup>
+  <Target Name="ValidateProGpuSkiaSharpShim"
+          BeforeTargets="ResolveReferences"
+          Condition="'$(UseProGpuSkiaSharpShim)' == 'true'">
+    <Error Condition="'$(TargetFramework)' != '' and '$(TargetFramework)' != 'net10.0'"
+           Text="The ProGPU SkiaSharp shim currently supports only net10.0. Build with -f net10.0." />
+    <Error Condition="!Exists('$(ProGpuSourceRoot)\src\SkiaSharp\SkiaSharp.csproj')"
+           Text="ProGPU source was not found at '$(ProGpuSourceRoot)'. Set ProGpuSourceRoot to a compatible ProGPU checkout." />
+  </Target>
+</Project>

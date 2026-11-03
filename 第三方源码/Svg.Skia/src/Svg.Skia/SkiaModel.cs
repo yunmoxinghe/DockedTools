@@ -2027,7 +2027,10 @@ public partial class SkiaModel
         };
     }
 
-    public void ToSKPath(PathCommand pathCommand, SkiaSharp.SKPath skPath)
+    // SkiaSharp 4.x 起 SKPath 转不可变，可变方法（MoveTo/LineTo/…）一律 CS0618。
+    // 这里按官方口径改喂 SKPathBuilder：方法签名与默认方向（Clockwise）逐一对应，
+    // 只是把「就地改 SKPath」换成「建好后 Snapshot() 取一份」。
+    public void ToSKPath(PathCommand pathCommand, SkiaSharp.SKPathBuilder skPathBuilder)
     {
         switch (pathCommand)
         {
@@ -2035,14 +2038,14 @@ public partial class SkiaModel
                 {
                     var x = moveToPathCommand.X;
                     var y = moveToPathCommand.Y;
-                    skPath.MoveTo(x, y);
+                    skPathBuilder.MoveTo(x, y);
                     break;
                 }
             case LineToPathCommand lineToPathCommand:
                 {
                     var x = lineToPathCommand.X;
                     var y = lineToPathCommand.Y;
-                    skPath.LineTo(x, y);
+                    skPathBuilder.LineTo(x, y);
                     break;
                 }
             case ArcToPathCommand arcToPathCommand:
@@ -2054,7 +2057,7 @@ public partial class SkiaModel
                     var sweep = ToSKPathDirection(arcToPathCommand.Sweep);
                     var x = arcToPathCommand.X;
                     var y = arcToPathCommand.Y;
-                    skPath.ArcTo(rx, ry, xAxisRotate, largeArc, sweep, x, y);
+                    skPathBuilder.ArcTo(rx, ry, xAxisRotate, largeArc, sweep, x, y);
                     break;
                 }
             case QuadToPathCommand quadToPathCommand:
@@ -2063,7 +2066,7 @@ public partial class SkiaModel
                     var y0 = quadToPathCommand.Y0;
                     var x1 = quadToPathCommand.X1;
                     var y1 = quadToPathCommand.Y1;
-                    skPath.QuadTo(x0, y0, x1, y1);
+                    skPathBuilder.QuadTo(x0, y0, x1, y1);
                     break;
                 }
             case CubicToPathCommand cubicToPathCommand:
@@ -2074,18 +2077,18 @@ public partial class SkiaModel
                     var y1 = cubicToPathCommand.Y1;
                     var x2 = cubicToPathCommand.X2;
                     var y2 = cubicToPathCommand.Y2;
-                    skPath.CubicTo(x0, y0, x1, y1, x2, y2);
+                    skPathBuilder.CubicTo(x0, y0, x1, y1, x2, y2);
                     break;
                 }
             case ClosePathCommand _:
                 {
-                    skPath.Close();
+                    skPathBuilder.Close();
                     break;
                 }
             case AddRectPathCommand addRectPathCommand:
                 {
                     var rect = ToSKRect(addRectPathCommand.Rect);
-                    skPath.AddRect(rect);
+                    skPathBuilder.AddRect(rect);
                     break;
                 }
             case AddRoundRectPathCommand addRoundRectPathCommand:
@@ -2093,13 +2096,13 @@ public partial class SkiaModel
                     var rect = ToSKRect(addRoundRectPathCommand.Rect);
                     var rx = addRoundRectPathCommand.Rx;
                     var ry = addRoundRectPathCommand.Ry;
-                    skPath.AddRoundRect(rect, rx, ry);
+                    skPathBuilder.AddRoundRect(rect, rx, ry);
                     break;
                 }
             case AddOvalPathCommand addOvalPathCommand:
                 {
                     var rect = ToSKRect(addOvalPathCommand.Rect);
-                    skPath.AddOval(rect);
+                    skPathBuilder.AddOval(rect);
                     break;
                 }
             case AddCirclePathCommand addCirclePathCommand:
@@ -2107,7 +2110,7 @@ public partial class SkiaModel
                     var x = addCirclePathCommand.X;
                     var y = addCirclePathCommand.Y;
                     var radius = addCirclePathCommand.Radius;
-                    skPath.AddCircle(x, y, radius);
+                    skPathBuilder.AddCircle(x, y, radius);
                     break;
                 }
             case AddPolyPathCommand addPolyPathCommand:
@@ -2116,7 +2119,7 @@ public partial class SkiaModel
                     {
                         var points = ToSKPoints(addPolyPathCommand.Points);
                         var close = addPolyPathCommand.Close;
-                        skPath.AddPoly(points, close);
+                        skPathBuilder.AddPoly(points, close);
                     }
                     break;
                 }
@@ -2125,22 +2128,22 @@ public partial class SkiaModel
 
     public SkiaSharp.SKPath ToSKPath(SKPath path)
     {
-        var skPath = new SkiaSharp.SKPath
+        using var pathBuilder = new SkiaSharp.SKPathBuilder
         {
             FillType = ToSKPathFillType(path.FillType)
         };
 
         if (path.Commands is null)
         {
-            return skPath;
+            return pathBuilder.Snapshot();
         }
 
         foreach (var pathCommand in path.Commands)
         {
-            ToSKPath(pathCommand, skPath);
+            ToSKPath(pathCommand, pathBuilder);
         }
 
-        return skPath;
+        return pathBuilder.Snapshot();
     }
 
     public SKPath FromSKPath(SkiaSharp.SKPath skPath)
@@ -2429,7 +2432,7 @@ public partial class SkiaModel
                 fragment.RotationDegrees,
                 fragment.Point.X,
                 fragment.Point.Y));
-            skCanvas.Concat(ref matrix);
+            skCanvas.Concat(in matrix);
         }
 
         if (fragment.ScaleX != 1f)
@@ -2439,7 +2442,7 @@ public partial class SkiaModel
                 1f,
                 fragment.ScaleOriginX,
                 fragment.Point.Y));
-            skCanvas.Concat(ref matrix);
+            skCanvas.Concat(in matrix);
         }
 
         skCanvas.DrawText(fragment.Text, fragment.Point.X, fragment.Point.Y, textAlign, font, paint);
@@ -2541,7 +2544,7 @@ public partial class SkiaModel
             case SetMatrixCanvasCommand setMatrixCanvasCommand:
                 {
                     var matrix = ToSKMatrix(setMatrixCanvasCommand.DeltaMatrix);
-                    skCanvas.Concat(ref matrix);
+                    skCanvas.Concat(in matrix);
                     break;
                 }
             case SaveLayerCanvasCommand saveLayerCanvasCommand:
@@ -2577,9 +2580,9 @@ public partial class SkiaModel
                     {
                         if (wireframe)
                         {
-                            var rectPath = new SkiaSharp.SKPath();
-                            rectPath.AddRect(ToSKRect(drawImageCanvasCommand.Dest));
-                            skCanvas.DrawPath(rectPath, ToWireframePaint(null));
+                            using var rectPathBuilder = new SkiaSharp.SKPathBuilder();
+                            rectPathBuilder.AddRect(ToSKRect(drawImageCanvasCommand.Dest));
+                            skCanvas.DrawPath(rectPathBuilder.Snapshot(), ToWireframePaint(null));
                         }
                         else
                         {

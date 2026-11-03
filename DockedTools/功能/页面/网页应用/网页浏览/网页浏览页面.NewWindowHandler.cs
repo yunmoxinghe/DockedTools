@@ -1,6 +1,7 @@
 using DockedTools.Features.Pages.Settings;
 using DockedTools.Features.Localization;
 using DockedTools.Features.UnifiedCalls.InAppDialog;
+using DockedTools.Features.UnifiedCalls.Logging;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Web.WebView2.Core;
 using System;
@@ -230,7 +231,16 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[HandleAskBehavior] 处理失败: {ex.Message}");
+                // 问不成就当没问：拦掉。异常都落在 Handled = true 之前（对话框、InAppDialogService、
+                // 写设置），不补这一句，延迟一完成内核就会按「Handled/NewWindow 都没设」的默认口径
+                // 弹一个用户根本没选过的 popup —— 询问档反而成了最难收拾的那一档。
+                // 用户显式选「新窗口打开」是正常 return，不会走到这里，所以无条件置 true 是安全的。
+                if (eventArgs != null)
+                {
+                    eventArgs.Handled = true;
+                }
+
+                LogService.Error("WebView2.NewWindow", $"询问打开方式失败，已拦截: {uri}", ex);
             }
         }
         

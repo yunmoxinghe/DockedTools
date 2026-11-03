@@ -17,6 +17,12 @@ bld/
 [Bb]in/
 [Oo]bj/
 
+# 例外：第三方源码的 build/ 不是构建产物，是 MSBuild 的 props/targets 与签名公钥。
+# 上面那条 build/ 会把它整目录吃掉，导致 clone 出来每个 Svg.Skia 子工程都报
+# MSB4019「找不到导入的项目 …\build\SourceLink.props」，整个仓库编不动。
+# （嵌套的 build/build/ 是上游 nuke 脚本，仓库构建用不到，仍按 build/ 忽略。）
+!第三方源码/Svg.Skia/build/
+
 # Visual Studio Code
 .vscode/
 
@@ -78,6 +84,10 @@ Icon?
 
 # Temporary vendor source code downloads
 Vendors_Temp/
+
+# 一次性临时工作区（Svg.Skia 渲染探针、MSIX/部署取证脚本、旧包备份等）
+# 构建与运行时都不引用，单体可达 1.4 GB，绝不能入库。
+.tmp-*/
 
 # Reference folders (参考文件夹)
 参考/

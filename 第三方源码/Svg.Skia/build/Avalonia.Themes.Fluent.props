@@ -1,0 +1,11 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Condition="'$(UseAvaloniaProGpu)' != 'true'">
+    <PackageReference Include="Avalonia.Themes.Fluent" />
+    <PackageReference Include="Avalonia.Fonts.Inter" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseAvaloniaProGpu)' == 'true'">
+    <ProjectReference Include="$(AvaloniaSourceRoot)\src\Avalonia.Themes.Fluent\Avalonia.Themes.Fluent.csproj" />
+    <ProjectReference Include="$(AvaloniaSourceRoot)\src\Avalonia.Fonts.Inter\Avalonia.Fonts.Inter.csproj" />
+  </ItemGroup>
+</Project>
