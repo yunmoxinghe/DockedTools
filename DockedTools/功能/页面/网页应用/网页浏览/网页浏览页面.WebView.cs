@@ -199,6 +199,15 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 {
                     System.Diagnostics.Debug.WriteLine($"[EnsureWebViewInitializedAsync] ✅ CoreWebView2 初始化成功");
                     
+                    // ⭐ 把网页配色交还给系统。PreferredColorScheme 是 profile 级的，而且会
+                    //    持久化进用户数据文件夹 —— 老的 WebView2 图标光栅器每画一次图标就往
+                    //    这条上写一次 Dark/Light（写的是那一次图标要的主题，跟网页无关），
+                    //    于是全局网页主题被钉死。光栅器换成进程内 Svg.Skia 之后没人再写，
+                    //    可最后一次钉的值还留在配置里，页面就再也不跟系统走了。
+                    //    Auto 的官方语义就是「跟随系统当前的配色」，写一次把那颗钉子擦掉即可。
+                    WebView.CoreWebView2.Profile.PreferredColorScheme =
+                        CoreWebView2PreferredColorScheme.Auto;
+
                     WebView.CoreWebView2.Settings.IsWebMessageEnabled = true;
                     
                     // 优化触摸板和滚动体验

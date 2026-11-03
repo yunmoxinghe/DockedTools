@@ -1,9 +1,11 @@
+using DockedTools.Features.MainWindow.Appearance;
 using DockedTools.Features.MainWindow.KeyboardManagement;
 using DockedTools.Features.MainWindow.State;
 using DockedTools.Features.MainWindow.Visibility;
 using DockedTools.Features.MainWindowContent.Linker;
 using DockedTools.Features.Tray;
 using DockedTools.Features.UnifiedCalls.AsyncSafety;
+using DockedTools.Features.UnifiedCalls.Logging;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
@@ -107,6 +109,10 @@ namespace DockedTools
         private readonly KeyboardShortcutManager _keyboardManager;
         private bool _isContentInitialized = false;
 
+        // 关窗前置钩子是否已经跑过（窗口已隐藏、标题栏原生资源已归还）。
+        // 用来识别"AppWindow.Closing 没触发就被关掉"的那条路，日志里能直接看出来。
+        private bool _nativeTitleBarReleased;
+
         /// <summary>
         /// 条件编译的调试日志方法
         /// 仅在 DEBUG 模式下执行，Release 版本完全移除，避免字符串分配开销
@@ -206,6 +212,9 @@ namespace DockedTools
             SubscribeToLinkerEvents();
             _viewModel.PropertyChanged += OnViewModelPropertyChanged;
             AppWindow.Changed += OnAppWindowChanged;
+            // ⭐ 关闭前置钩子：这是唯一"HWND 还在、原生标题栏还没被拆走"的时机，
+            //    标题栏的原生资源必须在这里归还（见 OnAppWindowClosing）。
+            AppWindow.Closing += OnAppWindowClosing;
             Closed += OnWindowClosed;
             Activated += OnWindowActivated;
             
@@ -777,39 +786,172 @@ namespace DockedTools
         }
 
         /// <summary>
-        /// 窗口关闭事件处理器 - 清理资源和取消事件订阅
+        /// 关窗前置钩子（AppWindow.Closing）：趁 HWND 还在、原生标题栏还没被拆走的时候，
+        /// 先把窗口藏起来再归还标题栏那份原生资源，并记下关闭前的进程水位。
+        ///
+        /// 【为什么必须挂在这个事件上】
+        /// 用户按标题栏 X 走的是系统默认关闭路径，全仓库没有任何 e.Cancel 拦截；
+        /// 等 Window.Closed 触发时窗口已经销毁，那时再碰 AppWindow.TitleBar 只会抛异常。
+        /// Closing 是唯一还来得及的时机。
+        ///
+        /// 【为什么不指望它覆盖所有路径】
+        /// 官方口径只写了"closed through a system affordance"，对程序化 Close() 是否触发
+        /// 没有明确承诺（且 AppWindow.Destroy() 明确不触发）。所以托盘的 CloseMainWindow
+        /// 里也显式调一次同一套「先隐藏、再拆标题栏」动作；本方法幂等，两条路都走也不多余。
+        /// 若哪条路两者都没赶上，OnWindowClosed 里会留一条 Warning 便于发现。
+        /// </summary>
+        private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+        {
+            _nativeTitleBarReleased = true;
+
+            LogService.Info("主窗口", BuildWatermark("关窗前置（AppWindow.Closing）"));
+            TitleBarService.HideAndReleaseNativeTitleBar(this);
+        }
+
+        /// <summary>
+        /// 关窗后深度回收的延后时长：给关闭动画与 DWM 收尾留出时间，
+        /// 免得刚回收完又被请回来。
+        /// </summary>
+        private const int PostCloseCollectionDelayMs = 1500;
+
+        /// <summary>
+        /// 窗口关闭事件处理器 - 清理资源和取消事件订阅，并把这座窗口的整棵内容树真正放手。
         /// 
         /// 【重要性】
         /// 必须取消所有事件订阅，否则导致内存泄漏：
         /// - ViewModel.PropertyChanged
-        /// - AppWindow.Changed
+        /// - AppWindow.Changed / AppWindow.Closing
         /// - Closed
         /// - Activated
         /// - RootGrid.Loaded
         /// - Linker 事件
         /// - LabPage.RefreshMonitorStateRequested
         /// - LabPage.WindowMaximizedStateChanged
+        ///
+        /// 【为什么光退订还不够】
+        /// 退订只解决"这座窗口挂在别人身上"的那部分。真正让"关掉窗口≠释放内存"的是
+        /// 反方向：静态字段与静态事件里还登记着链接器/侧边栏/内容区，内容区 LRU 里
+        /// 最多 20 个缓存页各带一套 WebView2，App._window 又握着整座窗口。
+        /// 所以这里还要走 ReleaseOnClose 级联、放开 App 的引用、并补一趟带 finalizer 的回收。
         /// 
         /// 【AOT 兼容性】
         /// 所有事件订阅使用具名方法，确保可以正确取消订阅
         /// 
         /// 【重构风险】
-        /// 如果添加新的事件订阅，必须在此处取消订阅
+        /// 如果添加新的事件订阅，必须在此处取消订阅；新写的控件若订阅了进程级静态事件，
+        /// 就实现 ICloseReleasable 并挂进链接器那条释放链，否则关窗不会释放它。
         /// </summary>
         private void OnWindowClosed(object sender, WindowEventArgs args)
         {
+            // ── 1. 摘掉这座窗口挂在别人身上的订阅 ──
             _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
             AppWindow.Changed -= OnAppWindowChanged;
+            AppWindow.Closing -= OnAppWindowClosing;
             Closed -= OnWindowClosed;
             Activated -= OnWindowActivated;
             RootGrid.Loaded -= OnRootGridLoaded;
             DockedTools.Features.Pages.Lab.LabPage.RefreshMonitorStateRequested -= OnRefreshMonitorStateRequested;
             DockedTools.Features.Pages.Lab.LabPage.WindowMaximizedStateChanged -= OnLabPageWindowMaximizedStateChanged;
             UnsubscribeFromLinkerEvents();
-            
+
             // ⭐ 取消注册主窗口服务
             Features.UnifiedCalls.MainWindow.MainWindowService.Unregister();
             System.Diagnostics.Debug.WriteLine("[MainWindow] MainWindowService 已取消注册");
+
+            // ⭐ 放开快捷键管理器的静态登记：它构造期把自己写进了 Current，
+            //    而它手里的回调是捕获了 _linker 的 lambda —— 不放开就等于
+            //    "静态字段 → 管理器 → lambda → 链接器 → 整座内容树"一直活着。
+            KeyboardShortcutManager.ReleaseRegistration(_keyboardManager);
+
+            // ── 2. 前置钩子没赶上的话留一条证据（标题栏那份原生资源就漏了） ──
+            if (!_nativeTitleBarReleased)
+            {
+                LogService.Warning(
+                    "主窗口",
+                    "关窗时 AppWindow.Closing 没有触发，标题栏原生资源未能在销毁前归还（见 issue #12210 的规避顺序）");
+            }
+
+            // ── 3. 反向放手：沿 UI 树级联断开静态登记、清空页面缓存 ──
+            //     链接器 → 侧边栏 + 内容区 → 每个出缓存的页面；内容区里会逐页 DisposeWebView，
+            //     并把 TopAppBarService / ContentAreaService 两个静态字段放开。
+            _linker?.ReleaseOnClose();
+
+            // ── 4. 放开 App 单例上那份 _window 引用 ──
+            //     不放开的话，这个字段能把整棵窗口树（含刚清空的缓存结构）一直钉在堆上。
+            DockedTools.App.NotifyMainWindowClosed(this);
+
+            LogService.Info("主窗口", BuildWatermark("释放链走完（回收前）"));
+
+            // ── 5. 把内存真交出去 ──
+            ScheduleDeepCollection();
+        }
+
+        /// <summary>
+        /// 进程水位快照：句柄数 / 私有字节 / 工作集 / 托管堆。
+        ///
+        /// 【怎么用】
+        /// 关窗前后各记一条，差值能把"漏在哪一层"分开归因：
+        ///   · 句柄数与私有字节不降 → 原生侧还没归还（标题栏那一类，见 microsoft-ui-xaml issue #12210）；
+        ///   · 只有托管堆不降 → 还有静态引用钉着内容树；
+        ///   · 托管堆降了但私有字节差一大截 → 原生体等 finalizer，属正常，看深度回收那条是否补齐。
+        /// 【为什么主看私有字节】
+        /// 工作集会因页面被系统换出而虚低、被预读而虚高，私有字节才是本进程真正占住的量。
+        /// </summary>
+        private static string BuildWatermark(string stage)
+        {
+            try
+            {
+                using var process = Process.GetCurrentProcess();
+                process.Refresh();
+
+                return $"{stage}：句柄 {process.HandleCount}，" +
+                    $"私有 {process.PrivateMemorySize64 / 1048576.0:0.0} MB，" +
+                    $"工作集 {process.WorkingSet64 / 1048576.0:0.0} MB，" +
+                    $"托管堆 {GC.GetTotalMemory(forceFullCollection: false) / 1048576.0:0.0} MB";
+            }
+            catch (Exception ex)
+            {
+                return $"{stage}：水位读取失败（{ex.Message}）";
+            }
+        }
+
+        /// <summary>
+        /// 关窗后把内存真正交出去：先来一次不阻塞的老年代回收，再把带 finalizer 的深回收
+        /// 丢到后台线程去做。
+        ///
+        /// 【为什么要第二趟深回收】
+        /// WinUI 的对象是"托管壳 + 原生体"，原生体要等托管壳的 finalizer 跑完才归还，
+        /// 而 finalizer 跑在专门的 finalizer 线程上、不在 UI 线程 —— 所以深回收没必要
+        /// 也不应该占用 UI 线程。
+        ///
+        /// 【为什么不能在 UI 线程 WaitForPendingFinalizers】
+        /// UI线程看门狗用 SendMessageTimeout(1500 ms) 探测、连续 2 轮判冻住；
+        /// 在 UI 线程上同步等 finalizer 有把看门狗喂出误报的风险。后台线程做这两趟，
+        /// UI 线程最多吃到一次 suspend-EE 的几十毫秒级暂停。
+        /// </summary>
+        private static void ScheduleDeepCollection()
+        {
+            GC.Collect(2, GCCollectionMode.Optimized, blocking: false);
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(PostCloseCollectionDelayMs);
+
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                    GC.Collect();
+
+                    LogService.Info("主窗口", BuildWatermark("关窗后深度回收完成"));
+                }
+                catch (Exception ex)
+                {
+                    LogService.Warning(
+                        "主窗口",
+                        $"关窗后深度回收失败：{ex.Message}（不影响功能，只是内存归还延后）");
+                }
+            });
         }
     }
 }

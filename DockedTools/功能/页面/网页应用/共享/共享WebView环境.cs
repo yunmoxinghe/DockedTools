@@ -32,6 +32,10 @@ namespace DockedTools.Features.Pages.WebApp.Shared
     ///
     /// <para><b>代价：</b>光栅器那套专属的反节流启动参数不能再单独给，
     /// 必须与浏览器页面完全一致（见 <see cref="BuildBrowserArguments"/> 里的说明）。</para>
+    ///
+    /// <para><b>2026-10-26 更新：</b>图标光栅器已换成仓库自带的 Svg.Skia 源码
+    /// （<c>第三方源码\Svg.Skia</c>，见 网页应用图标渲染器.cs 的换芯说明），
+    /// 不再使用本环境；共享参数里的反节流条目保留 —— 消白闪对浏览页面仍然有效。</para>
     /// </summary>
     internal static class SharedWebViewEnvironment
     {
@@ -77,13 +81,17 @@ namespace DockedTools.Features.Pages.WebApp.Shared
             //    以前这行挂在浏览器页面里，一旦光栅器先起内核就会漏掉 —— 现在统一在这里。
             ApplyTransparencyEnvironmentVariable();
 
+            string browserArguments = BuildBrowserArguments();
+
             CoreWebView2EnvironmentOptions options = new()
             {
                 Language = CultureInfo.CurrentUICulture.Name,
-                AdditionalBrowserArguments = BuildBrowserArguments()
+                AdditionalBrowserArguments = browserArguments
             };
 
-            System.Diagnostics.Debug.WriteLine("[SharedWebViewEnvironment] 创建共享环境…");
+            // 参数只在环境建立这一刻交给浏览器进程，之后改设置不生效（要重启内核才重读），
+            // 所以把这一串打出来：滚动条/弹簧这类 A/B 只能靠它确认参数到底有没有落地。
+            System.Diagnostics.Debug.WriteLine($"[SharedWebViewEnvironment] 创建共享环境，浏览器参数: {browserArguments}");
 
             // UDF 传 null = 应用默认那份（备份功能备份的就是它，不要改）
             CoreWebView2Environment environment =
@@ -203,8 +211,8 @@ namespace DockedTools.Features.Pages.WebApp.Shared
             args.Add("--disable-backgrounding-occluded-windows");  // 禁用窗口遮挡时的背景化
             args.Add("--disable-renderer-backgrounding");          // 禁用渲染器后台化
 
-            // ⭐ 原属光栅器专属参数，现提为全局：隐藏/屏幕外的 renderer 不该被冻结，
-            //    否则离屏内核（图标光栅化）里的 canvas 解码会被无限推迟。
+            // ⭐ 原属图标光栅器专属参数，换芯后提为全局保留：隐藏 / 屏幕外的 renderer 不该被冻结，
+            //    否则背景页面的定时器与解码会被无限推迟（消白闪也吃这一条）。
             args.Add("--disable-background-timer-throttling");
 
             // 🎨 透明背景实验室：砍掉创建时的隐式 about:blank 导航，消除首屏白闪
@@ -230,10 +238,52 @@ namespace DockedTools.Features.Pages.WebApp.Shared
             }
 
             // 构建 enable-features 列表
+            //
+            // ⭐ 2026-11-03 换名：原来这条是 Edge 专属的 msEdgeFluentOverlayScrollbar，
+            //    内核升到 156.0.4314.58 之后这个名字在 msedge.dll 里已经彻底不存在
+            //    （同版本二进制里 CalculateNativeWinOcclusion 仍能搜到，排除搜索方法问题）。
+            //    --enable-features 遇到不认识的 feature 名是静默忽略，不报错，
+            //    所以网页直接退回经典（Chrome 样式）常驻滚动条 —— 右侧固定占掉 15px。
+            //    实测口径：headless 加载一个超高页面读 innerWidth/clientWidth，
+            //    旧名字 504/489（占位 15px），下面三条 504/504（零占位，覆盖式）。
+            //    其中 OverlayScrollbar 是承重的，另两条只是 Win11 样式与淡出动画；
+            //    单独给 OverlayScrollbarWinStyle 不生效（489），所以三条一起给。
             var enableFeatures = new List<string>
             {
-                "msEdgeFluentOverlayScrollbar"  // 细滚动条
+                "OverlayScrollbar",                 // 覆盖式滚动条（不占布局）
+                "OverlayScrollbarWinStyle",         // Windows 11 细条外观
+                "OverlayScrollbarWinStyleAnimation",// 悬停/滚动时的淡入淡出
+                "ElasticOverscroll"                 // 滚到边界时的橡皮筋回弹（弹簧手感）
             };
+
+            // ⭐ 2026-11-03 补 ElasticOverscroll：滚到顶/底边界的橡皮筋回弹。
+            //
+            // 三条现读现验的依据：
+            // 1. Chromium 主干 ui/base/ui_base_features.cc 的现值 ——
+            //    `BASE_FEATURE(kElasticOverscroll, IS_ANDROID ? ENABLED : DISABLED_BY_DEFAULT)`，
+            //    即 Windows 上这条路默认关着，只能显式开；同文件里
+            //    `kExperimentalFlingAnimation`（注释原话「based on the behavior of native apps
+            //    on Windows」）在 IS_WIN/IS_LINUX 是默认开，fling 曲线不用我们操心。
+            // 2. Chromium 自己的 third_party/blink/web_tests/VirtualTestSuites 里
+            //    elastic-overscroll 这套用例的平台列表含 "Win"，参数就是
+            //    `--enable-features=ElasticOverscroll` + `--enable-threaded-compositing`
+            //    —— 说明这条路在 Windows 上是支持且被官方测试的，只是不默认开。
+            // 3. 我们这台机器的实际内核 156.0.4314.58 里，`kElasticOverscroll` 与
+            //    `ElasticOverscroll` 两个 token 都在 feature 注册表里（同表可见
+            //    kExperimentalFlingAnimation / kOverscrollHistoryNavigation /
+            //    kTouchpadOverscrollHistoryNavigation；对照串 CalculateNativeWinOcclusion 命中 1，
+            //    排除搜索方法本身失效）。
+            //
+            // ⚠️ 为什么原来「生硬」：这套回弹以前由 Edge 自家的 Scrolling Personality
+            //    （msExperimentalScrolling，见上面 2026-10-03 那段注释）提供，
+            //    而 156 里 `msExperimental` 前缀 0 命中 —— 同版本 msEdge 前缀还有 157 条命中，
+            //    所以不是搜不到，是这个名字连同那套 personality 已经从内核里没了。
+            //    只剩 `msEnableScrollAnimation` / `msScrollAnimationDurationMs` 两条还在。
+            //
+            // ⚠️ 作用域：回弹挂在手势滚动单元（GSU）上 —— 触摸屏与精密触摸板能感觉到；
+            //    普通鼠标滚轮不产生 overscroll，滚轮侧的平滑另有 `--enable-smooth-scrolling`
+            //    （本方法开头第 184 行，156 里仍是对的有效开关名）。
+            //    要回退成对照手感：删掉这一行即可（一行 A/B）。
 
             // GPU 优化设置
             if (ExperimentalSettings.EnableHardwareAcceleration)

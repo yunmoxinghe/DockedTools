@@ -23,7 +23,7 @@ using System.Threading.Tasks;
 
 namespace DockedTools.Features.MainWindowContent.NavigationBar
 {
-    public sealed partial class NavigationBar : UserControl
+    public sealed partial class NavigationBar : UserControl, ICloseReleasable
     {
         private readonly Dictionary<string, WebAppShortcut> _webShortcuts = new();
         private readonly Dictionary<string, NavigationViewItem> _webShortcutItems = new();
@@ -42,6 +42,9 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
         private const string GlobeIconKey = "globe";
         private NavigationViewItemBase? _lastSelectedNavigationItem;
         private bool _suppressSelectionChanged;
+
+        // 静态事件退订的幂等标志：Unloaded 与关窗两条路都会走那一段，谁先到算谁的。
+        private bool _staticEventsReleased;
         
         // 导航防抖器（使用 Stopwatch 实现线程安全）
         private readonly NavigationDebouncer _navigationDebouncer = new(300);
@@ -352,15 +355,7 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
             //    图标就停在旧主题的颜色上（深色底下是黑图标，等于看不见）。
             ActualThemeChanged += OnActualThemeChanged;
 
-            Unloaded += (_, _) =>
-            {
-                WebAppEventBus.ShortcutCreated -= OnShortcutCreated;
-                WebAppEventBus.ShortcutsRefreshRequested -= OnShortcutsRefreshRequested;
-                WebAppDeletionService.DeletionStarting -= OnDeletionStarting;
-                WebAppDeletionService.DeletionCompleted -= OnDeletionCompleted;
-                WebAppUpdateService.UpdateCompleted -= OnUpdateCompleted;
-                ActualThemeChanged -= OnActualThemeChanged;
-            };
+            Unloaded += (_, _) => ReleaseStaticEventSubscriptions();
             Loaded += NavigationBar_Loaded;
             SizeChanged += NavigationBar_SizeChanged;
             
@@ -378,6 +373,45 @@ namespace DockedTools.Features.MainWindowContent.NavigationBar
             // HomeNavigationItem 的 IsSelected="True" 会在 XAML 初始化时触发 SelectionChanged
             // 我们需要等到 LoadContent() 调用后才真正导航到首页
             _suppressSelectionChanged = true;
+        }
+
+        /// <summary>
+        /// 摘掉本侧边栏挂在【进程级静态事件】上的那几条订阅。
+        ///
+        /// 【为什么单独抽出来】
+        /// 这几条原来只写在 Unloaded 里，但关闭窗口那一拍 Unloaded 不保证触发
+        /// （见 <see cref="ICloseReleasable"/> 的说明），于是静态委托列表里会一直留着这座
+        /// 侧边栏，连带它 _webShortcutItems / _webShortcuts 里那一整批项和图标引用。
+        /// 现在 Unloaded 和关窗两条路共用这一段，做成幂等，谁先来都行。
+        /// </summary>
+        private void ReleaseStaticEventSubscriptions()
+        {
+            if (_staticEventsReleased)
+            {
+                return;
+            }
+            _staticEventsReleased = true;
+
+            WebAppEventBus.ShortcutCreated -= OnShortcutCreated;
+            WebAppEventBus.ShortcutsRefreshRequested -= OnShortcutsRefreshRequested;
+            WebAppDeletionService.DeletionStarting -= OnDeletionStarting;
+            WebAppDeletionService.DeletionCompleted -= OnDeletionCompleted;
+            WebAppUpdateService.UpdateCompleted -= OnUpdateCompleted;
+            ActualThemeChanged -= OnActualThemeChanged;
+        }
+
+        /// <summary>
+        /// 主窗口关闭时由链接器调用：把这座侧边栏从静态事件里摘干净，让它随窗口一起回收。
+        /// </summary>
+        public void ReleaseOnClose()
+        {
+            ReleaseStaticEventSubscriptions();
+
+            // 自身与子控件的订阅：源都在本实例的树里，本来就能连着自己一起回收；
+            // 这里显式摘掉属于顺手把话说圆。
+            Loaded -= NavigationBar_Loaded;
+            SizeChanged -= NavigationBar_SizeChanged;
+            NavView.DoubleTapped -= OnNavViewDoubleTapped;
         }
 
         /// <summary>

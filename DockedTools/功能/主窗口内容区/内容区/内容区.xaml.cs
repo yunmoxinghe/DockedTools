@@ -17,7 +17,7 @@ using Microsoft.UI.Xaml.Media.Animation;
 
 namespace DockedTools.Features.MainWindowContent.ContentArea
 {
-    public sealed partial class ContentArea : UserControl
+    public sealed partial class ContentArea : UserControl, ICloseReleasable
     {
         private const float DefaultCornerRadius = 4f;
         private const float PinnedCornerRadius = 8f;
@@ -762,6 +762,99 @@ namespace DockedTools.Features.MainWindowContent.ContentArea
                     AcrylicBackdropLayer.Visibility = Visibility.Visible;
                     break;
             }
+        }
+
+        // ==================== 窗口关闭时的彻底释放 ====================
+        //
+        // 【为什么必须有这一段】
+        // 主窗口关闭只销毁 HWND，不会把这座内容区从"静态登记"里摘出去。本实例被下面这些
+        // 进程级的东西钉着，一条不断就整座树回收不了：
+        //   · TopAppBarService._contentArea —— 静态字段直接持有本实例，
+        //     Register 还在本实例的 TopBarDoubleTapped 上挂了静态→实例订阅；
+        //   · ContentAreaService._instance —— 同上，静态字段；
+        //   · 静态事件源 + 本实例处理器：TopAppBarService.BackButtonClicked、
+        //     TopAppBarService.MenuButtonClicked、WebViewManager.WebViewEvicted、
+        //     SettingsPage.FrameAnimationSettingsChanged、
+        //     SettingsPage.ContentAreaBackdropSettingsChanged、
+        //     TopBarMessageHub.Instance.EventReceived。
+        //     静态事件的委托列表只增不减，每开关一次窗口就多一条指向"上一座内容区"的引用。
+        // 只要还剩一条，本实例连同 LRU 里最多 20 个缓存页（各自一套 WebView2）就一直留在堆上
+        // —— 表现就是"关掉了窗口，内存一点没回去"。
+        //
+        // 【为什么不能挂在 Unloaded】
+        // 关闭窗口不保证触发 Unloaded：WinUI 3 的 Window 不会注销自己在 XAML/x:Bind 上挂的
+        // 处理器（microsoft-ui-xaml issue #9960），元素树随窗口销毁时 Unloaded 也可能整个跳过。
+        // 原来挂在 Unloaded 上的那几条退订，关窗路径压根走不到 —— 所以改由窗口的 Closed
+        // 路径显式调用本方法，并保证幂等（Unloaded 那几条留着当重复保险，-= 摘不到就是空操作）。
+        private bool _releasedForClose;
+
+        /// <summary>
+        /// 窗口关闭时彻底放手：断开全部静态登记与静态事件订阅、清空页面缓存
+        /// （逐页 DisposeWebView）、停掉顶栏 Reactor 渲染循环。
+        /// 幂等，可重复调用。
+        /// </summary>
+        public void ReleaseOnClose()
+        {
+            if (_releasedForClose)
+            {
+                return;
+            }
+            _releasedForClose = true;
+
+            int cachedBefore = _pageCacheManager.CachedPageCount;
+
+            // 1) 静态事件源上的"自己"，逐条摘干净
+            UnifiedCalls.TopAppBar.TopAppBarService.BackButtonClicked -= OnTopBarBackButtonClicked;
+            UnifiedCalls.TopAppBar.TopAppBarService.MenuButtonClicked -= TopAppBarHost_MenuButtonClicked;
+            Pages.WebApp.Browser.Managers.WebViewManager.WebViewEvicted -= OnWebViewEvicted;
+            Pages.Settings.SettingsPage.FrameAnimationSettingsChanged -= OnFrameAnimationSettingsChanged;
+            Pages.Settings.SettingsPage.ContentAreaBackdropSettingsChanged -= OnContentAreaBackdropSettingsChanged;
+
+            if (_topBarMaterialHandler is { } materialHandler)
+            {
+                UnifiedCalls.TopAppBar.TopBarMessageHub.Instance.EventReceived -= materialHandler;
+                _topBarMaterialHandler = null;
+            }
+
+            // 2) 服务登记：这两个静态字段持有本实例，必须放开
+            //    ContentAreaService.Unregister 顺带把 CornerRadiusChanged 的订阅列表清空，
+            //    等于把缓存页挂在静态事件上的那批引用一起摘掉（页面侧的退订本来就只写在
+            //    Unloaded 里，关窗路径同样走不到）。
+            UnifiedCalls.TopAppBar.TopAppBarService.Unregister(this);
+            UnifiedCalls.ContentArea.ContentAreaService.Unregister();
+
+            // 3) 页面缓存：ClearCache 会逐页走 DisposeCachedPage → DisposeWebView，
+            //    里面含 Unlink + 关闭 CoreWebView2；直接 Clear 字典会把浏览器子进程全留下。
+            //    当前显示中的那一份可能不在缓存字典里（Frame 还握着它），先单独放它一次手。
+            if (_navigationService.CurrentPage is ICloseReleasable currentPageReleasable)
+            {
+                currentPageReleasable.ReleaseOnClose();
+            }
+
+            _pageCacheManager.PageAutoRemoved -= OnPageAutoRemoved;
+            _pageCacheManager.ClearCache();
+
+            // 4) 导航层：后退栈里的页面对象一并放掉
+            _navigationService.Navigated -= OnNavigationServiceNavigated;
+            _navigationService.CachedPageNavigated -= OnNavigationServiceCachedPageNavigated;
+            _navigationService.ClearBackStack();
+
+            // 5) 自身子对象的订阅
+            ContentGrid.Loaded -= ContentGrid_Loaded;
+
+            // 6) 顶栏 Reactor 宿主：只有 Dispose 才会 RunCleanups + 释放 Reconciler，
+            //    并把 Content 置空。OnUnloaded 在 ReactorHostControl 里是空实现
+            //    （反编译 0.1.0-preview.16 确认），所以等"从树上摘下来"是不会停渲染循环的，
+            //    AppTopBar 里那几个 UseRef 保活的 DispatcherQueueTimer 也就一直跟着走。
+            _topBarReactorHost.Dispose();
+            TopBarHostContainer.Children.Clear();
+
+            // 构造期那条 Loaded += (s, e) => ApplyBackdropSettings() 摘不掉（匿名处理器），
+            // 但订阅方是自己、源也是自己，属于自引用环，不构成外部根，留给 GC。
+            DockedTools.Features.UnifiedCalls.Logging.LogService.Info(
+                "内容区",
+                $"关窗释放完成：缓存页 {cachedBefore} → {_pageCacheManager.CachedPageCount}，" +
+                "静态登记与静态事件订阅已全部断开，顶栏 Reactor 宿主已 Dispose");
         }
     }
 }

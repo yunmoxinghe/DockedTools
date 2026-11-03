@@ -302,7 +302,8 @@
                             SelectionChanged="OnLinkOpenBehaviorChanged">
                             <ComboBoxItem x:Uid="SettingsPage_LinkOpenBehaviorAsk" Tag="0" Content="每次询问"/>
                             <ComboBoxItem x:Uid="SettingsPage_LinkOpenBehaviorSystemBrowser" Tag="1" Content="默认浏览器"/>
-                            <ComboBoxItem x:Uid="SettingsPage_LinkOpenBehaviorWebViewWindow" Tag="2" Content="WebView 窗口"/>
+                            <ComboBoxItem x:Uid="SettingsPage_LinkOpenBehaviorSamePage" Tag="2" Content="本页打开"/>
+                            <ComboBoxItem x:Uid="SettingsPage_LinkOpenBehaviorNewWindow" Tag="3" Content="新窗口打开"/>
                         </ComboBox>
                     </controls:SettingsCard>
                     

@@ -97,6 +97,15 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             // 网页自适应栏色按新方案重算（复用已有取色数据，不重新探测页面）
             // 放在最后：它会覆盖上面的默认色，保证网页页仍以网页外观为准
             ReapplyAdaptiveBarColourForThemeChange();
+
+            // 顶栏快捷方式图标是按「抓图那一刻的主题」烘死的 PNG（顶栏契约只认位图 Uri），
+            // 系统切主题不重画的话图标就停在旧主题的颜色上 —— 浅色模式下顶着一枚白图标。
+            // SVG 源会由专用渲染内核按顶栏当前主题（GetActualTheme，含自适应栏色覆盖）
+            // 重新求值；位图源与主题无关，重发一遍无害。
+            if (_currentShortcut?.IconBytes is { Length: > 0 } iconBytes)
+            {
+                _ = PublishShortcutIconAsync(iconBytes);
+            }
         }
 
         /// <summary>

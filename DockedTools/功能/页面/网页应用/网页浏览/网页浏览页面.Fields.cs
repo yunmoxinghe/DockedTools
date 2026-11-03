@@ -96,6 +96,13 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         private string _topBarTitleText = string.Empty;
         private string? _topBarIconPath;
 
+        /// <summary>
+        /// <see cref="_topBarIconPath"/> 那张是按哪个主题画的。
+        /// 顶栏图标是一张烘死色的位图 Uri，主题资源管不到它 —— 自适应栏色把顶栏
+        /// 从深刷成浅时，只有拿这个值一比才知道「得重画一张黑色的重发」。
+        /// </summary>
+        private Microsoft.UI.Xaml.ElementTheme? _topBarIconTheme;
+
         // PWA 模式
         // ⚠️ 本页刻意【不】保留任何 per-core 记账（脚本 id、是否已注册请求头钩子、默认 UA）——
         //    那些都是「内核的属性」而不是「页面的属性」，CoreWebView2 一旦重建就全部失真

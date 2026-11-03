@@ -144,6 +144,26 @@ namespace DockedTools.Features.MainWindow.KeyboardManagement
             LogDebug("快捷键管理器已初始化");
         }
 
+        /// <summary>
+        /// 主窗口关闭时放开这里的静态登记（由 <see cref="Current"/> 的登记方，即主窗口调用）。
+        ///
+        /// 【为什么必须】
+        /// 构造期那句 <c>Current = this</c> 让这座管理器成了进程级的静态根，而它字段里那三个
+        /// 回调是主窗口传进来的 lambda，捕获了 _linker —— 于是 "静态字段 → 管理器 → lambda →
+        /// 链接器 → 整座窗口内容树"一条链全在堆上活着。关窗口时不放开这句，窗口就白关了。
+        ///
+        /// 【只认自己】
+        /// 不是当前登记的那份就不动：托盘"关闭窗口"之后可能立刻重建了新窗口并登记了新的管理器，
+        /// 迟到的这一次释放不能把新的抹掉。
+        /// </summary>
+        public static void ReleaseRegistration(KeyboardShortcutManager manager)
+        {
+            if (ReferenceEquals(Current, manager))
+            {
+                Current = null;
+            }
+        }
+
         // ==================== KeyboardAccelerator 处理方法 ====================
 
         /// <summary>

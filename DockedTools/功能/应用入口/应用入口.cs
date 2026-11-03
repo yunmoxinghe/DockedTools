@@ -143,6 +143,32 @@ namespace DockedTools
         public Window? MainWindow => _window;
 
         /// <summary>
+        /// 主窗口已经销毁时，放开 App 对它的那份引用。
+        ///
+        /// 【为什么必须】
+        /// <see cref="_window"/> 是挂在单例 App 上的字段，窗口关闭后如果还指着它，
+        /// 整棵 MainWindow → RootGrid → Linker → ContentArea → 页面缓存（最多 20 页
+        /// 网页 + 各自的 WebView2 控制器）就全被这个字段钉住，回收不掉。
+        /// 退出链里本来就有一句 <c>_window = null</c>（见 ShutdownUiResources），
+        /// 但那条只在退出时走；单纯关窗口时没人放开，于是每开一次漏一座。
+        ///
+        /// 【只认自己】
+        /// 比对引用再置空：托盘"关闭窗口"之后可能立刻又有新的显示请求建了另一座窗口，
+        /// 迟到的这一次通知不能把新窗口给抹掉。
+        /// </summary>
+        internal static void NotifyMainWindowClosed(Window closedWindow)
+        {
+            var app = _current;
+            if (app is null || !ReferenceEquals(app._window, closedWindow))
+            {
+                return;
+            }
+
+            app._window = null;
+            LogService.Info("应用入口", "主窗口已销毁，App._window 引用已放开（页面缓存不再被静态引用钉住）");
+        }
+
+        /// <summary>
         /// 主 UI 线程的 DispatcherQueue（在 OnLaunched 里、主线程上捕获一次）
         ///
         /// 为什么需要它：托盘图标和菜单现在跑在独立的 UI 线程上，
@@ -378,9 +404,13 @@ namespace DockedTools
                     LogService.Error("应用入口", "注入桥接界面刷新委托失败", ex);
                 }
 
-                // 启动 UI 线程看门狗。
-                // 主线程一旦被长时间阻塞（消息泵停摆），窗口、托盘菜单、对话框会集体失联，
-                // 届时只能靠这个后台线程发现卡死，并静默重启到托盘。
+                // 启动 UI 线程卡死探测。
+                // 主线程一旦被长时间阻塞（消息泵停摆），窗口、对话框会集体失联。
+                // 这个后台线程唯一的职责是【发现并记录】—— 自动重启已在 2026-10-18 移除，
+                // 现在它不碰进程生命周期、不弹通知、不重启。
+                //
+                // 卡死时用户并不失去退路：托盘跑在独立 UI 线程上（见 TrayUIThreadHost），
+                // 主线程停摆时托盘照样能收消息、弹菜单、点退出 / 重启。
                 try
                 {
                     // 探测目标优先选常驻的 keep-alive 窗口：主窗口会被关掉重建，
@@ -394,17 +424,17 @@ namespace DockedTools
                     {
                         _uiThreadWatchdog = new UIThreadWatchdog(watchdogHwnd);
                         _uiThreadWatchdog.Start();
-                        System.Diagnostics.Debug.WriteLine("[App] UI thread watchdog started");
+                        System.Diagnostics.Debug.WriteLine("[App] UI thread probe started");
                     }
                     else
                     {
-                        System.Diagnostics.Debug.WriteLine("[App] WARNING: no window handle to watch, watchdog not started");
+                        System.Diagnostics.Debug.WriteLine("[App] WARNING: no window handle to watch, probe not started");
                     }
                 }
                 catch (Exception ex)
                 {
-                    // 看门狗起不来不能拖垮启动流程
-                    LogService.Error("应用入口", "启动 UI 线程看门狗失败", ex);
+                    // 探测器起不来不能拖垮启动流程
+                    LogService.Error("应用入口", "启动 UI 线程卡死探测失败", ex);
                 }
 
                 // 启动浏览器扩展桥接服务（本机回环 WebSocket，供浏览器扩展连接）
@@ -1110,6 +1140,66 @@ namespace DockedTools
         public void ExitApplicationPublic()
         {
             ExitApplication();
+        }
+
+        /// <summary>
+        /// 从托盘线程发起的重启：**完全绕开 UI 线程与 XAML**。
+        ///
+        /// 【为什么不能用 AppRestartService】
+        /// 它最后会调 <see cref="ExitApplicationPublic"/> → <c>ShutdownUiResources</c>，
+        /// 那几步要在 UI 线程上关 XAML 窗口。主线程卡死时消息泵已停摆，
+        /// 那条路径必然挂住 —— 表现就是「点了重启，新实例起来了，旧进程永远不退出」，
+        /// 越点越乱。
+        ///
+        /// 【这里的做法】
+        /// 只做三件不依赖消息泵的事，然后让进程走内核级硬终止：
+        ///   ① 先唤起新实例（带 --restart 跳过单实例重定向；--tray-only 保证不弹窗口）
+        ///   ② 交出单实例 Mutex —— ReleaseMutex 抛了就退回 Dispose，两条都能真正让位
+        ///   ③ 等新实例落地后 Flush 日志，再 TerminateProcess 收尾
+        ///
+        /// 【为什么不用 Environment.Exit 就收工】
+        /// 走 .NET 正常退出流程时，UI 线程上那些挂死的 continuation 会被 finalizer
+        /// 拖住，进程能吊上好几秒。托盘线程这一侧的 Join(3s) 等不到它退出，
+        /// 于是宁可直接 TerminateProcess —— 内核层面的终止不看 .NET 的任何状态。
+        /// 这条路径的定位就是「UI 已经不响应时的逃生舱」，不优雅是设计意图。
+        /// </summary>
+        /// <param name="arguments">传给新实例的启动参数，通常是 "--restart --tray-only"</param>
+        public static void RestartFromTrayThread(string arguments)
+        {
+            // ① 先唤起接班者。失败就不能自杀 —— 否则用户什么都没点就没了应用。
+            var launch = Features.AppEntry.PackagedActivationService.Launch(arguments);
+            LogService.Warning(
+                "托盘重启",
+                $"从托盘线程发起重启（参数 {arguments}）：Success={launch.Success}，{launch.Detail}");
+
+            if (!launch.Success)
+            {
+                LogService.Error("托盘重启", "新实例没能起来，放弃重启、保持当前进程存活");
+                return;
+            }
+
+            // NIF_GUID 模式下托盘 GUID 按包名哈希，新旧实例算出来是同一个值；
+            // 删一个等于全删。交接完成前不能下发 NIM_DELETE。
+            Features.Tray.SystemTrayIcon.IsHandingOffToSuccessor = true;
+
+            // ② 尽早交出 Mutex：新实例启动时第一件事就是抢它。
+            ReleaseSingleInstanceMutex();
+
+            // ③ 给接班者时间排上队，然后压干日志走硬终止。
+            var killer = new Thread(() =>
+            {
+                Thread.Sleep(1500);
+                LogService.Flush(600);
+
+                LogService.Warning("托盘重启", "交接完成，强制终止本进程（UI 线程可能已停摆，不走优雅退出）");
+
+                if (!Features.AppEntry.AppEntryWin32Api.HardKillSelf(0))
+                {
+                    LogService.Error("托盘重启", "TerminateProcess 失败，进程可能残留；请手动结束 DockedTools.exe");
+                }
+            })
+            { IsBackground = true, Name = "TrayRestartGuard" };
+            killer.Start();
         }
 
         private void EnsureKeepAliveWindow()

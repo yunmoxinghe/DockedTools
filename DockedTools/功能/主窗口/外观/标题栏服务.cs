@@ -2,6 +2,7 @@ using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using System;
+using DockedTools.Features.UnifiedCalls.Logging;
 
 namespace DockedTools.Features.MainWindow.Appearance
 {
@@ -221,6 +222,76 @@ namespace DockedTools.Features.MainWindow.Appearance
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"Failed to configure pinned window: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 关窗前把窗口收干净：先隐藏，再拆原生标题栏。调用方紧接着才可以 Close()。
+        ///
+        /// 【为什么需要拆标题栏】
+        /// ExtendsContentIntoTitleBar = true 的窗口在 Close() 时，WinUI 不会执行
+        /// AppWindowTitleBar::UninitializeTitleBarNative，于是 CTitleBar 连同它自己
+        /// 建的那台 DComp device（WARP / D3D10Warp 上约 14 个 CAtlasSurfacePool surface）
+        /// 整块留在原地：每开关一次窗口 +2~3 MB 私有字节、+约 35 个句柄，永不归还。
+        /// 出处：microsoft-ui-xaml issue #12210（本仓库解析到的 WindowsAppSDK.WinUI
+        /// 正是报障所用的 2.3.9，且该 issue 仍 open）。
+        ///
+        /// 【顺序不能换】
+        /// 同一 issue 的实测表：只把 ExtendsContentIntoTitleBar 设回 false 再 Close
+        /// 反而更糟（约 24 个句柄）；ResetToDefault() 单独用只能部分修复；
+        /// 唯一压回基线（约 2 个句柄）的组合是
+        /// Hide → false → ResetToDefault() → 才 Close()。所以本方法必须在 Close() 之前调用。
+        ///
+        /// 【为什么要先 Hide —— 这一步纯粹是为了好看，不是为了内存】
+        /// ResetToDefault() 会把标准标题栏请回来：系统标题条闪回半秒、客户区还往下挪一截，
+        /// 这个中间态发生在关闭动画期间，用户是看得见的。先 AppWindow.Hide() 把它盖过去：
+        /// 窗口已经不可见，怎么折腾标题栏都没人看见，代价是这一次关闭不再有淡出动画
+        /// （直接消失）—— 两害相权，选了无感。
+        ///
+        /// 【为什么不走 WindowHostController 的隐藏状态机】
+        /// 那套状态转换是异步的（含滑动动画与状态回滚），Closing 这一拍等不到它落定；
+        /// 而这座窗口马上就要销毁，状态机的记账不再需要准确 —— 下一条 Close() 之后
+        /// MainWindowService.Unregister / App._window 一律放开，没有旁观者会读到这份状态。
+        ///
+        /// 【幂等与容错】
+        /// 重复调用只是把已经默认的标题栏再默认一次；句柄已失效（窗口早销毁）时
+        /// GetWindowHandle 可能抛异常，一律吞掉——这一步失败不该挡住关窗流程。
+        /// </summary>
+        /// <param name="window">即将关闭的窗口</param>
+        public static void HideAndReleaseNativeTitleBar(Window? window)
+        {
+            if (window is null)
+            {
+                return;
+            }
+
+            try
+            {
+                IntPtr hWnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+                if (hWnd == IntPtr.Zero)
+                {
+                    return;
+                }
+
+                var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hWnd);
+                var appWindow = AppWindow.GetFromWindowId(windowId);
+
+                // ⭐ 第一步：先藏起来，后面拆标题栏的中间态就没人能看见了
+                appWindow.Hide();
+
+                appWindow.TitleBar.ExtendsContentIntoTitleBar = false;
+                appWindow.TitleBar.ResetToDefault();
+
+                LogService.Info(
+                    "标题栏服务",
+                    $"关窗前已隐藏窗口并拆除原生标题栏 hWnd=0x{hWnd.ToInt64():X}");
+            }
+            catch (Exception ex)
+            {
+                // 这一步失败只意味着回到"漏 2~3 MB + 闪一下标题栏"的原状，不影响窗口关闭本身。
+                LogService.Warning(
+                    "标题栏服务",
+                    $"隐藏并拆除原生标题栏失败：{ex.Message}（窗口照常关闭，但这块原生资源没还回来）");
             }
         }
     }

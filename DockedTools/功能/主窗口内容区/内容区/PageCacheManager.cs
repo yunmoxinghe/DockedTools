@@ -68,6 +68,23 @@ namespace DockedTools.Features.MainWindowContent.ContentArea
             // 入口也没了，那一项从此无人认领（见 TopBarChannel.Apply 里的清扫注释）。
             DockedTools.Features.UnifiedCalls.TopAppBar.TopAppBarService.DisposePageScope(page);
 
+            // ⭐ 页面自己的静态订阅也在这里收口。原来这批退订只写在页面的 Unloaded 里，
+            //    而"关窗口"和"LRU 淘汰"这两条路都不保证触发 Unloaded —— 淘汰出去的页面
+            //    会被静态事件源一直钉住（连带它的列表数据与图标），整座内容区跟着回收不了。
+            //    见 ICloseReleasable 的约定：实现者自己保证幂等。
+            if (page is ICloseReleasable releasable)
+            {
+                try
+                {
+                    releasable.ReleaseOnClose();
+                }
+                catch (Exception ex)
+                {
+                    // 单个页面放手失败不能拖垮整条清空流程（ClearCache 是在循环里调的）。
+                    System.Diagnostics.Debug.WriteLine($"[PageCacheManager] 页面关窗释放异常: {cacheKey} — {ex.Message}");
+                }
+            }
+
             // 如果是 WebBrowserPage，调用其清理方法
             if (page is Pages.WebApp.Browser.WebBrowserPage webBrowserPage)
             {

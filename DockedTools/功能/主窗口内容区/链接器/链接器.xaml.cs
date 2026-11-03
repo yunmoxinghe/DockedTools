@@ -17,9 +17,12 @@ using NavRequest = DockedTools.Features.MainWindowContent.NavigationBar.Navigati
 
 namespace DockedTools.Features.MainWindowContent.Linker
 {
-    public sealed partial class Linker : UserControl
+    public sealed partial class Linker : UserControl, ICloseReleasable
     {
         public NavBarControl NavBarInstance => NavBar;
+
+        // 静态订阅/服务登记的放手幂等标志：Unloaded 与关窗两条路都可能走那一段。
+        private bool _staticRegistrationsReleased;
 
         // 导航历史由 ContentHost 的 Frame.BackStack 内置管理，无需自定义栈
         // 注意：此字段用于跟踪后退导航状态，虽然当前未读取，但保留用于未来扩展
@@ -91,10 +94,63 @@ namespace DockedTools.Features.MainWindowContent.Linker
         private void OnUnloaded(object sender, RoutedEventArgs e)
         {
             UnifiedCalls.ContentArea.ContentAreaService.Unregister();
-            Pages.Settings.SettingsPage.AILabSettingsChanged -= OnAILabSettingsChanged;
-            Pages.Settings.SettingsPage.DockSideSettingsChanged -= OnDockSideSettingsChanged;
+            ReleaseStaticAndServiceRegistrations();
             SizeChanged -= OnSizeChanged;
             Unloaded -= OnUnloaded;
+        }
+
+        /// <summary>
+        /// 主窗口关闭时由 <see cref="global::DockedTools.MainWindow"/> 调用，整条释放链的中间站：
+        /// 先放掉自己名下的静态订阅，再让侧边栏与内容区各自放手。
+        ///
+        /// 【为什么要走这一趟】
+        /// 关窗只销毁 HWND，不会把这座链接器从静态事件里摘出去；而它下面的内容区被
+        /// TopAppBarService / ContentAreaService 两个静态字段登记着、LRU 里最多 20 个缓存页
+        /// 各带一套 WebView2。只要这里不断链，"关掉窗口"和"释放内存"就是两回事。
+        /// 幂等：Unloaded 那条路可能已经先走过一遍同样的退订。
+        /// </summary>
+        public void ReleaseOnClose()
+        {
+            ReleaseStaticAndServiceRegistrations();
+
+            // 子控件先放手，再由内容区去清它的页面缓存（顺序：叶子 → 容器）
+            NavBar.ReleaseOnClose();
+            ContentHost.ReleaseOnClose();
+
+            // 本实例挂在子控件上的订阅：源是孩子、 sink 是自己，本来是同生共死的自引用，
+            // 显式摘掉是为了让"静态侧已经干净"这件事没有例外可谈。
+            ContentHost.Navigated -= ContentHost_Navigated;
+            ContentHost.CachedPageNavigated -= ContentHost_CachedPageNavigated;
+            ContentHost.PageCloseRequested -= OnPageCloseRequested;
+            ContentHost.TopBarDoubleTapped -= OnTopBarDoubleTapped;
+            NavBar.NavigationRequested -= OnNavigationRequested;
+            NavBar.ShortcutRemoved -= OnShortcutRemoved;
+            NavBar.WebAppRestartRequested -= OnWebAppRestartRequested;
+            NavBar.BackRequested -= OnBackRequested;
+
+            SizeChanged -= OnSizeChanged;
+            Unloaded -= OnUnloaded;
+
+            DockedTools.Features.UnifiedCalls.Logging.LogService.Info(
+                "链接器",
+                "关窗释放链已走完：侧边栏、内容区与静态登记全部放手");
+        }
+
+        /// <summary>
+        /// 摘掉挂在静态事件源上的订阅，并把内容区的服务登记放掉。
+        /// 抽成一份给 OnUnloaded 与 ReleaseOnClose 共用，靠 <see cref="_staticRegistrationsReleased"/> 幂等。
+        /// </summary>
+        private void ReleaseStaticAndServiceRegistrations()
+        {
+            if (_staticRegistrationsReleased)
+            {
+                return;
+            }
+            _staticRegistrationsReleased = true;
+
+            // 内容区登记（静态字段 + 静态→实例订阅）由内容区自己收口，这里只收自己这两条
+            Pages.Settings.SettingsPage.AILabSettingsChanged -= OnAILabSettingsChanged;
+            Pages.Settings.SettingsPage.DockSideSettingsChanged -= OnDockSideSettingsChanged;
         }
 
         private void OnSizeChanged(object sender, SizeChangedEventArgs e)

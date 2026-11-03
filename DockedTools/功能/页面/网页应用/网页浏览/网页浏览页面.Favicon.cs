@@ -3,7 +3,6 @@ using DockedTools.Features.Pages.WebApp.Shared;
 using Microsoft.Web.WebView2.Core;
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -118,7 +117,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             """;
 
         /// <summary>
-        /// 光栅化兜底出来的位图边长（px）。
+        /// SVG 抢救出来的位图边长（px）。
         ///
         /// ⚠️ 必须跟 <see cref="VectorIconSize"/> 同一个量级，别照着「顶栏/侧边栏最大 96」来定。
         ///    它渲染的内容是矢量，但产物是 PNG —— <see cref="GetIconSizeAsync"/> 拿到位图只会解出
@@ -128,177 +127,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         ///    统一到 256，既不触发防退化，顺带高清屏也够清晰（一张 PNG 就几 KB）。
         /// </summary>
         private const int SvgRasterSize = VectorIconSize;
-
-        /// <summary>光栅化结果轮询的次数上限。画一张 SVG 通常几十毫秒，给足余量</summary>
-        private const int RasterPollCount = 40;
-
-        /// <summary>光栅化结果轮询的间隔（毫秒）。<see cref="RasterPollCount"/> × 这个值就是最长等待</summary>
-        private const int RasterPollIntervalMs = 100;
-
-        /// <summary>
-        /// SVG 抢救脚本 ①：让 Chromium 把算好的样式写成显式属性，输出 D2D 认的「普通 SVG」。
-        ///
-        /// 为什么要它：站点的 favicon.svg 很多把颜色写在 <c>&lt;style&gt;</c> 里
-        /// （ChatGPT 就是 <c>:root{fill:#000}</c> + <c>@media(prefers-color-scheme:dark)</c>），
-        /// 而 SvgImageSource 底下是 Direct2D，不执行 CSS —— 那部分颜色等于凭空消失。
-        /// 但 Chromium 会算 —— 把 CSS 文本喂给一张「构造式样式表」，从 CSSOM 里读出规则，
-        /// 自己按选择器写回属性，就能得到一张 D2D 认得的普通 SVG。
-        ///
-        /// ⭐ 为什么不走「挂 iframe + getComputedStyle」那条看起来更省事的路（实测踩过的坑）：
-        ///   · 站点的 CSP 经常是 <c>style-src 'self'</c>，inline &lt;style&gt; 压根不会被应用 ——
-        ///     那时 getComputedStyle 求出来的就是初始值，颜色照样丢（ChatGPT 正卡在这里）；
-        ///   · <c>about:blank</c> iframe 继承父页 CSP，<c>sandbox</c> 指令还会让
-        ///     <c>contentDocument</c> 变成不透明源，直接抛 SecurityError；
-        ///   · 往宿主页面塞 iframe 本身就是污染，SPA 页面可能正盯着 DOM 变动。
-        ///     构造式样式表 + DOMParser 的文档全程不碰宿主页面，也不看 CSP 脸色。
-        ///
-        /// 另外 <c>@media (prefers-color-scheme)</c> 用 <c>matchMedia</c> 按当前配色求值，
-        /// 浅色拿到黑、深色拿到白 —— 比我们静态挑一个颜色更正确。
-        /// </summary>
-        private const string SvgNormalizeScript = """
-            (() => {
-              try {
-                const svgText = __SVG_TEXT__;
-                const doc = new DOMParser().parseFromString(svgText, 'image/svg+xml');
-                const root = doc.documentElement;
-                if (!root || doc.querySelector('parsererror')) return '';
-
-                const props = ['fill','stroke','fill-opacity','stroke-opacity','stroke-width','opacity','stop-color','fill-rule','stroke-linecap','stroke-linejoin','stroke-dasharray'];
-                const colorProps = { fill: 1, stroke: 1, 'stop-color': 1 };
-
-                // 算出来的颜色一律压成 #rrggbb：D2D 那套 SVG 子集认不认 rgb() 没写进文档，别赌
-                const toHex = (v) => {
-                  const m = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:[\s,/]+([\d.]+))?\s*\)/i.exec(v);
-                  if (!m) return null;
-                  const c = (n) => Math.max(0, Math.min(255, Math.round(parseFloat(n)))).toString(16).padStart(2, '0');
-                  return { hex: '#' + c(m[1]) + c(m[2]) + c(m[3]), a: m[4] === undefined ? -1 : parseFloat(m[4]) };
-                };
-                const bad = (v) => !v || v === 'none' || v === 'inherit' || v === 'transparent' || v.indexOf('var(') === 0;
-                const put = (el, p, v) => {
-                  if (colorProps[p]) {
-                    const h = toHex(v);
-                    if (h) {
-                      el.setAttribute(p, h.hex);
-                      if (h.a >= 0 && h.a < 1) el.setAttribute(p + '-opacity', String(h.a));
-                      return;
-                    }
-                  }
-                  el.setAttribute(p, v);
-                };
-
-                // ⭐ 把 <style> 的文本抠出来喂给构造式样式表，从 CSSOM 里读规则自己写回属性。
-                //    不依赖浏览器「应用」CSS（CSP 会拦），也不依赖 getComputedStyle（要浏览上下文）。
-                let css = '';
-                for (const st of root.querySelectorAll('style')) { css += (st.textContent || '') + '\n'; st.remove(); }
-
-                if (css.trim()) {
-                  const sheet = new CSSStyleSheet();
-                  sheet.replaceSync(css);
-                  const targets = (sel) => {
-                    const list = [];
-                    try {
-                      if (root.matches(sel)) list.push(root);   // :root / svg 命中的是根自己，querySelectorAll 不返回它
-                      for (const el of root.querySelectorAll(sel)) list.push(el);
-                    } catch (e) { /* 选择器认不出来就跳过 */ }
-                    return list;
-                  };
-                  const walk = (rules) => {
-                    for (let i = 0; i < rules.length; i++) {
-                      const r = rules[i];
-                      if (r.style && r.selectorText) {
-                        const list = targets(r.selectorText);
-                        for (const p of props) {
-                          const v = r.style.getPropertyValue(p);
-                          if (v === '' || bad(v)) continue;
-                          for (const el of list) put(el, p, v);
-                        }
-                      }
-                      // ⚠️ 先查自己再递归：Chromium 里 CSSStyleRule 也带 cssRules（CSS Nesting 引入的），
-                      //    拿「有没有 cssRules」当分组规则的判据会把 :root{fill:#000} 整条跳过。
-                      if (r.cssRules) {
-                        const cond = r.conditionText || (r.media && r.media.mediaText) || '';
-                        let ok = true;
-                        if (cond) {
-                          try { ok = r.constructor.name === 'CSSSupportsRule' ? CSS.supports(cond) : matchMedia(cond).matches; } catch (e) { ok = false; }
-                        }
-                        if (ok) walk(r.cssRules);
-                      }
-                    }
-                  };
-                  walk(sheet.cssRules);
-                }
-
-                // 继承补全：根上定了填充色就给没写 fill 的形状补上，别赌 D2D 的属性继承
-                const rootFill = root.getAttribute('fill');
-                if (rootFill && !bad(rootFill)) {
-                  for (const el of root.querySelectorAll('path,rect,circle,ellipse,line,polyline,polygon')) {
-                    if (!el.hasAttribute('fill')) el.setAttribute('fill', rootFill);
-                  }
-                }
-                if (bad(root.getAttribute('fill'))) root.removeAttribute('fill');
-
-                return new XMLSerializer().serializeToString(root);
-              } catch (e) {
-                // ⭐ 别静默返回空串：真机上一旦出错，C# 侧只看到「没吐出东西」，
-                //    根本无从下手。把名字和消息带回去。
-                return 'ERR|' + ((e && e.name) || 'Error') + '|' + ((e && e.message) || String(e));
-              }
-            })()
-            """;
-
-        /// <summary>
-        /// SVG 抢救脚本 ②（兜底）：交给 Chromium 直接画成 PNG 再要回来。
-        ///
-        /// 归一化的路走不通时（比如图形靠 <c>&lt;filter&gt;</c> / <c>&lt;mask&gt;</c> /
-        /// <c>&lt;text&gt;</c> 这些 D2D 干脆不认的元素），画图是最后一招 ——
-        /// Chromium 的 SVG 支持是完整的，画出来什么样就是什么样。代价是矢量变固定尺寸位图。
-        ///
-        /// 用 data: URL 喂给 <c>Image</c>：data URL 算同源，不会污染 canvas，
-        /// <c>toDataURL</c> 才拿得到东西（远程地址会直接抛 SecurityError）。
-        /// Promise + 超时二选一：脚本自己兜底，绝不让 ExecuteScript 挂住。
-        /// </summary>
-        private const string SvgRasterizeScript = """
-            (() => {
-              try {
-                const svgText = __SVG_TEXT__;
-                const size = __SIZE__;
-                const task = window.__dtSvgRaster = { done: false, value: '', err: '' };
-                // ⭐ 失败原因也要带回：站点的 CSP 常常连 data: 图片一起禁（img-src），
-                //    那种情况 img 直接 onerror，不记一笔就永远查不出来。
-                const finish = (v, err) => { task.value = v || ''; task.err = err || ''; task.done = true; };
-                try {
-                  const img = new Image();
-                  img.onload = () => {
-                    try {
-                      const canvas = document.createElement('canvas');
-                      canvas.width = size;
-                      canvas.height = size;
-                      canvas.getContext('2d').drawImage(img, 0, 0, size, size);
-                      finish(canvas.toDataURL('image/png'), '');
-                    } catch (e) { finish('', 'draw|' + ((e && e.name) || 'Error') + '|' + ((e && e.message) || String(e))); }
-                  };
-                  img.onerror = () => finish('', 'img-error');   // 多半是 CSP 的 img-src 拦了 data: URL
-                  img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText);
-                  setTimeout(() => { if (!task.done) finish('', 'timeout'); }, 4000);
-                } catch (e) { finish('', 'sync|' + ((e && e.name) || 'Error') + '|' + ((e && e.message) || String(e))); }
-                return 'started';
-              } catch (e) { return ''; }
-            })()
-            """;
-
-        /// <summary>
-        /// 光栅化脚本 ②：轮询槽位。
-        ///
-        /// ⭐ ExecuteScriptAsync <b>不会等 Promise</b> —— 返回 Promise 的脚本拿到的是 "{}" 或 "null"
-        /// （来源：microsoft/WebView2Feedback#416，社区实测一致）。所以不能靠 await，
-        /// 只能点火 + 轮询：脚本把结果写进 <c>window.__dtSvgRaster</c>，我们再把它读回来。
-        /// 用 JSON 而不是裸字符串，是为了区分「还没画完」和「画完了但失败」。
-        /// </summary>
-        private const string SvgRasterizePollScript =
-            "JSON.stringify(window.__dtSvgRaster || { done: false, value: '' })";
-
-        /// <summary>光栅化脚本 ③：用完把槽位擦掉，别在人家页面上留全局变量</summary>
-        private const string SvgRasterizeCleanupScript = "delete window.__dtSvgRaster, ''";
 
         /// <summary>
         /// 图标写盘的防抖窗口（毫秒）。
@@ -431,7 +259,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
                 // ⭐ 命中缓存也别直接交出去 —— 以前这里「ApplyFavicon + return」，
                 //    把后面的空白检测 / 防退化整段跳过了：第一次抓到什么就锁死成什么，
-                //    （而第一次常常正是渲染内核还没热起来、只兜到 16x16 的那一次）
+                //    （而第一次常常正是只兜到内核那份 16x16 小图的那一次）
                 //    表现就是「图标一直不更新」。缓存该省的只是重新下载，判定照做。
                 byte[]? bytes = cachedHit;
 
@@ -795,7 +623,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
             // ① 桌面 favicon 优先：尺寸从大到小试，够清晰就收工
             (best, bestSize) = await TryFetchCandidateGroupAsync(
-                core,
                 appId,
                 preferDark,
                 candidates.Where(c => c.Priority == IconPriorityDesktop),
@@ -815,7 +642,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             }
 
             (byte[]? platformBest, int platformSize) = await TryFetchCandidateGroupAsync(
-                core,
                 appId,
                 preferDark,
                 candidates.Where(c => c.Priority == IconPriorityPlatform),
@@ -827,7 +653,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
         /// <summary>按声明尺寸从大到小试一组候选，返回其中最大的那份。够大就提前收工</summary>
         private static async Task<(byte[]? Bytes, int Size)> TryFetchCandidateGroupAsync(
-            CoreWebView2 core,
             string? appId,
             bool preferDark,
             IEnumerable<IconCandidate> candidates,
@@ -850,7 +675,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     break;
                 }
 
-                (byte[]? bytes, int size) = await TryFetchCandidateAsync(core, appId, preferDark, candidate, token);
+                (byte[]? bytes, int size) = await TryFetchCandidateAsync(appId, preferDark, candidate, token);
                 if (bytes is null)
                 {
                     continue;
@@ -896,7 +721,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         }
 
         private static async Task<(byte[]? Bytes, int Size)> TryFetchCandidateAsync(
-            CoreWebView2 core,
             string? appId,
             bool preferDark,
             IconCandidate candidate,
@@ -918,8 +742,8 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             }
 
             // ⭐ 空内容图标不许占坑。但 SVG 要先抢救一次再判死刑 ——
-            //    站点的 SVG 经常只是「颜色写在 CSS 里」，交给 WebView(Chromium) 算一遍就能救回来，
-            //    救回来的还是矢量（比后面那张 48px 位图清晰）。救不回来才作废，继续试后面的候选。
+            //    站点的 SVG 经常只是「颜色写在 CSS 里」，交给进程内的 Svg.Skia 算一遍就能救回来。
+            //    救不回来才作废，继续试后面的候选。
             //    必须在这层挡：上一层的逻辑是「够清晰就提前收工」，
             //    一张 256px 的空白 SVG 会在这里把后面真正能看的位图全顶掉。
             if (await IsBlankIconAsync(bytes))
@@ -930,7 +754,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     return (null, 0);
                 }
 
-                (byte[]? salvaged, int salvagedSize) = await SalvageSvgAsync(core, appId, preferDark, bytes, token);
+                (byte[]? salvaged, int salvagedSize) = await SalvageSvgAsync(appId, preferDark, bytes, token);
                 if (salvaged is null)
                 {
                     System.Diagnostics.Debug.WriteLine($"[Favicon] 空白 SVG 抢救失败，跳过: {candidate.Href}");
@@ -945,18 +769,16 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         }
 
         /// <summary>
-        /// 抢救一张「画出来是空的」SVG，四招按顺序试：
-        ///   ① 专用内核光栅化 —— 交给进程内那个隐藏 WebView2 画成 PNG（⭐ 根治路径，产物是位图，
-        ///      Chromium 自己算 CSS 和 @media，跟 Chrome 处理 favicon 的路子一致）；
-        ///   ② 归一化 —— 让宿主页面把算好的样式写成显式属性，输出 D2D 认得的 SVG（仍是矢量）；
-        ///   ③ 内联兜底 —— C# 自己把 &lt;style&gt; 里的颜色抠出来写成属性（仍是矢量，不依赖 WebView）；
-        ///   ④ 光栅化 —— 在宿主页面里用 canvas 画成 PNG（受页面环境牵制，排在最后）。
+        /// 抢救一张「画出来是空的」SVG，两招按顺序试：
+        ///   ① 进程内光栅化 —— 交给 Svg.Skia 画成 PNG（⭐ 根治路径：它自己执行 &lt;style&gt;、
+        ///      选择器、级联和 <c>@media (prefers-color-scheme)</c>，产物是位图，
+        ///      后面所有判定都只面对位图，不用再拆 SVG）；
+        ///   ② 内联兜底 —— C# 自己把 &lt;style&gt; 里的颜色抠出来写成属性（仍是矢量，零依赖）。
         ///
-        /// 四招的产物都要再过一遍空内容判定才算救活：
+        /// 两招的产物都要再过一遍空内容判定才算救活：
         /// 也可能算出一张全透明的图（比如 SVG 本身就是个空壳），那种救了也白救。
         /// </summary>
         private static async Task<(byte[]? Bytes, int Size)> SalvageSvgAsync(
-            CoreWebView2 core,
             string? appId,
             bool preferDark,
             byte[] svgBytes,
@@ -969,20 +791,20 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     return (null, 0);
                 }
 
-                // ① 专用隐藏内核光栅化：让 Chromium 把 SVG 画成 PNG。
-                //    这是根治路径 —— CSS、@media(prefers-color-scheme)、字体、filter 全由内核算，
+                // ① 进程内光栅化：让 Svg.Skia 把 SVG 画成 PNG。
+                //    CSS、@media(prefers-color-scheme)、字体、filter 全由内核算，
                 //    产物是位图，后面所有判定都只面对位图，不用再拆 SVG。
-                //    它挂了会返回 null，自然落回下面几招，不会比原来差。
+                //    它挂了会返回 null，自然落回下一招，不会比原来差。
                 byte[]? raster = await WebAppIconRasterizer.Instance
                     .RasterizeSvgAsync(svgBytes, SvgRasterSize, preferDark);
 
                 if (raster is null)
                 {
-                    System.Diagnostics.Debug.WriteLine("[Favicon] SVG 专用内核光栅化：没拿到图，走后续招式");
+                    System.Diagnostics.Debug.WriteLine("[Favicon] SVG 进程内光栅化：没拿到图，转内联兜底");
                 }
                 else if (await IsBlankIconAsync(raster))
                 {
-                    System.Diagnostics.Debug.WriteLine($"[Favicon] SVG 专用内核光栅化：产物 {raster.Length} 字节仍然空白");
+                    System.Diagnostics.Debug.WriteLine($"[Favicon] SVG 进程内光栅化：产物 {raster.Length} 字节仍然空白，转内联兜底");
                 }
                 else
                 {
@@ -992,21 +814,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     return (raster, SvgRasterSize);
                 }
 
-                byte[]? normalized = await TryNormalizeSvgAsync(core, svgBytes);
-                if (normalized is null)
-                {
-                    System.Diagnostics.Debug.WriteLine("[Favicon] SVG 归一化：脚本没吐出东西");
-                }
-                else if (await IsBlankIconAsync(normalized))
-                {
-                    System.Diagnostics.Debug.WriteLine($"[Favicon] SVG 归一化：产物 {normalized.Length} 字节仍然空白，转内联兜底");
-                }
-                else
-                {
-                    return (normalized, VectorIconSize);
-                }
-
-                // ② C# 内联兜底：不用 WebView，自己把 CSS 里的颜色写回属性
+                // ② C# 内联兜底：不用任何渲染内核，自己把 CSS 里的颜色写回属性
                 byte[]? inlined = InlineCssColours(svgBytes, preferDark);
                 if (inlined is null)
                 {
@@ -1019,25 +827,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 else
                 {
                     return (inlined, VectorIconSize);
-                }
-
-                if (token.IsCancellationRequested)
-                {
-                    return (null, 0);
-                }
-
-                byte[]? rasterized = await TryRasterizeSvgAsync(core, svgBytes, token);
-                if (rasterized is null)
-                {
-                    System.Diagnostics.Debug.WriteLine("[Favicon] SVG 光栅化：没画出东西");
-                }
-                else if (await IsBlankIconAsync(rasterized))
-                {
-                    System.Diagnostics.Debug.WriteLine($"[Favicon] SVG 光栅化：产物 {rasterized.Length} 字节仍然空白");
-                }
-                else
-                {
-                    return (rasterized, SvgRasterSize);
                 }
             }
             catch (Exception ex)
@@ -1056,10 +845,11 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             => ShapeElementNames.Contains(element.Name.LocalName, StringComparer.Ordinal);
 
         /// <summary>
-        /// 抢救招 ②：不依赖 WebView，纯文本把 &lt;style&gt; 里的颜色内联成属性。
+        /// 抢救招 ②：不依赖任何渲染引擎，纯文本把 &lt;style&gt; 里的颜色内联成属性。
         ///
-        /// 为什么还要它：招 ① 得走 ExecuteScript，站点 CSP、脚本执行环境都可能让它空手而归；
-        /// 而 favicon 的 CSS 就那么几种写法，根本用不着浏览器来算 ——
+        /// 为什么还要它：招 ① 要 Svg.Skia 能解析并画出这张图 —— 畸形 XML、
+        /// 内核认不了的构造都会让它空手而归；
+        /// 而 favicon 的 CSS 就那么几种写法，根本用不着引擎来算 ——
         /// 自己抠出来写回去，零依赖、100% 可控。
         ///
         /// ⚠️ 选择器远不止 <c>:root</c> 一种（实测抓到的真样本）：
@@ -1459,147 +1249,6 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             catch
             {
                 return false;
-            }
-        }
-
-        /// <summary>① 归一化：Chromium 求样式 → 写回属性 → 删掉 &lt;style&gt; → 序列化回来</summary>
-        private static async Task<byte[]?> TryNormalizeSvgAsync(CoreWebView2 core, byte[] svgBytes)
-        {
-            string text = Encoding.UTF8.GetString(svgBytes);
-
-            // ⚠️ 必须换成带引号的字面量（见 ToJsStringLiteral 的说明）：
-            //    JsonEncodedText.ToString() 不带引号，拼出来是语法错误的脚本，
-            //    而 WebView2 对脚本解析失败只静默返回 null —— 这条路径曾经白死过好几轮。
-            string script = SvgNormalizeScript.Replace(
-                "__SVG_TEXT__", WebAppIconRasterizer.ToJsStringLiteral(text), StringComparison.Ordinal);
-
-            string? svg = DecodeScriptString(await core.ExecuteScriptAsync(script));
-            if (string.IsNullOrEmpty(svg))
-            {
-                return null;
-            }
-
-            // 脚本把自己抛的异常装在 'ERR|名字|消息' 里带回来了，直接摊开看
-            if (svg.StartsWith("ERR|", StringComparison.Ordinal))
-            {
-                System.Diagnostics.Debug.WriteLine($"[Favicon] SVG 归一化脚本抛异常: {svg}");
-                return null;
-            }
-
-            byte[] bytes = Encoding.UTF8.GetBytes(svg);
-            return bytes.Length is > 0 and <= MaxFaviconBytes ? bytes : null;
-        }
-
-        /// <summary>
-        /// ② 光栅化：Chromium 把 SVG 画成 PNG，以 data: URL 的形式交回来。
-        ///
-        /// 画是异步的，而 ExecuteScriptAsync 不等 Promise —— 所以拆成「点火 + 轮询」两步，
-        /// 中间隔 <see cref="RasterPollIntervalMs"/> 读一次槽位，画完（或超时）就收。
-        /// </summary>
-        private static async Task<byte[]?> TryRasterizeSvgAsync(
-            CoreWebView2 core,
-            byte[] svgBytes,
-            CancellationToken token)
-        {
-            try
-            {
-                string text = Encoding.UTF8.GetString(svgBytes);
-
-                string script = SvgRasterizeScript
-                    .Replace("__SVG_TEXT__", WebAppIconRasterizer.ToJsStringLiteral(text), StringComparison.Ordinal)
-                    .Replace("__SIZE__", SvgRasterSize.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
-
-                // 点火就走，脚本同步返回 'started'；结果会写进 window.__dtSvgRaster
-                await core.ExecuteScriptAsync(script);
-
-                string? dataUrl = null;
-                for (int i = 0; i < RasterPollCount; i++)
-                {
-                    await Task.Delay(RasterPollIntervalMs, token);
-
-                    (bool done, string? value, string? error) =
-                        ReadRasterSlot(await core.ExecuteScriptAsync(SvgRasterizePollScript));
-                    if (done)
-                    {
-                        dataUrl = value;
-                        if (string.IsNullOrEmpty(dataUrl))
-                        {
-                            System.Diagnostics.Debug.WriteLine($"[Favicon] SVG 光栅化失败原因: {error}（轮询 {i + 1} 次）");
-                        }
-
-                        break;
-                    }
-                }
-
-                await core.ExecuteScriptAsync(SvgRasterizeCleanupScript);
-
-                if (string.IsNullOrEmpty(dataUrl))
-                {
-                    return null;
-                }
-
-                int comma = dataUrl.IndexOf(',');
-                if (comma < 0 || !dataUrl[..comma].Contains("base64", StringComparison.OrdinalIgnoreCase))
-                {
-                    return null;
-                }
-
-                byte[] bytes = Convert.FromBase64String(dataUrl[(comma + 1)..]);
-                return bytes.Length is > 0 and <= MaxFaviconBytes ? bytes : null;
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// 读光栅化槽位。脚本给的是 <c>{"done":bool,"value":string,"err":string}</c>。
-        /// done 为 false 是「还没画完」（那就再等一轮），true 才代表这轮是最终结果 ——
-        /// 两者不能只靠 value 空不空来分，否则「画完了但失败」会被当成「还没画完」干等到超时。
-        /// </summary>
-        private static (bool Done, string? Value, string? Error) ReadRasterSlot(string raw)
-        {
-            try
-            {
-                using JsonDocument doc = JsonDocument.Parse(raw);
-
-                bool done = doc.RootElement.TryGetProperty("done", out JsonElement d) &&
-                            d.ValueKind == JsonValueKind.True;
-
-                string? value = doc.RootElement.TryGetProperty("value", out JsonElement v) &&
-                                v.ValueKind == JsonValueKind.String
-                    ? v.GetString()
-                    : null;
-
-                string? error = doc.RootElement.TryGetProperty("err", out JsonElement e) &&
-                                e.ValueKind == JsonValueKind.String
-                    ? e.GetString()
-                    : null;
-
-                return (done, value, error);
-            }
-            catch
-            {
-                return (false, null, null);
-            }
-        }
-
-        /// <summary>
-        /// 解 ExecuteScript 的返回值。它给的是「被 JSON 编码了一次的字符串」，要先解一层。
-        /// 用 JsonDocument 而不是 JsonSerializer.Deserialize&lt;string&gt;：后者带
-        /// RequiresDynamicCode/RequiresUnreferencedCode，在 AOT 下会告警。
-        /// </summary>
-        private static string? DecodeScriptString(string raw)
-        {
-            try
-            {
-                using JsonDocument doc = JsonDocument.Parse(raw);
-                return doc.RootElement.ValueKind == JsonValueKind.String ? doc.RootElement.GetString() : null;
-            }
-            catch
-            {
-                return null;
             }
         }
 

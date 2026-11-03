@@ -142,12 +142,28 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             if (iconBytes is not { Length: > 0 })
             {
                 _topBarIconPath = null;
+                _topBarIconTheme = null;
                 PublishTopBarCenter();
                 return;
             }
 
+            // 顶栏实际生效的主题：自适应栏色把顶栏局部刷成浅色时这里就是 Light，
+            // 跟系统/侧边栏那份未必一样 —— 站点图标要跟着顶栏那格底色走。
+            ElementTheme topBarTheme = TopAppBarService.GetActualTheme();
+
             try
             {
+                // ⭐ 记录里是位图、旁路却存着 SVG 原件 ⇒ 改用原件画。
+                //    位图那层颜色是抓图那一刻的主题烘死的（老内核那批干脆是全白），
+                //    跟顶栏此刻的主题对不对得上全凭运气；重画结果又不写回记录，
+                //    所以每次都得从原件现画 —— 侧边栏那条链在 SaveAsync 里做的是同一件事。
+                if (!WebAppIconCache.IsSvgContent(iconBytes) &&
+                    _currentShortcut?.Id is { Length: > 0 } masterId &&
+                    WebAppIconCache.TryGetIconSource(masterId) is { Length: > 0 } master)
+                {
+                    iconBytes = master;
+                }
+
                 // ⭐ 顶栏契约只认位图 Uri（BitmapCenterIcon），SVG 交过去必然解码失败 ——
                 //    顶栏图标就那么空着（临时目录里曾经攒下过 9 个 .svg，全是这么来的）。
                 //    先让专用渲染内核画成 PNG：既补上了位图，也顺带把 SVG 里的
@@ -161,7 +177,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     byte[]? png = await WebAppIconRasterizer.Instance.RasterizeSvgAsync(
                         iconBytes,
                         WebAppIconCache.CompactIconSize,
-                        TopAppBarService.GetActualTheme() == ElementTheme.Dark);
+                        topBarTheme == ElementTheme.Dark);
 
                     if (png is { Length: > 0 })
                     {
@@ -201,14 +217,38 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 }
 
                 _topBarIconPath = path;
+                _topBarIconTheme = topBarTheme;
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[PublishShortcutIconAsync] 图标落盘失败: {ex.Message}");
                 _topBarIconPath = null;
+                _topBarIconTheme = null;
             }
 
             PublishTopBarCenter();
+        }
+
+        /// <summary>
+        /// 顶栏局部主题变了就把站点图标按新主题重发一张。
+        ///
+        /// 为什么单要这一道：自适应栏色只写 <c>TopAppBarService.SetTheme</c>，
+        /// 顶栏的文字 / FontIcon 靠主题资源自动跟上，可中心那枚图标是
+        /// <c>TopBarCenterIcon.OfBitmap(路径)</c> —— 一张烘死色的 PNG，资源管不到它。
+        /// 而系统的 <c>ActualThemeChanged</c> 更不会触发：整页主题没动，动的只是顶栏那棵子树。
+        /// 于是「系统深色 + 网页白底」这一格就停在深色那版白图标上，白底白图。
+        ///
+        /// 取色回调会随导航 / 滚动反复进来，所以先比主题、一样就直接走 —— 不然每次取色都要重画一张。
+        /// </summary>
+        private void RepublishShortcutIconForTopBarTheme()
+        {
+            if (_currentShortcut?.IconBytes is not { Length: > 0 } iconBytes ||
+                _topBarIconTheme == TopAppBarService.GetActualTheme())
+            {
+                return;
+            }
+
+            _ = PublishShortcutIconAsync(iconBytes);
         }
 
         /// <summary>

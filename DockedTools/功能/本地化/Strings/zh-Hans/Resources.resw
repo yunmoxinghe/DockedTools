@@ -1577,8 +1577,11 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   <data name="SettingsPage_LinkOpenBehaviorSystemBrowser.Content" xml:space="preserve">
     <value>默认浏览器</value>
   </data>
-  <data name="SettingsPage_LinkOpenBehaviorWebViewWindow.Content" xml:space="preserve">
-    <value>WebView窗口</value>
+  <data name="SettingsPage_LinkOpenBehaviorSamePage.Content" xml:space="preserve">
+    <value>本页打开</value>
+  </data>
+  <data name="SettingsPage_LinkOpenBehaviorNewWindow.Content" xml:space="preserve">
+    <value>新窗口打开</value>
   </data>
   <!-- 链接打开询问对话框 -->
   <data name="LinkOpen_AskDialog_Title" xml:space="preserve">
@@ -1595,8 +1598,14 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   <data name="LinkOpen_SystemBrowser" xml:space="preserve">
     <value>系统浏览器</value>
   </data>
-  <data name="LinkOpen_WebViewWindow" xml:space="preserve">
-    <value>当前窗口</value>
+  <data name="LinkOpen_SamePage" xml:space="preserve">
+    <value>本页打开</value>
+  </data>
+  <data name="LinkOpen_NewWindow" xml:space="preserve">
+    <value>新窗口打开</value>
+  </data>
+  <data name="LinkOpen_Confirm" xml:space="preserve">
+    <value>打开</value>
   </data>
   <data name="LinkOpen_Cancel" xml:space="preserve">
     <value>取消</value>

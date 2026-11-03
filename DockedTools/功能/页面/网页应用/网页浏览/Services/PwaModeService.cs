@@ -5,6 +5,10 @@ using System;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using Windows.Foundation;
+// ⚠️ 上面这个 using 是必需的，别删：WebView2 的 .NET projection 对「脚本注入」与「CDP 调用」
+//    保留了 WinRT 的 IAsyncOperation<string>（不像某些 API 会被投影成 Task）——
+//    改签名时以编译器为准，官方文档里那个 Task<string> 的签名是泛泛的 API 列表，未必对应
+//    本工程实际引用的那一版元数据（2026-10-18 被 CS0266 当面纠正过一次）。
 
 namespace DockedTools.Features.Pages.WebApp.Browser.Services;
 
@@ -483,6 +487,52 @@ public static class PwaModeService
         PwaDeviceProfile profile = ExperimentalSettings.PwaProfile;
         PwaCoreState state = StateOf(core);
 
+        // ================================================================
+        // ⭐⭐ 关模式的短路：没有任何东西要清理时，一步都不走（2026-10-18 加）
+        // ================================================================
+        //
+        // 【为什么必须有这道闸】
+        // 关模式时下面那两条 CDP 调用的目的**只剩副作用**：
+        //   · Emulation.setUserAgentOverride —— 写回的是 state.DefaultUserAgent，
+        //     而本服务全程没碰过 core.Settings.UserAgent，写回去的就是原值，纯空转；
+        //   · Emulation.setTouchEmulationEnabled → false —— 但此刻 shimOp 必然是 null
+        //     （脚本从没挂过，StartShim 在 !enabled 分支直接 RemoveShim 后返回 null），
+        //     没有注入过的东西就不需要「取消触摸」。
+        // 也就是说：一个从没开过 PWA 的内核，关模式时这两次跨进程 CDP 往返 100% 无用。
+        //
+        // 【为什么它会拖慢页面打开 —— 「老是无响应」的最可疑源头】
+        // CallDevToolsProtocolMethodAsync 与 AddScriptToExecuteOnDocumentCreatedAsync 都是
+        // 跨进程 COM 调用，返回 IAsyncOperation<string>，完成通知要靠 UI 线程泵消息送进来。
+        // 浏览器进程正忙（首屏加载、渲染进程起不来）时这个往返会拖很久，而它发生在
+        // 【首次导航之前】的必经之路上 —— 页面因此迟迟发不出去，用户看到的就是「点开没反应」。
+        // 实测（app.log 2026-10-18）：当天 18 次 PWA 下发、4 次 UI 线程冻结，每次冻结前必然
+        // 紧跟一次下发，间隔稳定在 8~12 秒；其中 18 次全是 PWA 模式 = False（用户根本没开）。
+        //
+        // ⚠️ 「冻结」与「下发」目前只是时间相关，因果尚未坐实 —— 要定死需要冻结瞬间的
+        //    主线程栈（CrashDumps 下的 dump + cdb）。这条短路是确定无风险的净收益，先落地；
+        //    至于 UI 线程到底是被同步 COM 调用占住、还是在等这条往返的回包，
+        //    得先拿到栈才能定，不在这里猜。
+        //
+        // 【为什么短路是安全的，不会漏掉该清理的内核】
+        // 判断依据是 per-core 的真实状态（ShimId / HeaderHookInstalled），不是全局开关：
+        //   · 开过 PWA 又关掉的 core → ShimId 非 null 或 HeaderHookInstalled 为 true
+        //     → 不短路，照旧走完整清理（StartShim 会 RemoveShim，两条 CDP 恢复现场）；
+        //   · 清理完成后这三个状态位都会归零，下次再进来才轮到短路。
+        // 所以这个闸是**幂等**的：反复开关 PWA，每一轮都恰好清理一次，绝不漏、绝不多做。
+        //
+        // 【CDP override 会不会在别的内核上残留，从而让这里漏判】
+        // 不会。Emulation.setUserAgentOverride 落在 blink::InspectorEmulationAgent 上，
+        // 是 per-frame 状态（见本类头注释第 39~46 行），frame 换了就没有了 ——
+        // LRU 回收掉旧内核、新内核开成新 frame 那一刻，override 自然不复存在。
+        if (!enabled && state.ShimId is null && !state.HeaderHookInstalled)
+        {
+            // 刻意只落 Info 而不落 Warning：这是正常的「本来就不需要做」，
+            // 而它在排查时的价值很高 —— 日志里出现「跳过」就等于明确告诉我们
+            // 这个内核没经历任何 CDP 往返，不会有人再去怀疑这条路径。
+            LogService.Info(LogModule, "PWA 模式 = False（内核上无脚本、无请求头钩子）→ 跳过 CDP 下发");
+            return false;
+        }
+
         // ⚠️ 必须在任何覆盖之前读。本服务全程不写 Settings.UserAgent，所以这里拿到的
         //    永远是 Edge 默认 UA —— 关模式时靠它显式写回。官方明写了传空字符串
         //    不会恢复默认（"the User Agent will not be updated"）。
@@ -898,7 +948,9 @@ public static class PwaModeService
 
     /// <summary>
     /// 收一次 CDP 调用的成败。
-    /// 这里不碰任何 core 对象，所以续跑在哪个线程都不影响线程亲和性了。
+    ///
+    /// <para>这里不碰任何 core 对象，所以续跑在哪个线程都不影响线程亲和性了 ——
+    /// 恰恰因为这一点，下面那个 await 才被允许存在。</para>
     /// </summary>
     private static async Task<bool> CompleteCdpCallAsync(IAsyncOperation<string>? op, string method)
     {

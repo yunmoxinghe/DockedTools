@@ -520,15 +520,32 @@ namespace DockedTools.Features.Tray
 
                 if (behavior == DockedTools.Features.Pages.Settings.TrayCloseWindowBehavior.RestartToTrayOnly)
                 {
-                    // 重启到仅托盘
+                    // 重启到仅托盘。
+                    //
+                    // ⚠️ 走 App.RestartFromTrayThread 而不是 AppRestartService：
+                    // 本方法是从托盘独立 UI 线程投递回主线程执行的，正常情况下两者都行，
+                    // 但主线程卡死时「关闭窗口」根本派发不出去；而万一派发出去了、
+                    // 主线程又在中途卡住，AppRestartService 的优雅退出链会挂死。
+                    // RestartFromTrayThread 不依赖消息泵，是唯一在两种情况下都成立的那条。
                     System.Diagnostics.Debug.WriteLine("[TrayIconManager] Restarting to tray only...");
-                    DockedTools.功能.统一调用.AppRestartService.RestartWithArgs("--restart", "--tray-only");
+                    DockedTools.App.RestartFromTrayThread("--restart --tray-only");
                 }
                 else
                 {
                     // 直接销毁窗口（默认行为）
                     if (IsWindowValid())
                     {
+                        // ⭐ 关掉之前先隐藏窗口、再归还原生标题栏：
+                        // ExtendsContentIntoTitleBar 的窗口在 Close() 时不会执行
+                        // AppWindowTitleBar::UninitializeTitleBarNative，
+                        // 每关一次漏一份 CTitleBar + 它自带的 DComp device（约 2~3 MB、35 个句柄），
+                        // 见 microsoft-ui-xaml issue #12210。顺序必须是 隐藏 → false → ResetToDefault() → Close()，
+                        // 隐藏放在最前是为了盖住 ResetToDefault() 露出标准标题栏那一帧的闪。
+                        // 正常按 X 会走 AppWindow.Closing 里的同一个动作，这里是给"程序化 Close"这条路
+                        // 补的保险 —— 方法幂等，重复调不多花钱。
+                        DockedTools.Features.MainWindow.Appearance.TitleBarService
+                            .HideAndReleaseNativeTitleBar(_mainWindow);
+
                         _mainWindow!.Close();
                         _mainWindow = null;
                         System.Diagnostics.Debug.WriteLine("[TrayIconManager] Main window closed and released");

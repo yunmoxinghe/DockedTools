@@ -24,7 +24,7 @@ using SettingsCard = CommunityToolkit.WinUI.Controls.SettingsCard;
 
 namespace DockedTools.Features.Pages.Home
 {
-    public sealed partial class HomePage : Page
+    public sealed partial class HomePage : Page, ICloseReleasable
     {
         private readonly 智能标题 _智能标题 = new();
         private const double MinResponsiveWidth = 320;
@@ -89,6 +89,21 @@ namespace DockedTools.Features.Pages.Home
             WebAppUpdateService.UpdateCompleted -= OnWebAppUpdated;
 
             ActualThemeChanged -= OnActualThemeChanged;
+        }
+
+        /// <summary>
+        /// 出缓存 / 主窗口关闭时的彻底放手：本页面挂在静态事件上的那几条订阅必须摘掉。
+        ///
+        /// 【为什么不能只靠 Unloaded】
+        /// 退订原来只写在 Unloaded 里。窗口关闭那一拍 Unloaded 不保证触发
+        /// （见 <see cref="ICloseReleasable"/>），于是这座主页会被 WebAppEventBus /
+        /// WebAppDeletionService / WebAppUpdateService 三个静态事件源钉住，
+        /// 连带它 Loaded 时灌进来的整份快捷方式列表和图标。
+        /// <see cref="UnsubscribeEvents"/> 本身带 _eventsSubscribed 标志，重复调用是空操作。
+        /// </summary>
+        public void ReleaseOnClose()
+        {
+            UnsubscribeEvents();
         }
 
         protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
@@ -248,7 +263,7 @@ namespace DockedTools.Features.Pages.Home
             //
             //    踩过的坑一：await 写在构建循环里 ⇒ 每取到一张就 Add 一张，第一张孤零零先蹦。
             //    踩过的坑二：改成 Task.WhenAll 落盘 + Uri 解码 ⇒ 它必须等最慢那张，
-            //    而且 SaveAsync 命中「按主题重画」时还要扛渲染内核冷启动（实测 1.4s+）。
+            //    而且 SaveAsync 命中「按主题重画」时还要扛当时那套 WebView2 光栅内核的冷启动（实测 1.4s+）。
             //    踩过的坑三：两阶段（先出整列、后台逐张重画）⇒ 被重画的那张就是换得最晚的那张。
             //    踩过的坑四：只读磁盘缓存 + 每张自己走 Uri 异步解码 ⇒ 整列 Add 完 +114ms，
             //    最后一张就绪 +865ms —— 中间 750ms 卡片全是空图标位，然后一张张亮起来，

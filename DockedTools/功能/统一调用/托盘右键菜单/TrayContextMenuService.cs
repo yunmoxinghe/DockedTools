@@ -319,12 +319,23 @@ public static partial class TrayContextMenuService
 
     /// <summary>
     /// 重启应用
+    ///
+    /// 【为什么不走 AppRestartService】
+    /// 菜单项是在托盘的**独立 UI 线程**上点出来的，而 AppRestartService 最后要调
+    /// App.ExitApplicationPublic() → ShutdownUiResources()，那几步必须在 UI 线程上关
+    /// XAML 窗口。主线程一旦卡死，这条路径必然挂住 —— 表现是「新实例起来了，旧进程永远不退出」。
+    /// 而这恰恰是用户最需要「重启」的时刻：主线程已经不动了。
+    ///
+    /// App.RestartFromTrayThread 绕开了整条 UI 依赖链：唤起新实例 → 交 Mutex → 硬终止自己。
+    /// 主线程健康时它同样工作正常，所以不需要分「健康 / 卡死」两条分支。
     /// </summary>
     private static void OnRestart(object sender, RoutedEventArgs e)
     {
         try
         {
-            AppRestartService.Restart();
+            // --tray-only：新实例只进托盘不弹窗口。托盘用户在重启后多半是要接着用网页应用的，
+            // 让应用自己记着上次的页面并在需要时弹窗，比这里替他决定更合适。
+            DockedTools.App.RestartFromTrayThread("--restart --tray-only");
         }
         catch (Exception ex)
         {

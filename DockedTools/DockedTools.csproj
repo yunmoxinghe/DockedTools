@@ -91,6 +91,22 @@
     <PackageReference Include="WinUIEx" Version="2.9.3" />
 
     <!--
+      站点图标光栅化引擎（Svg.Skia 源码集成，2026-10-26）。
+      位置 第三方源码\Svg.Skia：上游 https://github.com/wieslawsoltes/Svg.Skia
+      commit 7910666415a9（MIT）只取了渲染必需的 6 个工程 + 生成器 + SVG 源基座，
+      并带 DockedTools 自有补丁 —— SvgDocumentLoadOptions.PrefersColorScheme
+      强制 media (prefers-color-scheme) 求值（上游把未知 feature 一律判不匹配）。
+      补丁说明打在两个文件头部：
+        第三方源码\Svg.Skia\src\Svg.Custom\Svg2\SvgDocumentLoadOptions.cs
+        第三方源码\Svg.Skia\src\Svg.Custom\Compatibility\SvgCssCompatibilityProcessor.cs
+      替代的是原来的「常驻隐藏 WebView2 屏外光栅内核」—— 省一整条离屏 renderer
+      的内存与冷启动，也根治了 Profile.PreferredColorScheme 钉死全局网页主题的老 bug。
+      ⚠️ 不要随手升级这份源码：升级 = 重放补丁 + 重跑 .tmp-svgskia-fixture 的
+      深浅双渲染对比（夹具里有 chatgpt 型 media 样本与 Chromium 落盘真值）。
+    -->
+    <ProjectReference Include="..\第三方源码\Svg.Skia\src\Svg.Skia\Svg.Skia.csproj" />
+
+    <!--
       浏览器扩展桥接服务需要 Kestrel + WebSocket 中间件（.NET 的 HttpListener 没有 AcceptWebSocketAsync）。
       ⚠️ 这会引入 ASP.NET Core 运行时，Native AOT 发布体积会显著变大。
       若 AOT 发布阶段出问题，备选是换成手写 TcpListener + RFC6455 实现，BridgeSession.HandleAsync 接口不用动。

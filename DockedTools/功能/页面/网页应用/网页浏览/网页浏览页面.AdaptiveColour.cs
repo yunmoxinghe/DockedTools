@@ -19,7 +19,9 @@ namespace DockedTools.Features.Pages.WebApp.Browser
     /// 顶栏文字/图标怎么跟着变：Reactor 版 AppTopBar 自带局部主题
     /// （TopAppBarService.SetTheme → AppTopBar 根元素 RequestedTheme），
     /// 子树里的文字/图标/输入框前景色全部靠主题资源跟随，所以本模块不用下发前景画刷，
-    /// 只按取到的亮暗切主题即可。写之前先用 IsWritingTarget 确认顶栏还归本页 ——
+    /// 只按取到的亮暗切主题即可。唯一的例外是中心那枚站点图标 —— 它是烘死色的位图 Uri，
+    /// 主题资源改不动它，切完主题要补一发 RepublishShortcutIconForTopBarTheme。
+    /// 写之前先用 IsWritingTarget 确认顶栏还归本页 ——
     /// 取色回调（常驻脚本回传、导航完成）完全可能在本页已经切走之后才到。
     ///
     /// 取色时机对齐上游 dynamic 模式：注入常驻脚本，由 click / resize / scroll（捕获阶段）/ visibilitychange、
@@ -825,6 +827,11 @@ namespace DockedTools.Features.Pages.WebApp.Browser
             if (TopAppBarService.IsWritingTarget(this))
             {
                 TopAppBarService.SetTheme(theme);
+
+                // ⭐ 中心那枚站点图标是例外：它是烘死色的位图 Uri，不吃主题资源，
+                //    而系统 ActualThemeChanged 又不会为「只有顶栏子树换了 RequestedTheme」触发。
+                //    不在这补一发，深色系统下的白网页就是白底白图标。
+                RepublishShortcutIconForTopBarTheme();
             }
 
             if (IsBottomBarHostOwner())

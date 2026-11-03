@@ -127,6 +127,40 @@ public static class TopAppBarService
     }
 
     /// <summary>
+    /// 【窗口关闭专用】与 <see cref="Register"/> 对称地放手一个内容区实例。
+    ///
+    /// 【为什么必须】
+    /// <see cref="_contentArea"/> 是静态字段，<see cref="Register"/> 又在内容区自己身上
+    /// 挂了一条静态→实例的订阅（TopBarDoubleTapped）。这两条不断，主窗口关掉之后
+    /// 整座 ContentArea 树 —— 连同它 LRU 里最多 20 个缓存页和各自的 WebView2 ——
+    /// 就都被这里钉住，回收不了；下一次开窗再 Register 一份，等于每开关一次漏一座。
+    ///
+    /// 【只认自己】
+    /// 传进来的不是当前登记的那个实例时直接返回：托盘"关闭窗口"之后可能马上又建了新内容区，
+    /// 迟到的这一次放手不能把新人抹掉。
+    /// </summary>
+    public static void Unregister(MainWindowContent.ContentArea.ContentArea contentArea)
+    {
+        if (!ReferenceEquals(_contentArea, contentArea))
+        {
+            return;
+        }
+
+        contentArea.TopBarDoubleTapped -= OnTopBarDoubleTapped;
+
+        // 通道也只认自己那条：新内容区的通道不能被子孙后代的收尾给Detach掉。
+        if (ReferenceEquals(_channel, contentArea.TopBarChannel))
+        {
+            Scope(_foregroundPage).Detach();
+            _channel = null;
+        }
+
+        _foregroundPage = null;
+        _writingPage = null;
+        _contentArea = null;
+    }
+
+    /// <summary>
     /// 【导航层专用】切换前台页面。
     /// 先让新页上台（避免出现没有 Owner 的空档导致顶栏闪成 Empty），
     /// 再把旧页摘下来 —— 此时旧页已不在栈顶，摘除不会伤到任何人。
@@ -465,11 +499,21 @@ public static class TopAppBarService
     public static ElementTheme GetActualTheme()
     {
         var requested = GetRequestedTheme();
-        if (requested != ElementTheme.Default)
-        {
-            return requested;
-        }
+        return requested != ElementTheme.Default ? requested : GetSystemTheme();
+    }
 
+    /// <summary>
+    /// 系统当前的亮/暗 —— 只看系统，不含应用内任何覆盖（顶栏 ThemeMode 等）。
+    ///
+    /// 用途：图标链路（缓存文件名主题标记、单色染色、光栅化）在【调用方没显式
+    /// 指定容器主题】时的兜底来源。以前兜底吃的是 <see cref="GetActualTheme"/>
+    /// （含顶栏页面级覆盖），顶栏强制深色时侧边栏/主页会跟着拿到白图标 ——
+    /// 浅底白图直接隐形。顶栏自己的图标仍在调用点显式传
+    /// <see cref="GetActualTheme"/>，跟顶栏走，不受这里影响。
+    /// 判定手段不变：UISettings 背景色亮度。
+    /// </summary>
+    public static ElementTheme GetSystemTheme()
+    {
         var background = new Windows.UI.ViewManagement.UISettings()
             .GetColorValue(Windows.UI.ViewManagement.UIColorType.Background);
         return (background.R * 299 + background.G * 587 + background.B * 114) / 1000 < 128

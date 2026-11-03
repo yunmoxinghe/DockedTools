@@ -671,8 +671,13 @@ namespace DockedTools.Features.Pages.Settings
         SystemBrowser = 1,
 
         /// <summary>
-        /// 在 WebView 窗口内打开
+        /// 在本页打开：拦下新窗口请求，让当前 WebView 自己导航过去
         /// </summary>
-        WebViewWindow = 2
+        SamePage = 2,
+
+        /// <summary>
+        /// 在新窗口打开：完全不拦下请求，交给 WebView2 弹它自己的窗口
+        /// </summary>
+        NewWindow = 3
     }
 }

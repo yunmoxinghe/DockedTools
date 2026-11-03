@@ -1577,8 +1577,11 @@ Error Message: {1}</value>
   <data name="SettingsPage_LinkOpenBehaviorSystemBrowser.Content" xml:space="preserve">
     <value>System Browser</value>
   </data>
-  <data name="SettingsPage_LinkOpenBehaviorWebViewWindow.Content" xml:space="preserve">
-    <value>WebView Window</value>
+  <data name="SettingsPage_LinkOpenBehaviorSamePage.Content" xml:space="preserve">
+    <value>Open in This Page</value>
+  </data>
+  <data name="SettingsPage_LinkOpenBehaviorNewWindow.Content" xml:space="preserve">
+    <value>Open in New Window</value>
   </data>
   <!-- Link Open Ask Dialog -->
   <data name="LinkOpen_AskDialog_Title" xml:space="preserve">
@@ -1595,8 +1598,14 @@ Error Message: {1}</value>
   <data name="LinkOpen_SystemBrowser" xml:space="preserve">
     <value>System Browser</value>
   </data>
-  <data name="LinkOpen_WebViewWindow" xml:space="preserve">
-    <value>Current Window</value>
+  <data name="LinkOpen_SamePage" xml:space="preserve">
+    <value>This Page</value>
+  </data>
+  <data name="LinkOpen_NewWindow" xml:space="preserve">
+    <value>New Window</value>
+  </data>
+  <data name="LinkOpen_Confirm" xml:space="preserve">
+    <value>Open</value>
   </data>
   <data name="LinkOpen_Cancel" xml:space="preserve">
     <value>Cancel</value>

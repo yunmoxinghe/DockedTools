@@ -428,7 +428,7 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         ///    主页却优先用卡片档那张 32×32 PNG —— 主页反而比侧边栏糊。
         ///    现在卡片档只服务「矢量 → 48px 高清位图」这一件事，位图源直接复用通用档。
         ///
-        /// ⚠️ 只在后台调用：要等渲染内核（冷启动 ~1.4s）。
+        /// ⚠️ 只在后台调用：Svg.Skia 在调用线程上同步画，成批刷新别压在 UI 线程。
         /// </summary>
         public static async Task<string?> EnsureCardAsync(string appId, byte[]? fallbackBytes) =>
             await EnsureCardAsync(appId, fallbackBytes, null);
@@ -526,17 +526,20 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         }
 
         /// <summary>
-        /// 该按哪个主题处理图标。传了就以传的为准，没传才退回顶栏那份。
+        /// 该按哪个主题处理图标：显式传了容器主题就以传的为准（顶栏被自适应栏色
+        /// 强制深色时，它的图标必须跟顶栏走，深底黑图/浅底白图都是隐形）；
+        /// 没传才兜底 —— 兜底一律用【系统主题】。
         ///
-        /// 为什么要有这一层：同一个图标会落在好几个容器里，而容器的实际主题可以不一样
-        /// （顶栏是页面级的 <c>TopBarPageScope.ThemeMode</c>，侧边栏跟的是元素自己的
-        /// <c>ActualTheme</c>）。一律按顶栏算的话，顶栏设深色时侧边栏拿到的是白图标，
-        /// 浅底白图直接隐形。
+        /// ⚠️ 兜底以前是 <c>TopAppBarService.GetActualTheme()</c>（含顶栏页面级
+        /// <c>ThemeMode</c> 覆盖），于是顶栏强制深色时，侧边栏/主页这些不传主题的
+        /// 调用方也跟着拿到深色版白图标 —— 浅底白图直接隐形，这就是
+        /// 「浅色模式下渲染浅色图标」的源头。顶栏自己的容器主题不受影响：
+        /// 它在调用点显式传 <c>GetActualTheme()</c>，走的是上面"以传的为准"那条分支。
         /// </summary>
         private static ElementTheme ResolveTheme(ElementTheme? theme) =>
             theme is ElementTheme.Dark or ElementTheme.Light
                 ? theme.Value
-                : TopAppBarService.GetActualTheme();
+                : TopAppBarService.GetSystemTheme();
 
         /// <summary>
         /// 把位图归一化成一张【边长不超过 <paramref name="size"/> 的 PNG】。
@@ -826,8 +829,10 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         /// 把光栅化那张图的 SVG 原件旁路存一份。
         ///
         /// 为什么非要留它：光栅化的产物是 PNG，<see cref="ApplyMonochromeTheme"/> 改不动位图；
-        /// 而 PNG 里那层颜色是 Chromium 抓图那一刻按主题求出来的，
-        /// 之后换主题只能「拿原件重画一次」，没有原件就永远定死在那个颜色上了。
+        /// 而 PNG 里那层颜色是渲染内核按落盘那一刻的主题求出来的（进程内 Svg.Skia，
+        /// 再往前是老 Chromium 内核抓图那一刻），之后换主题只能「拿原件重画一次」，
+        /// 没有原件就永远定死在那个颜色上了 —— <see cref="InspectBitmapSlot"/> 判据②
+        /// 治的就是「原件在、槽位却被一张无主题的旧快照占着」。
         /// </summary>
         public static void SaveIconSource(string? appId, byte[]? svgBytes)
         {
@@ -901,30 +906,45 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         /// 让专用渲染内核按当前主题重新画一遍，出来的 PNG 字节自然不同，
         /// 内容哈希变 ⇒ 文件名（本身就带主题标记）变 ⇒ ImageIcon 重新解码，颜色就对了。
         ///
+        /// ⭐ 槽里已经躺着「本主题重画好的那张」时，直接把那条路径交回去、不走 <see cref="Save"/>：
+        ///    记录里的 IconBytes 永远是无主题的那张旧快照（重画结果不写回记录），
+        ///    走 Save 就是拿快照的哈希新建一份、再把重画版当「同主题旧哈希」删掉 ——
+        ///    白重画不说，下次判据又被这张快照翻回去，图标在两个主题之间来回跳。
+        ///
         /// ⚠️ 调用点必须是不阻塞 UI 线程的异步上下文：
-        ///    内部要 await 渲染内核，而内核初始化会往 UI 线程排队。
+        ///    内部要 await 渲染器，而它在调用线程上同步画（全局一把锁）。
         /// </summary>
         public static async Task<string?> SaveAsync(string appId, byte[]? bytes) =>
             await SaveAsync(appId, bytes, null);
 
-        /// <summary>按指定主题落盘（会先判断要不要拿原件重画）；不指定就跟顶栏那份一致</summary>
+        /// <summary>按指定主题落盘（会先判断要不要拿原件重画）；不指定就跟系统当前亮暗一致</summary>
         public static async Task<string?> SaveAsync(string appId, byte[]? bytes, ElementTheme? theme)
         {
+            ElementTheme resolvedTheme = ResolveTheme(theme);
+
             try
             {
-                if (bytes is { Length: > 0 } &&
-                    !IsSvgContent(bytes) &&
-                    NeedsRepaint(appId, out byte[]? source) &&
-                    source is { Length: > 0 })
+                if (bytes is { Length: > 0 } && !IsSvgContent(bytes))
                 {
-                    byte[]? repaint = await WebAppIconRasterizer.Instance.RasterizeSvgAsync(
-                        source,
-                        WebAppIconRasterizer.DefaultRasterSize,
-                        ResolveTheme(theme) == ElementTheme.Dark);
+                    BitmapSlot slot = InspectBitmapSlot(appId, bytes, resolvedTheme, out byte[]? master, out string? cached);
 
-                    if (repaint is { Length: > 0 })
+                    // 重画好的成品就在槽里，别让手上这张快照再占一次位
+                    if (slot == BitmapSlot.Reuse)
                     {
-                        bytes = repaint;
+                        return cached;
+                    }
+
+                    if (slot == BitmapSlot.Repaint && master is { Length: > 0 })
+                    {
+                        byte[]? repaint = await WebAppIconRasterizer.Instance.RasterizeSvgAsync(
+                            master,
+                            WebAppIconRasterizer.DefaultRasterSize,
+                            resolvedTheme == ElementTheme.Dark);
+
+                        if (repaint is { Length: > 0 })
+                        {
+                            bytes = repaint;
+                        }
                     }
                 }
             }
@@ -936,15 +956,89 @@ namespace DockedTools.Features.Pages.WebApp.Shared
             return Save(appId, bytes, theme);
         }
 
-        /// <summary>
-        /// 这个 appId 的图标需不需要按当前主题重画。同步判断，只比文件时间，不做任何 IO 以外的活。
-        ///
-        /// 给「先出整列、再补画」那条路用：调用方拿它决定要不要给这张图排一次后台重画。
-        /// </summary>
-        public static bool NeedsThemeRepaint(string appId) => NeedsRepaint(appId, out _);
+        /// <summary>位图图标在「当前主题的缓存槽」里该走哪条路</summary>
+        private enum BitmapSlot
+        {
+            /// <summary>没有 SVG 原件，无从重画 —— 原样落盘</summary>
+            NoMaster,
 
-        /// <summary>当前主题这一版的缓存文件路径；磁盘上没有就返回 null</summary>
-        private static string? TryGetCurrentThemeCachePath(string appId)
+            /// <summary>槽里那张就是上次重画好的成品，把它的路径直接交回去</summary>
+            Reuse,
+
+            /// <summary>该拿原件按当前主题重画一张</summary>
+            Repaint,
+        }
+
+        /// <summary>
+        /// 判「这个 appId 的位图该不该拿 SVG 原件重画」（原件与现槽路径一并从 <c>out</c> 带出来，省一次读盘）。
+        ///
+        /// 该重画的三种情形：
+        ///   ① 这个主题的槽是空的 —— 换主题时文件名里的主题标记对不上，正好命中；
+        ///   ② 槽里那张跟手上这份<b>内容一字不差</b> —— 它是无主题的旧快照占的位，
+        ///      从来没按当前主题重画过。<b>光比时间看不出这一条</b>：老内核烘死的那张全白 PNG
+        ///      落盘比 SVG 原件还新，只认 mtime 的话浅色槽就被它永久占着，浅色模式永远隐形
+        ///      （实测 <c>-l-4AB495780A430933.png</c> 与记录里的 IconBytes 同一份字节）；
+        ///   ③ 原件比缓存新 —— 站点换了图标，重抓的 SVG 已经覆盖上去，槽里那张还是旧原件画的。
+        ///
+        /// 三条都不满足 ⇒ 槽里那张既不是快照、也不比原件旧，只能是上次重画的成品 ⇒ <see cref="BitmapSlot.Reuse"/>。
+        /// 这里同时是省开销的闸门 —— 判定通过时启动 / 重建侧边栏不必把每个图标都送进渲染器
+        /// （每张都要解析 SVG 再画，而且全局串行）。
+        /// </summary>
+        private static BitmapSlot InspectBitmapSlot(
+            string appId, byte[] snapshot, ElementTheme theme, out byte[]? master, out string? cached)
+        {
+            master = TryGetIconSource(appId);
+            cached = null;
+
+            if (master is not { Length: > 0 })
+            {
+                return BitmapSlot.NoMaster;
+            }
+
+            cached = TryGetThemeCachePath(appId, ThemeTagFor(theme));
+
+            if (cached is null || ContentsAreSame(cached, snapshot) || IsSourceNewerThanCached(appId, cached))
+            {
+                return BitmapSlot.Repaint;
+            }
+
+            return BitmapSlot.Reuse;
+        }
+
+        /// <summary>槽里那张和手上这份是不是同一字节序列（位图过不了 <see cref="ApplyMonochromeTheme"/>，落盘的就是原样）</summary>
+        private static bool ContentsAreSame(string path, byte[] bytes)
+        {
+            try
+            {
+                return File.ReadAllBytes(path).AsSpan().SequenceEqual(bytes);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[WebAppIconCache] 比对缓存内容失败: {path}, {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// SVG 原件是否比缓存那张新。
+        /// <see cref="SaveIconSource"/> 是「内容没变就不重写」，所以原件 mtime 变了就等于原件真换了。
+        /// </summary>
+        private static bool IsSourceNewerThanCached(string appId, string cachedPath)
+        {
+            try
+            {
+                string sourcePath = Path.Combine(CacheDirectory, SanitizeId(appId) + SourceSuffix);
+                return File.GetLastWriteTimeUtc(sourcePath) > File.GetLastWriteTimeUtc(cachedPath);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[WebAppIconCache] 比对原件时间失败: {appId}, {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>指定主题这一版的缓存文件路径；磁盘上没有就返回 null</summary>
+        private static string? TryGetThemeCachePath(string appId, string themeTag)
         {
             try
             {
@@ -954,68 +1048,22 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                     return null;
                 }
 
-                // EnumerateFiles 吐的是路径字符串（不是 FileInfo），没有 .Name —— 直接拿尾巴比后缀
-                return Directory.EnumerateFiles(directory, SanitizeId(appId) + "-" + ThemeTag + "-*")
-                    .FirstOrDefault(f => !f.EndsWith(SourceSuffix, StringComparison.OrdinalIgnoreCase));
+                string prefix = SanitizeId(appId) + "-" + themeTag + "-";
+
+                // 卡片档是另一套尺寸、原件是矢量旁路，都不算「当前主题的通用档」。
+                // 多份时按写入时间取最新：文件名里那段哈希是随机十六进制，按名字排序没有意义。
+                return new DirectoryInfo(directory)
+                    .EnumerateFiles(prefix + "*")
+                    .Where(f => !f.Name.EndsWith(SourceSuffix, StringComparison.OrdinalIgnoreCase) &&
+                                !f.Name.Contains(CardSegment, StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(f => f.LastWriteTimeUtc)
+                    .FirstOrDefault()?.FullName;
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[WebAppIconCache] 主题缓存探测失败: {appId}, {ex.Message}");
                 return null;
             }
-        }
-
-        /// <summary>
-        /// 要不要拿 SVG 原件重画一张（原件顺带从 <c>out</c> 带出来，省一次读盘）。
-        ///
-        /// 满足其一就重画：
-        ///   ① 磁盘上没有「当前主题这一版」—— 换主题时文件名里的主题标记对不上，正好命中；
-        ///   ② 原件比现有缓存新 —— 站点换了图标，重抓的 SVG 已经覆盖上去，
-        ///      而缓存里那张还是按旧原件画的。
-        ///
-        /// ⚠️ 以前只看 ①，于是「有缓存就永不重画」：站点改图标、甚至第一次光栅化失败
-        ///    留下的小图，都会被这份缓存一直供着，看着就是「图标不更新」。
-        ///    同时这里也是省开销的闸门 —— 都不满足时，启动 / 重建侧边栏不必把每个图标
-        ///    都送进渲染内核跑一遍（一次几百毫秒，串行）。
-        /// </summary>
-        private static bool NeedsRepaint(string appId, out byte[]? source)
-        {
-            source = null;
-
-            if (string.IsNullOrEmpty(appId))
-            {
-                return false;
-            }
-
-            byte[]? svg = TryGetIconSource(appId);
-            if (svg is not { Length: > 0 })
-            {
-                return false;
-            }
-
-            string? cached = TryGetCurrentThemeCachePath(appId);
-            if (cached is null)
-            {
-                source = svg;
-                return true;
-            }
-
-            try
-            {
-                // SaveIconSource 是「内容没变就不重写」，所以原件的 mtime 变了 = 原件真换了
-                string sourcePath = Path.Combine(CacheDirectory, SanitizeId(appId) + SourceSuffix);
-                if (File.GetLastWriteTimeUtc(sourcePath) > File.GetLastWriteTimeUtc(cached))
-                {
-                    source = svg;
-                    return true;
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[WebAppIconCache] 比对原件时间失败: {appId}, {ex.Message}");
-            }
-
-            return false;
         }
 
         /// <summary>深色主题下单色图标该用的颜色</summary>
@@ -1310,17 +1358,24 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         private const string SourceSuffix = "-source.svg";
 
         /// <summary>
-        /// 缓存文件名里带的主题标记（d=深色 / l=浅色）。
+        /// 把主题折成缓存文件名里那个单字母标记（d=深色 / l=浅色）。
         ///
         /// 为什么要掺进文件名：光栅化出来的图标是 PNG，<see cref="ApplyMonochromeTheme"/>
-        /// 只认矢量、改不动它 —— 而它里面那层颜色，是 Chromium 按抓图那一刻的主题，
+        /// 只认矢量、改不动它 —— 而它里面那层颜色，是渲染内核（现在是进程内 Svg.Skia，
+        /// 再往前是常驻隐藏的 WebView2）按落盘那一刻的主题，
         /// 拿 SVG 里 <c>@media (prefers-color-scheme)</c> 求出来的。主题换了但文件名不变的话，
         /// BitmapImage 会因为「同一个 Uri」直接复用旧解码结果，视觉上就是「切了主题图标不变色」。
         /// 把主题写进文件名 ⇒ 换主题必然换路径 ⇒ 必然重新加载。
+        ///
+        /// ⚠️ 调用方没显式给主题时（<see cref="ResolveTheme"/> 那一步的兜底）基准必须是
+        ///    【系统主题】而不是 <c>GetActualTheme()</c>（含顶栏覆盖）：
+        ///    这套通用档缓存是侧边栏 / 主页共用的，它们跟的是系统；
+        ///    按顶栏覆盖值算标记，顶栏强制深色时整份缓存会被判成"该画深色版"，
+        ///    浅色系统下侧边栏就拿到白图标（浅底白图隐形）。
+        ///    各容器主题不一样时（侧边栏跟系统、顶栏跟页面）交给调用方把自己那儿的主题传进来，
+        ///    <see cref="SaveAsync(string, byte[], System.Nullable{Microsoft.UI.Xaml.ElementTheme})"/>
+        ///    按它重画、并落到对应主题的桶里。
         /// </summary>
-        private static string ThemeTag => ThemeTagFor(TopAppBarService.GetActualTheme());
-
-        /// <summary>把主题折成文件名里那个单字母标记（d=深色 / l=浅色）</summary>
         private static string ThemeTagFor(ElementTheme theme) =>
             theme == ElementTheme.Dark ? "d" : "l";
 
