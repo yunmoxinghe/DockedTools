@@ -1604,6 +1604,12 @@ Error Message: {1}</value>
   <data name="LinkOpen_NewWindow" xml:space="preserve">
     <value>New Window</value>
   </data>
+  <data name="LinkOpen_CopyLink" xml:space="preserve">
+    <value>Copy Link</value>
+  </data>
+  <data name="LinkOpen_EditDefault" xml:space="preserve">
+    <value>Change Default</value>
+  </data>
   <data name="LinkOpen_Confirm" xml:space="preserve">
     <value>Open</value>
   </data>

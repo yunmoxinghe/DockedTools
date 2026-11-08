@@ -25,6 +25,26 @@ namespace DockedTools.Features.Tray
         private static readonly Guid TRAY_ICON_GUID = GenerateTrayIconGuid();
 
         /// <summary>
+        /// shell 在通知区域**每次被建起来**时广播给全体顶层窗口的消息号。
+        ///
+        /// 【为什么必须接】
+        /// 图标是登记在 explorer 那个 TrayWnd 上的，TrayWnd 一没，登记全跟着没 ——
+        /// 我们的进程和 HWND 都活得好好的，但托盘上就是看不到图标，而且不会自己回来。
+        /// 触发场景有两类，都和用户报的「有时候图标失踪」对上：
+        ///   ① explorer 崩溃自愈 / 用户在任务管理器里「重新启动 Windows 资源管理器」
+        ///      / shell 相关的系统更新；
+        ///   ② 开机自启（MSIX StartupTask）跑在 explorer 之前 —— 这时 NIM_ADD 是发给
+        ///      一个还不存在的 TrayWnd，必然失败，而 explorer 起来后正是靠这条广播
+        ///      告诉所有"抢跑成功登记"的应用：现在可以真正加一次了。
+        /// 所以这一条同时兜住「shell 重启」和「应用比 shell 早」两种失踪。
+        ///
+        /// 【为什么是静态字段而不是常量】
+        /// 消息号由系统在会话内动态分配（同类广播消息历史上落在 0x0305 附近），
+        /// 每个会话都可能不同，官方口径一律要求用 RegisterWindowMessage 现取，不许写死。
+        /// </summary>
+        private static readonly uint WM_TASKBARCREATED = RegisterWindowMessageW("TaskbarCreated");
+
+        /// <summary>
         /// 重启交接中：置位后 <see cref="Dispose()"/> 不再下发 NIM_DELETE。
         ///
         /// 【为什么需要它】
@@ -257,6 +277,31 @@ namespace DockedTools.Features.Tray
         public event TypedEventHandler<SystemTrayIcon, SystemTrayIconEventArgs>? LeftClick;
         public event TypedEventHandler<SystemTrayIcon, SystemTrayIconEventArgs>? RightClick;
 
+        /// <summary>
+        /// 通知区域重建后重新登记图标。
+        ///
+        /// 【为什么可以直接复用 AddToTray】
+        /// 图标丢失的只是 explorer 侧那份登记；本进程的宿主窗口、_hIcon 子类化都还在，
+        /// 重新走一遍 ADD + SETVERSION + MODIFY 就补回来了。
+        /// 窗口句柄没变，所以之前用 hWnd 绑定的回调消息照样有效。
+        ///
+        /// 【为什么要求 _isVisible】
+        /// 用户在设置里收起图标 / 已进入退出流程时，这条广播不能反过来把图标又加回去。
+        /// </summary>
+        private void ReRegisterAfterShellRestart()
+        {
+            if (_disposed || !_isVisible)
+            {
+                return;
+            }
+
+            global::DockedTools.Features.UnifiedCalls.Logging.LogService.Info(
+                "托盘图标",
+                "收到 shell 通知区域重建广播，重新登记图标（explorer 重启或开机时 shell 晚于本进程就绪）");
+
+            AddToTray();
+        }
+
         private void AddToTray()
         {
             System.Diagnostics.Debug.WriteLine($"[SystemTrayIcon] AddToTray: iconId={_iconId}, hIcon=0x{_hIcon.ToInt64():X}");
@@ -295,7 +340,18 @@ namespace DockedTools.Features.Tray
                 {
                     int modifyError = Marshal.GetLastWin32Error();
                     System.Diagnostics.Debug.WriteLine($"[SystemTrayIcon] Shell_NotifyIconW(NIM_MODIFY) also FAILED, Win32Error={modifyError} (0x{modifyError:X})");
-                    System.Diagnostics.Debug.WriteLine($"[SystemTrayIcon] WARNING: Tray icon may not be visible!");
+
+                    // ⭐ 落 Warning 而不是 Debug：这条正是「图标失踪」的案发现场，
+                    //    而它发生在启动的头几秒 —— 那个时间窗里 level.txt 还没被写线程
+                    //    轮询到（默认 Info），Debug 档等于没写。失踪时日志一片干净，
+                    //    比图标丢了本身更难查。
+                    //    失败本身不必再自己重试：explorer 就绪时必然广播 TaskbarCreated，
+                    //    由那条重新登记，这里只负责留下证据。
+                    global::DockedTools.Features.UnifiedCalls.Logging.LogService.Warning(
+                        "托盘图标",
+                        $"NIM_ADD/NIM_MODIFY 均失败（ADD 错误={error}，MODIFY 错误={modifyError}），" +
+                        "托盘图标此刻不在通知区域；等 shell 就绪的 TaskbarCreated 广播到达后会自动重新登记。" +
+                        "若日志里这条之后没有『重新登记图标』，说明 shell 一直没起来或本窗口没收到广播。");
                 }
             }
             
@@ -319,6 +375,16 @@ namespace DockedTools.Features.Tray
                 $"[Tray] NIM_MODIFY(重设tooltip)={tipResult}, uFlags=0x{modifyData.uFlags:X}, " +
                 $"NIF_TIP={(modifyData.uFlags & NIF_TIP) != 0}, NIF_SHOWTIP={(modifyData.uFlags & NIF_SHOWTIP) != 0}, " +
                 $"cbSize={modifyData.cbSize}, lastError={Marshal.GetLastWin32Error()}");
+
+            // 登记成功也要留一条能落盘的痕迹。判「图标失踪」时第一个要问的问题就是
+            // 「这次启动到底登记上没有」，答案只在 Info 档才保证看得到。
+            if (addResult)
+            {
+                global::DockedTools.Features.UnifiedCalls.Logging.LogService.Info(
+                    "托盘图标",
+                    $"图标已登记（hWnd=0x{_hWnd.ToInt64():X}，guid={TRAY_ICON_GUID:N}，" +
+                    $"NIM_SETVERSION={versionResult}，tooltip={tipResult}）");
+            }
         }
 
         private void RemoveFromTray()
@@ -468,6 +534,15 @@ namespace DockedTools.Features.Tray
                             $"lParam=0x{endSessionFlags:X8}，{reason}");
                     }
 
+                    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+                }
+
+                // shell 的通知区域被重建（explorer 重启，或开机时 shell 比我们晚就绪）。
+                // 这个 HWND 是常驻顶层窗口，正是这类广播的收得到的一端；
+                // 若哪天把它换成 message-only 窗口，广播是发不进来的。
+                if (uMsg == WM_TASKBARCREATED)
+                {
+                    ReRegisterAfterShellRestart();
                     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
                 }
 
@@ -889,6 +964,9 @@ namespace DockedTools.Features.Tray
         [LibraryImport("user32.dll", EntryPoint = "PostMessageW")]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static partial bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+        [LibraryImport("user32.dll", EntryPoint = "RegisterWindowMessageW", StringMarshalling = StringMarshalling.Utf16)]
+        private static partial uint RegisterWindowMessageW(string lpString);
 
         [LibraryImport("user32.dll")]
         private static partial IntPtr GetMessageExtraInfo();

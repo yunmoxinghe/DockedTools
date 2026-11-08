@@ -1,11 +1,10 @@
 using DockedTools.Features.Pages.Settings;
-using DockedTools.Features.Localization;
-using DockedTools.Features.UnifiedCalls.InAppDialog;
+using DockedTools.Features.UnifiedCalls.ContentArea;
 using DockedTools.Features.UnifiedCalls.Logging;
-using Microsoft.UI.Xaml.Controls;
 using Microsoft.Web.WebView2.Core;
 using System;
 using System.Threading.Tasks;
+using Windows.ApplicationModel.DataTransfer;
 using Windows.System;
 
 namespace DockedTools.Features.Pages.WebApp.Browser
@@ -32,7 +31,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         /// 也就是下面这一段 <c>TryEnqueue</c>。</para>
         ///
         /// <para><c>e.Handled</c> 原本是必须留在栈内的 —— 它是对本次回调的答复，
-        /// 出栈之后就晚了。但「每次询问」档的答复要等用户点完对话框才知道，
+        /// 出栈之后就晚了。但「每次询问」档的答复要等用户点完菜单才知道，
         /// 而且其中「新窗口打开」这一档在旧版对话框里根本给不出来：栈内写了 <c>Handled = true</c>
         /// 就等于当场否掉了内核弹窗，之后无论用户选什么都回不去。
         /// 解法是官方指定的另一条：<c>e.GetDeferral()</c>。
@@ -42,7 +41,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         /// resulted in the new window that are requested are blocked until the event handler
         /// returns. If a deferral is taken, then scripts are blocked until the deferral is
         /// completed.」 —— 取了延迟之后事件参数会一直活着，属性到 <c>Complete()</c> 才被读，
-        /// 所以「拦截 / 放行」这件事可以从栈内挪到对话框之后。</para>
+        /// 所以「拦截 / 放行」这件事可以从栈内挪到菜单关闭之后。</para>
         /// </summary>
         private void CoreWebView2_NewWindowRequested(CoreWebView2 sender, CoreWebView2NewWindowRequestedEventArgs e)
         {
@@ -67,7 +66,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     return;
                 }
 
-                // 先取成局部变量：对话框正文和日志用得上，不必再回读事件参数
+                // 先取成局部变量：菜单正文和日志用得上，不必再回读事件参数
                 string uri = e.Uri;
                 bool isUserInitiated = e.IsUserInitiated;
 
@@ -75,7 +74,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
 
                 if (behavior == LinkOpenBehavior.Ask)
                 {
-                    // 答复要等对话框，所以这里一个属性都不写，只把回调挂起
+                    // 答复要等菜单关掉，所以这里一个属性都不写，只把回调挂起
                     askDeferral = e.GetDeferral();
                 }
                 else
@@ -109,11 +108,11 @@ namespace DockedTools.Features.Pages.WebApp.Browser
         }
 
         /// <summary>
-        /// 新窗口请求的实际处置 —— 在回调出栈之后才运行，因此可以放心弹对话框、
+        /// 新窗口请求的实际处置 —— 在回调出栈之后才运行，因此可以放心弹菜单、
         /// 拉起外部进程，甚至再开一个 WebView2 而不触发重入。
         /// </summary>
         /// <param name="eventArgs">
-        /// 仅「每次询问」档会传入（配合 <paramref name="deferral"/> 在对话框之后再回写
+        /// 仅「每次询问」档会传入（配合 <paramref name="deferral"/> 在菜单关闭之后再回写
         /// <c>Handled</c>）；其余档已在栈内答复完，传 <see langword="null"/>。
         /// </param>
         /// <param name="deferral">与 <paramref name="eventArgs"/> 配对的延迟，必须在最后完成。</param>
@@ -184,22 +183,22 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 // 只告知「跑完了」，不带回返回值，所以选中项必须由闭包写回局部变量。
                 // （实际上从 CoreWebView2_NewWindowRequested 的 TryEnqueue 进来时已经在本线程，
                 //   这个分支只是保留原有的兜底。）
-                LinkOpenBehavior? choice = null;
+                LinkOpenMenuAction? picked = null;
                 if (!DispatcherQueue.HasThreadAccess)
                 {
                     await DispatcherQueue.EnqueueAsync(async () =>
                     {
-                        choice = await ShowAskDialogAsync(uri);
+                        picked = await ShowAskFlyoutAsync(uri);
                     });
                 }
                 else
                 {
-                    choice = await ShowAskDialogAsync(uri);
+                    picked = await ShowAskFlyoutAsync(uri);
                 }
 
-                if (choice == null)
+                if (picked is null)
                 {
-                    // 取消 —— 拦掉，什么都不开
+                    // 取消（点别处关掉菜单）—— 拦掉，什么都不开
                     if (eventArgs != null)
                     {
                         eventArgs.Handled = true;
@@ -207,7 +206,7 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     return;
                 }
 
-                if (choice == LinkOpenBehavior.NewWindow)
+                if (picked == LinkOpenMenuAction.NewWindow)
                 {
                     // 用户要普通的新窗口：Handled 保持 false，上面的 deferral 一完成，
                     // 内核就按默认口径把内容开进它自己的 popup 窗口。
@@ -215,24 +214,35 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                     return;
                 }
 
+                // 其余四档都不该让内核弹窗，先当场把答复钉死。
                 if (eventArgs != null)
                 {
                     eventArgs.Handled = true;
                 }
 
-                if (choice == LinkOpenBehavior.SystemBrowser)
+                switch (picked.Value)
                 {
-                    await LaunchSystemBrowserAsync(uri);
-                }
-                else if (choice == LinkOpenBehavior.SamePage)
-                {
-                    NavigateToUrl(uri);
+                    case LinkOpenMenuAction.SystemBrowser:
+                        await LaunchSystemBrowserAsync(uri);
+                        break;
+
+                    case LinkOpenMenuAction.SamePage:
+                        NavigateToUrl(uri);
+                        break;
+
+                    case LinkOpenMenuAction.CopyLink:
+                        CopyTextToClipboard(uri);
+                        break;
+
+                    case LinkOpenMenuAction.EditDefault:
+                        OpenLinkOpenSettingsPage();
+                        break;
                 }
             }
             catch (Exception ex)
             {
-                // 问不成就当没问：拦掉。异常都落在 Handled = true 之前（对话框、InAppDialogService、
-                // 写设置），不补这一句，延迟一完成内核就会按「Handled/NewWindow 都没设」的默认口径
+                // 问不成就当没问：拦掉。异常都落在 Handled = true 之前（弹菜单、执行动作），
+                // 不补这一句，延迟一完成内核就会按「Handled/NewWindow 都没设」的默认口径
                 // 弹一个用户根本没选过的 popup —— 询问档反而成了最难收拾的那一档。
                 // 用户显式选「新窗口打开」是正常 return，不会走到这里，所以无条件置 true 是安全的。
                 if (eventArgs != null)
@@ -243,89 +253,54 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 LogService.Error("WebView2.NewWindow", $"询问打开方式失败，已拦截: {uri}", ex);
             }
         }
-        
+
         /// <summary>
-        /// 显示询问对话框
+        /// 把文本写进剪贴板（菜单里的「复制链接」）
         /// </summary>
-        /// <returns>用户点「打开」时返回选中的打开方式；取消返回 <see langword="null"/>。</returns>
-        private async Task<LinkOpenBehavior?> ShowAskDialogAsync(string uri)
+        private static void CopyTextToClipboard(string text)
         {
-            // 三种打开方式做成单选：ContentDialog 只有 Primary/Secondary/Close 三个按钮位，
-            // 装不下「新窗口 + 系统浏览器 + 本页 + 取消」四个动作，所以把选择放进内容区，
-            // 按钮只留「打开 / 取消」两态。默认选新窗口打开 —— 这正是原来缺的那一档。
-            var newWindowRadio = new RadioButton
+            try
             {
-                Content = LocalizationHelper.GetString("LinkOpen_NewWindow"),
-                GroupName = "LinkOpenMode",
-                IsChecked = true
-            };
-            var systemBrowserRadio = new RadioButton
+                var dataPackage = new DataPackage();
+                dataPackage.SetText(text);
+                Clipboard.SetContent(dataPackage);
+                // Flush：不显式刷一次，写入要等进程自己决定何时提交，包应用被挂起时可能丢。
+                Clipboard.Flush();
+                System.Diagnostics.Debug.WriteLine($"[HandleAskBehavior] 已复制链接: {text}");
+            }
+            catch (Exception ex)
             {
-                Content = LocalizationHelper.GetString("LinkOpen_SystemBrowser"),
-                GroupName = "LinkOpenMode"
-            };
-            var samePageRadio = new RadioButton
-            {
-                Content = LocalizationHelper.GetString("LinkOpen_SamePage"),
-                GroupName = "LinkOpenMode"
-            };
+                System.Diagnostics.Debug.WriteLine($"[HandleAskBehavior] 复制链接失败: {ex.Message}");
+            }
+        }
 
-            // 创建复选框
-            var rememberCheckBox = new CheckBox
-            {
-                Content = LocalizationHelper.GetString("LinkOpen_RememberChoice"),
-                Margin = new Microsoft.UI.Xaml.Thickness(0, 12, 0, 0)
-            };
-            
-            // 创建 StackPanel 包含内容和复选框
-            var stackPanel = new StackPanel();
-            stackPanel.Children.Add(new TextBlock
-            {
-                Text = string.Format(LocalizationHelper.GetString("LinkOpen_AskDialog_Content"), uri),
-                TextWrapping = Microsoft.UI.Xaml.TextWrapping.Wrap
-            });
-            stackPanel.Children.Add(new StackPanel
-            {
-                Margin = new Microsoft.UI.Xaml.Thickness(0, 12, 0, 0),
-                Children =
+        /// <summary>
+        /// 跳到设置页（菜单里的「修改默认」）
+        /// </summary>
+        /// <remarks>
+        /// 导航排在方法返回之后：这一刻 <c>Handled</c> 刚写完、延迟还没 Complete，
+        /// 当场换页会把承载这座 WebView 的页面一起拆掉，后续路径就跑在正在释放的对象上。
+        /// </remarks>
+        private void OpenLinkOpenSettingsPage()
+        {
+            bool queued = DispatcherQueue?.TryEnqueue(
+                Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal,
+                () =>
                 {
-                    newWindowRadio,
-                    systemBrowserRadio,
-                    samePageRadio
-                }
-            });
-            stackPanel.Children.Add(rememberCheckBox);
-            
-            var dialog = new UnifiedInAppDialog();
-            dialog.Configure(
-                LocalizationHelper.GetString("LinkOpen_AskDialog_Title"),
-                stackPanel,
-                primaryButtonText: LocalizationHelper.GetString("LinkOpen_Confirm"),
-                closeButtonText: LocalizationHelper.GetString("LinkOpen_Cancel"),
-                defaultButton: Microsoft.UI.Xaml.Controls.ContentDialogButton.Primary
-            );
-            
-            var result = await InAppDialogService.ShowAsync(dialog, this);
+                    try
+                    {
+                        ContentAreaService.Navigate(typeof(SettingsPage));
+                    }
+                    catch (Exception ex)
+                    {
+                        LogService.Error("WebView2.NewWindow", "打开链接设置页失败", ex);
+                    }
+                }) ?? false;
 
-            if (result != Microsoft.UI.Xaml.Controls.ContentDialogResult.Primary)
+            if (!queued)
             {
-                System.Diagnostics.Debug.WriteLine($"[HandleAskBehavior] 用户取消: {result}");
-                return null;
+                LogService.Info("WebView2.NewWindow", "菜单「修改默认」：投递导航失败，设置页未打开");
             }
-
-            LinkOpenBehavior choice =
-                systemBrowserRadio.IsChecked == true ? LinkOpenBehavior.SystemBrowser :
-                samePageRadio.IsChecked == true ? LinkOpenBehavior.SamePage :
-                LinkOpenBehavior.NewWindow;
-
-            // 检查是否勾选"始终使用"
-            if (rememberCheckBox.IsChecked == true)
-            {
-                ExperimentalSettings.LinkOpenBehavior = choice;
-                System.Diagnostics.Debug.WriteLine($"[HandleAskBehavior] 已保存选择: {choice}");
-            }
-
-            return choice;
         }
         
         /// <summary>

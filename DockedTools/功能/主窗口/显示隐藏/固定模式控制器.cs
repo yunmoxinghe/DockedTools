@@ -132,14 +132,16 @@ namespace DockedTools.Features.MainWindow.Visibility
             int    height   = _state.WindowHeight;
             int    width    = _state.WindowWidth;
             var    duration = TimeSpan.FromMilliseconds(360);
-            DateTime start  = DateTime.MinValue; // 第一帧时才初始化
+            // 逐帧计时原先用 DateTime.Now —— 它每次都要做时区换算，60fps 下每帧一次不划算，
+            // 而 TickCount64 的系统节拍（约 15.6ms）对 360ms 的动画又太粗，会把进度切成台阶。
+            // 换成 Stopwatch：高精度、无分配，也是本仓库已有的做法（网页应用图标缓存 WaitUntilReadyAsync 就用了它）。
+            System.Diagnostics.Stopwatch? sw = null; // 第一帧时才起表
 
             EventHandler<object>? onFrame = null;
             onFrame = (_, _) =>
             {
-                // 第一帧：记录真实开始时间
-                if (start == DateTime.MinValue)
-                    start = DateTime.Now;
+                // 第一帧：起表，避免订阅等待时间被计入
+                sw ??= System.Diagnostics.Stopwatch.StartNew();
 
                 // 取消时立即跳到终点并完成
                 if (ct.IsCancellationRequested)
@@ -151,7 +153,7 @@ namespace DockedTools.Features.MainWindow.Visibility
                     return;
                 }
 
-                double progress = Math.Min((DateTime.Now - start).TotalMilliseconds / duration.TotalMilliseconds, 1.0);
+                double progress = Math.Min(sw.Elapsed.TotalMilliseconds / duration.TotalMilliseconds, 1.0);
                 double eased    = 1 - Math.Pow(1 - progress, 2); // Ease-out quadratic
                 _state.CurrentX = startX + (targetX - startX) * eased;
 
@@ -208,7 +210,7 @@ namespace DockedTools.Features.MainWindow.Visibility
             int    height   = _state.WindowHeight;
             int    width    = _state.WindowWidth;
             var    duration = TimeSpan.FromMilliseconds(440);
-            DateTime start  = DateTime.MinValue; // 第一帧时才初始化，避免订阅等待时间被计入
+            System.Diagnostics.Stopwatch? sw = null; // 第一帧时才起表，避免订阅等待时间被计入
 
             // 先把窗口放到起始位置（屏幕外），避免第一帧出现在错误位置
             _state.CurrentX = startX;
@@ -217,9 +219,8 @@ namespace DockedTools.Features.MainWindow.Visibility
             EventHandler<object>? onFrame = null;
             onFrame = (_, _) =>
             {
-                // 第一帧：记录真实开始时间
-                if (start == DateTime.MinValue)
-                    start = DateTime.Now;
+                // 第一帧：起表（口径与 SlideOutAsync 一致）
+                sw ??= System.Diagnostics.Stopwatch.StartNew();
 
                 // 取消时直接跳到终点
                 if (ct.IsCancellationRequested)
@@ -232,12 +233,17 @@ namespace DockedTools.Features.MainWindow.Visibility
                     return;
                 }
 
-                double progress = Math.Min((DateTime.Now - start).TotalMilliseconds / duration.TotalMilliseconds, 1.0);
+                double progress = Math.Min(sw.Elapsed.TotalMilliseconds / duration.TotalMilliseconds, 1.0);
                 double eased    = 1 - Math.Pow(1 - progress, 3); // Ease-out cubic
                 _state.CurrentX = startX + (targetX - startX) * eased;
 
                 int newX = (int)Math.Round(_state.CurrentX);
-                System.Diagnostics.Debug.WriteLine($"SlideInAsync frame: progress={progress:F2}, newX={newX}, targetX={targetX}, startX={startX}");
+
+                // 逐帧日志原先压在这里：440ms 动画 ≈ 二十多帧，每帧一次字符串插值 + 一次
+                // OutputDebugString 互操作，而且它带 [Conditional("DEBUG")] ——
+                // Release 里根本不存在，等于只有调试时更卡，正好和「调试版更容易无响应」对上。
+                // 现在只在动画收尾记一条，信息量不减（progress 到这里必然是 1.0，
+                // 剩下的 startX/targetX 才是排查滑入起点算错时真正要看的两个数）。
                 _ = VisibilityWin32Api.SetWindowPos(
                     _hwnd, VisibilityWin32Api.HWND_TOPMOST,
                     newX, targetY, width, height,
@@ -249,6 +255,10 @@ namespace DockedTools.Features.MainWindow.Visibility
                     _state.CurrentX = targetX;
                     _state.CurrentY = targetY; // 同步 Y 坐标，确保退出时 SlideOutAsync 起点正确
                     SnapToTarget(targetX, targetY, width, height);
+
+                    System.Diagnostics.Debug.WriteLine(
+                        $"SlideInAsync done: startX={startX:F0}, targetX={targetX:F0}, lastFrameX={newX}");
+
                     tcs.TrySetResult(true);
                 }
             };

@@ -3,6 +3,7 @@ using Svg;
 using Svg.Model;
 using Svg.Skia;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -75,13 +76,39 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                 return Task.FromResult<byte[]?>(null);
             }
 
+            // ⚠️ 这个方法原先是「假异步」：在调用线程上 lock + 画完，再 Task.FromResult 包一层，
+            //    所以 await 它一点都不会挂起 —— SHA256、Svg.Skia 求值 CSS、SKSurface 绘制、PNG 编码
+            //    全压在调用线程上（主页出卡片档 / 顶栏 / 侧边栏那些时候就是 UI 线程），
+            //    而且一张畸形 SVG 要画多久没有任何上限。
+            //    官方口径说得很直接：await 并不保证工作离开 UI 线程，自己的代码要显式交给 Task.Run
+            //    （Learn《Keep the UI thread responsive》，页面更新 2026-07-17）；
+            //    异步准则里那条「一次别让 UI 线程阻塞超过 50ms」也正是这条改动的判据。
+            //
+            //    ⚠️ 但要说清一个例外：同一批权威指南也写着「不要在可复用的库代码里用 Task.Run
+            //    伪装异步，应该由调用方决定线程」。那条针对的是对外发布的类库和 ASP.NET Core 的
+            //    吞吐场景。本类是应用内部单例、5 个调用点全在页面层且都已 await，
+            //    所以收在这里换调用方零改动是划得来的 —— 但别把它当成通用范式往外抄。
+            //
+            // 代价说清楚：缓存命中现在也要过一次线程池（原先命中是同步返回）；
+            // 连缓存键的 SHA256 也一起挪走了（几 KB SVG 做一次哈希再转 64 个十六进制字符，
+            // 本来就不该在 UI 线程做）。这里调用方全是 await、没人拿结果去画下一帧，
+            // 跳一次线程池是微秒级，换 UI 线程干净是赚的。
+            return Task.Run(() => RenderWithCache(svgBytes, size, preferDark));
+        }
+
+        /// <summary>
+        /// 线程池上执行的这一份：先查缓存，没命中才进串行锁真画。
+        /// 双重检查保留 —— 并发打同一张图时，排队期间可能已经被别人画好了。
+        /// </summary>
+        private byte[]? RenderWithCache(byte[] svgBytes, int size, bool preferDark)
+        {
             // ⭐ 同一份 SVG + 同尺寸 + 同主题，画一次就够。
             //    实测同一张图被画了两遍：顶栏发布一次（契约只认位图 Uri），
             //    主页卡片 / 侧边栏的重画又一次。
             string cacheKey = BuildCacheKey(svgBytes, size, preferDark);
             if (_resultCache.TryGetValue(cacheKey, out byte[]? hit))
             {
-                return Task.FromResult<byte[]?>(hit);
+                return hit;
             }
 
             lock (_renderGate)
@@ -89,7 +116,7 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                 // 排队期间可能已经被别人画好了（并发打同一张图），再查一次
                 if (_resultCache.TryGetValue(cacheKey, out byte[]? raced))
                 {
-                    return Task.FromResult<byte[]?>(raced);
+                    return raced;
                 }
 
                 try
@@ -103,18 +130,24 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                         TrimResultCache();
                     }
 
-                    return Task.FromResult<byte[]?>(png);
+                    return png;
                 }
                 catch (Exception ex)
                 {
                     System.Diagnostics.Debug.WriteLine($"[IconRasterizer] 渲染异常: {ex.Message}");
-                    return Task.FromResult<byte[]?>(null);
+                    return null;
                 }
             }
         }
 
-        /// <summary>渲染结果的记忆化缓存：同一份 SVG 只画一次</summary>
-        private readonly Dictionary<string, byte[]> _resultCache = new(StringComparer.Ordinal);
+        /// <summary>
+        /// 渲染结果的记忆化缓存：同一份 SVG 只画一次。
+        /// 换成 ConcurrentDictionary 是因为本类现在真的会被线程池线程访问 ——
+        /// 原先普通 Dictionary 的读在锁外（快路径）、写在锁内，同一线程下侥幸没事先，
+        /// 一旦有后台线程参与就是竞态；现在读写都容得下并发，
+        /// SKSvg 本身仍然由 <see cref="_renderGate"/> 串行保护。
+        /// </summary>
+        private readonly ConcurrentDictionary<string, byte[]> _resultCache = new(StringComparer.Ordinal);
 
         /// <summary>SKSvg 非线程安全，全局串行一把锁（单张 48px 光栅化是毫秒级）</summary>
         private readonly object _renderGate = new();

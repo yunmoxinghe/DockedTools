@@ -3,6 +3,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:CommunityToolkit.WinUI.Controls"
+    xmlns:home="using:DockedTools.Features.Pages.Home"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
@@ -11,44 +12,98 @@
         x:Name="RootGrid"
         Padding="0"
         UseLayoutRounding="True">
-        <ScrollViewer
-            x:Name="HomeScrollViewer"
-            HorizontalScrollBarVisibility="Disabled"
-            HorizontalScrollMode="Disabled"
+        <!--
+            入口列表：ListView（真虚拟化）。
+
+            选型依据（官方文档）：
+              · ListView 派生自 ItemsControl，ItemsSource 走 IEnumerable 包装路径，
+                与本项目已验证可吃纯 CLR 集合的 ItemsControl 同源（见网页应用Cookie页面.xaml 的注释）；
+              · 默认 ItemsPanel 是 ItemsStackPanel，只有它（和 ItemsWrapGrid）才会触发
+                ContainerContentChanging 的分阶段渲染（官方文档 ListViewBase.ContainerContentChanging 备注）；
+              · 自带 Header / Footer，标题仍然随列表一起滚走，跟改造前一致；
+              · ItemContainerStyle 换成裸 ContentPresenter，去掉 ListViewItem 的默认内边距 /
+                选中态 / 悬停底色，卡片外观仍由 SettingsCard 自己负责。
+
+            不选 ItemsRepeater：本项目 PublishAot + CsWinRT 下它只认 WinRT 容器，纯 CLR 类型会抛
+                "Argument 'source' is not a supported vector."（网页应用Cookie页面.xaml 有实测记录）；
+                而且它不自带滚动与选择语义。
+            不选 ItemsView：没有 Header / Footer（标题就得挪出滚动区，破坏现有滚动表现），
+                且 DataTemplate 根必须是 ItemContainer，卡片结构要跟着改。
+        -->
+        <ListView
+            x:Name="HomeList"
+            Padding="16,0"
+            Background="Transparent"
             HorizontalContentAlignment="Stretch"
-            VerticalScrollBarVisibility="Auto">
-            <StackPanel
-                x:Name="PageContentPanel"
-                Margin="16,0"
-                UseLayoutRounding="True"
-                Spacing="0">
-                <Border Height="40" />
-                <TextBlock
-                    x:Name="PageTitleBlock"
-                    x:Uid="HomePage_Title"
-                    FontSize="32"
-                    FontWeight="SemiBold" />
-                <Border Height="36" />
-
-                <StackPanel
-                    x:Name="WebAppsList"
-                    Spacing="4">
-                    <StackPanel.ChildrenTransitions>
-                        <TransitionCollection>
-                            <AddDeleteThemeTransition/>
-                        </TransitionCollection>
-                    </StackPanel.ChildrenTransitions>
+            IsTabStop="False"
+            SelectionMode="None"
+            ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+            ScrollViewer.HorizontalScrollMode="Disabled"
+            ScrollViewer.VerticalScrollBarVisibility="Auto"
+            ScrollViewer.VerticalScrollMode="Enabled"
+            UseLayoutRounding="True">
+            <ListView.Header>
+                <StackPanel UseLayoutRounding="True">
+                    <Border Height="40" />
+                    <TextBlock
+                        x:Name="PageTitleBlock"
+                        x:Uid="HomePage_Title"
+                        FontSize="32"
+                        FontWeight="SemiBold" />
+                    <Border Height="36" />
                 </StackPanel>
+            </ListView.Header>
 
-                <TextBlock
-                    x:Name="EmptyText"
-                    x:Uid="HomePage_EmptyText"
-                    Opacity="0.6"
-                    Visibility="Collapsed" />
+            <ListView.Footer>
+                <StackPanel UseLayoutRounding="True">
+                    <TextBlock
+                        x:Name="EmptyText"
+                        x:Uid="HomePage_EmptyText"
+                        Opacity="0.6"
+                        Visibility="Collapsed" />
+                    <Border Height="40" />
+                </StackPanel>
+            </ListView.Footer>
 
-                <Border Height="40" />
-            </StackPanel>
-        </ScrollViewer>
+            <!-- 去掉 ListViewItem 默认模板：默认模板自带 40px 最小高度、选中底色与内边距，
+                 套在 SettingsCard 外面会让卡片变窄、间距翻倍。这里只留一个拉伸的 ContentPresenter，
+                 卡片长什么样完全由 SettingsCard 决定；下边距 4px 对应原来的 StackPanel Spacing。 -->
+            <ListView.ItemContainerStyle>
+                <Style TargetType="ListViewItem">
+                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                    <Setter Property="VerticalContentAlignment" Value="Top" />
+                    <Setter Property="Padding" Value="0" />
+                    <Setter Property="MinHeight" Value="0" />
+                    <Setter Property="Margin" Value="0,0,0,4" />
+                    <Setter Property="IsTabStop" Value="False" />
+                    <Setter Property="UseSystemFocusVisuals" Value="False" />
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="ListViewItem">
+                                <ContentPresenter
+                                    HorizontalContentAlignment="Stretch"
+                                    VerticalContentAlignment="Top"
+                                    Content="{TemplateBinding Content}"
+                                    ContentTemplate="{TemplateBinding ContentTemplate}" />
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+            </ListView.ItemContainerStyle>
+
+            <!-- 绑定源是 HomeShortcutItem（每个数据项自己持有图标），
+                 容器被复用给另一项时，x:Bind 会跟着新数据项重新求值 —— 不会串图。 -->
+            <ListView.ItemTemplate>
+                <DataTemplate x:DataType="home:HomeShortcutItem">
+                    <controls:SettingsCard
+                        HorizontalAlignment="Stretch"
+                        IsClickEnabled="True"
+                        Header="{x:Bind Name}"
+                        Description="{x:Bind Url}"
+                        HeaderIcon="{x:Bind Icon, Mode=OneWay}"
+                        Click="OnHomeCardClick" />
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
     </Grid>
 </Page>
-

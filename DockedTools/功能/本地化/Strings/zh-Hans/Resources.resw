@@ -1604,6 +1604,12 @@ https://developer.microsoft.com/microsoft-edge/webview2/</value>
   <data name="LinkOpen_NewWindow" xml:space="preserve">
     <value>新窗口打开</value>
   </data>
+  <data name="LinkOpen_CopyLink" xml:space="preserve">
+    <value>复制链接</value>
+  </data>
+  <data name="LinkOpen_EditDefault" xml:space="preserve">
+    <value>修改默认</value>
+  </data>
   <data name="LinkOpen_Confirm" xml:space="preserve">
     <value>打开</value>
   </data>

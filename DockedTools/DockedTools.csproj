@@ -82,7 +82,7 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.6.5" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="Microsoft.UI.Reactor" Version="0.1.0-preview.16" />
@@ -169,6 +169,25 @@
   </PropertyGroup>
 
   <!-- ==========================================================================
+       Debug 不需要发布级产物
+
+       上面那段 Publish Properties 没有 Condition，于是增量调试也被它拖着做一遍
+       「打 bundle + 生成符号包」—— 这两样只有分发/上传商店时才有用。
+       本机实测过一次「只编译不启动」的 winapp run 要 224 秒，产物形态是主要嫌疑之一。
+
+       这里刻意给 Debug 显式写值，而不是让属性空掉：空值会落回默认 Neutral，
+       而 Neutral 在多平台配置下照样可能打 bundle，想彻底跳过得说 Never。
+
+       ⚠️ 如果 winapp run 的 Debug 部署链路哪天反过来找 .appxbundle 而报错，
+       退回原样只要把下面这个 PropertyGroup 删掉即可（一行都不用改别处）。
+       ========================================================================== -->
+  <PropertyGroup Condition="'$(Configuration)'=='Debug'">
+    <AppxBundle>Never</AppxBundle>
+    <GenerateAppxSymbolPackage>false</GenerateAppxSymbolPackage>
+    <AppxSymbolPackageEnabled>false</AppxSymbolPackageEnabled>
+  </PropertyGroup>
+
+  <!-- ==========================================================================
        worktree 包身份隔离
 
        问题：每个 git worktree 都是一份完整源码，但 Package.Debug.appxmanifest 里的
@@ -209,19 +228,12 @@
 
   <!-- 始终写出身份文件：Debug 带后缀，其余写空串，保证 Release 行为不变 -->
   <Target Name="_WriteWorktreeIdentity" BeforeTargets="BeforeBuild">
-    <WriteLinesToFile
-      File="$(_WtIdentityFile)"
-      Overwrite="true"
-      WriteOnlyWhenDifferent="true"
-      Lines="// &lt;auto-generated/&gt;;internal static class WorktreeIdentity;{;    public const string Suffix = &quot;$(WorktreeSuffix)&quot;%3B;}" />
-    <Message Importance="high"
-             Text="worktree 身份后缀 = [$(WorktreeSuffix)]  （目录 $(_RepoDirName)，配置 $(Configuration)）"
-             Condition="'$(WorktreeSuffix)' != ''" />
+    <WriteLinesToFile File="$(_WtIdentityFile)" Overwrite="true" WriteOnlyWhenDifferent="true" Lines="// &lt;auto-generated/&gt;;internal static class WorktreeIdentity;{;    public const string Suffix = &quot;$(WorktreeSuffix)&quot;%3B;}" />
+    <Message Importance="high" Text="worktree 身份后缀 = [$(WorktreeSuffix)]  （目录 $(_RepoDirName)，配置 $(Configuration)）" Condition="'$(WorktreeSuffix)' != ''" />
   </Target>
 
   <!-- Debug 且拿到后缀时，生成一份带新身份的 manifest 顶替 Package.Debug.appxmanifest -->
-  <Target Name="_WorktreeDebugManifest" BeforeTargets="BeforeBuild"
-          Condition="'$(Configuration)' == 'Debug' AND '$(WorktreeSuffix)' != ''">
+  <Target Name="_WorktreeDebugManifest" BeforeTargets="BeforeBuild" Condition="'$(Configuration)' == 'Debug' AND '$(WorktreeSuffix)' != ''">
     <PropertyGroup>
       <_WtManifest>$(IntermediateOutputPath)Package.Debug.worktree.appxmanifest</_WtManifest>
       <_WtNs>&lt;Namespace Prefix='p' Uri='http://schemas.microsoft.com/appx/manifest/foundation/windows10'/&gt;&lt;Namespace Prefix='uap' Uri='http://schemas.microsoft.com/appx/manifest/uap/windows10'/&gt;&lt;Namespace Prefix='uap5' Uri='http://schemas.microsoft.com/appx/manifest/uap/windows10/5'/&gt;&lt;Namespace Prefix='desktop' Uri='http://schemas.microsoft.com/appx/manifest/desktop/windows10'/&gt;</_WtNs>
@@ -231,16 +243,11 @@
 
     <Copy SourceFiles="Package.Debug.appxmanifest" DestinationFiles="$(_WtManifest)" />
 
-    <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)"
-             Query="/p:Package/p:Identity/@Name" Value="$(_WtPkgName)" />
-    <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)"
-             Query="/p:Package/p:Properties/p:DisplayName" Value="$(_WtDisplay)" />
-    <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)"
-             Query="/p:Package/p:Applications/p:Application/uap:VisualElements/@DisplayName" Value="$(_WtDisplay)" />
-    <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)"
-             Query="/p:Package/p:Applications/p:Application/uap:VisualElements/uap:DefaultTile/@ShortName" Value="$(_WtDisplay)" />
-    <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)"
-             Query="/p:Package/p:Applications/p:Application/p:Extensions/desktop:Extension[@Category='windows.startupTask']/desktop:StartupTask/@DisplayName" Value="$(_WtDisplay)" />
+    <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)" Query="/p:Package/p:Identity/@Name" Value="$(_WtPkgName)" />
+    <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)" Query="/p:Package/p:Properties/p:DisplayName" Value="$(_WtDisplay)" />
+    <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)" Query="/p:Package/p:Applications/p:Application/uap:VisualElements/@DisplayName" Value="$(_WtDisplay)" />
+    <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)" Query="/p:Package/p:Applications/p:Application/uap:VisualElements/uap:DefaultTile/@ShortName" Value="$(_WtDisplay)" />
+    <XmlPoke XmlInputPath="$(_WtManifest)" Namespaces="$(_WtNs)" Query="/p:Package/p:Applications/p:Application/p:Extensions/desktop:Extension[@Category='windows.startupTask']/desktop:StartupTask/@DisplayName" Value="$(_WtDisplay)" />
 
     <ItemGroup>
       <AppxManifest Remove="@(AppxManifest)" />

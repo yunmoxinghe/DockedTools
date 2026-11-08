@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Threading;
 using Microsoft.UI.Reactor;
 using Microsoft.UI.Reactor.Core;
 using Microsoft.UI.Reactor.Hooks;
@@ -532,6 +534,12 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
 
     public override Element Render()
     {
+#if DEBUG
+        // 临时性能探针（Debug 才编进去）：每秒一行，用来验证"补间不再逐帧重渲染"真的生效。
+        // 只需要看 [TopBarProbe] 那两行，验证完就可以删。
+        TopBarRenderProbe.OnRender();
+#endif
+
         var p = Props;
 
         // 搜索模式与查询文本（状态与渲染共存，Reactor 函数式 MVU）
@@ -977,8 +985,15 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
         const double TitleShiftAlpha = 0.28;  // 每帧向目标推进的比例（16ms/帧 ⇒ 约 250ms 收敛）
         const double TitleShiftEps = 0.5;     // 收敛阈值（px）
         bool NearTween(double a, double b) => Math.Abs(a - b) < TitleShiftEps;
-        var (shiftLeft, setShiftLeft) = UseState(0d);
-        var (shiftSpan, setShiftSpan) = UseState(0d);
+        // 标题几何的补间【不走 state】——它存在 shiftCur 这个 ref 里，逐帧直接写原生属性。
+        //
+        // 为什么：这两个值只影响标题自己的 Margin / MaxWidth，跟顶栏其余部分无关；
+        // 而 setState 会让整条顶栏（三千多行渲染代码）每帧重新 reconcile 一遍。
+        // 之前这里有两支 UseState(shiftLeft/shiftSpan)，一次标题换字的补间就是十几次
+        // 全量渲染 —— 而 Reactor 的 setState 本来就被合并成"每次派发轮一次"，
+        // 省掉它等于把这段时间的渲染从"每帧一次"降到"零次"。
+        // 渲染路径改读 shiftCur，所以中途因别的原因渲染一次也不会跳（读到的是当前值）。
+        // 两侧间距仍是 state：它们跟着 props 走，只在换页那种场景才动，且要落到别的元素上。
         // 两侧间距的【渲染用值】（目标来自 props.LeftPadding / RightPadding）
         var (padLeft, setPadLeft) = UseState(p.LeftPadding);
         var (padRight, setPadRight) = UseState(p.RightPadding);
@@ -1199,16 +1214,15 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
         }, Array.Empty<object>());
         _ = clipboardTick; // 仅用于让剪贴板变化触发一次重渲染
 
-        // 剪贴板当前是否有文本（决定“粘贴”项可用性；读取可能被其他进程锁定，失败按不可用处理）
-        bool canPaste;
-        try
-        {
-            canPaste = Clipboard.GetContent().Contains(StandardDataFormats.Text);
-        }
-        catch
-        {
-            canPaste = false;
-        }
+        // 剪贴板当前是否有文本（决定“粘贴”项可用性）。
+        //
+        // ⚠️ 这里【不能】再用 Clipboard.GetContent()：那是 OLE 调用，而这一行在渲染期，
+        //    补间、拖窗口、每次 setState 都会跑一遍；别的进程占着剪贴板时它还会阻塞
+        //    （最坏几秒，看门狗那边 1.5s 就判无响应）。
+        //    IsClipboardFormatAvailable 只是打开剪贴板读一次格式表：微秒级、不分配、
+        //    拿不到就立刻返回 false。对“有没有可粘贴的文本”这个判断语义足够。
+        //    真正的取值仍在粘贴动作里做（用户点下去那一刻才是真的要用内容）。
+        bool canPaste = ClipboardTextProbe.HasText();
         var canCopyTitle = !string.IsNullOrEmpty(p.CenterText);
 
         // ---- 由实测宽度推导的布局参数（全部相对【整条 Bar】，保证标题绝对居中） ----
@@ -1229,9 +1243,28 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
                 leftInset,
                 Math.Max(leftInset, barW - rightInset - titleMeasuredW));
         }
-        // 渲染用值：补间已启动（且标题在栏内可见）时用补间值，否则直接取目标值
-        var titleLeft = shiftReady.Current ? shiftLeft : titleLeftTarget;
-        var titleSpan = shiftReady.Current ? shiftSpan : titleSpanTarget;
+        // 渲染用值：补间已启动（且标题在栏内可见）时用补间值，否则直接取目标值。
+        // 补间值来自 shiftCur 这个 ref（逐帧直写元素，不走重渲染），不是 state。
+        var titleLeft = shiftReady.Current ? shiftCur.Current.Left : titleLeftTarget;
+        var titleSpan = shiftReady.Current ? shiftCur.Current.Span : titleSpanTarget;
+
+        // 把当前补间值【直接】写进标题宿主的原生属性（补间帧的唯一落地点）。
+        //
+        // 为什么可以绕开渲染：这两个值只影响标题自己的 Margin / MaxWidth，不参与顶栏其余
+        // 元素的布局决策；渲染路径读的是同一个 shiftCur，所以就算中途因为别的原因渲染
+        // 一次，写回去的也是"当前值"，不会出现"跳回上一帧"的抖动。
+        // 未定位（整栏未测到 / 标题未测到）时不写 —— 那条路径由渲染里的 MaxWidth 分支负责。
+        void ApplyTitleGeometry()
+        {
+            if (!titlePositioned || titleRef.Current is not FrameworkElement host)
+            {
+                return;
+            }
+
+            var (left, span) = shiftCur.Current;
+            host.Margin = new Thickness(left, 0, 0, 0);
+            host.MaxWidth = span;
+        }
 
         // ---- 标题几何补间的驱动 ----
         // 依赖里带 titleInBar：进入/退出搜索时标题几何由形变编排与快照决定，必须
@@ -1255,8 +1288,7 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
                 {
                     shiftGeoLive.Current = false;
                     shiftCur.Current = (titleLeftTarget, titleSpanTarget);
-                    setShiftLeft(titleLeftTarget);
-                    setShiftSpan(titleSpanTarget);
+                    ApplyTitleGeometry();
                 }
             }
             else
@@ -1270,8 +1302,7 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
                 shiftReady.Current = true;
                 shiftCur.Current = (titleLeftTarget, titleSpanTarget);
                 padCur.Current = (padLeftTarget, padRightTarget);
-                setShiftLeft(titleLeftTarget);
-                setShiftSpan(titleSpanTarget);
+                ApplyTitleGeometry();
                 setPadLeft(padLeftTarget);
                 setPadRight(padRightTarget);
                 return;
@@ -2500,6 +2531,9 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
                 // Tick 内未处理异常在 WinUI 桌面下会终止进程：必须兜底
                 try
                 {
+#if DEBUG
+                    TopBarRenderProbe.OnTick();
+#endif
                     var (tl, ts) = shiftTarget.Current;
                     var (cl, cs) = shiftCur.Current;
                     // 标题几何不补间时直接取终值（间距仍照常补间）
@@ -2515,8 +2549,10 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
 
                     shiftCur.Current = (nl, ns);
                     padCur.Current = (npl, npr);
-                    setShiftLeft(nl);
-                    setShiftSpan(ns);
+                    // 标题几何【直写】原生属性：不 setState ⇒ 这一帧不触发任何 reconcile。
+                    ApplyTitleGeometry();
+                    // 两侧间距仍走 state，但它俩只在 props 边距真的变了（换页那种）时才变；
+                    // 值没变时 Reactor 的 setter 按相等短路，不会产生渲染。
                     setPadLeft(npl);
                     setPadRight(npr);
                     if (nl == tl && ns == ts && npl == pl && npr == pr)
@@ -2531,8 +2567,7 @@ internal sealed class AppTopBar : Component<AppTopBarProps>
                     var (pl, pr) = padTarget.Current;
                     shiftCur.Current = (tl, ts);
                     padCur.Current = (pl, pr);
-                    setShiftLeft(tl);
-                    setShiftSpan(ts);
+                    ApplyTitleGeometry();
                     setPadLeft(pl);
                     setPadRight(pr);
                 }
@@ -3109,3 +3144,84 @@ internal partial record FontIconElement;
 
 [GenerateReactorWrapper(typeof(Microsoft.UI.Xaml.Controls.ImageIcon))]
 internal partial record ImageIconElement;
+
+/// <summary>
+/// 剪贴板“有没有文本”的廉价探针。
+///
+/// <para>为什么不用 <c>Clipboard.GetContent()</c>：那是 OLE 调用（走 COM、要包装
+/// <c>IDataObject</c>），而调用点是顶栏的渲染路径 —— 补间期间每帧一次、拖窗口每帧一次。
+/// 更糟的是别的进程把剪贴板开着时它会阻塞，UI 线程跟着停摆。</para>
+///
+/// <para><c>IsClipboardFormatAvailable</c> 只做一件事：打开剪贴板、在自己的格式表里
+/// 找一下 CF_UNICODETEXT、关掉。微秒级、零分配、打不开就立刻返回 false —— 正是
+/// “菜单项该不该亮”需要的粒度。真正的取值仍在粘贴动作里做。</para>
+/// </summary>
+internal static partial class ClipboardTextProbe
+{
+    private const uint CF_UNICODETEXT = 13;
+
+    public static bool HasText()
+    {
+        try
+        {
+            return IsClipboardFormatAvailable(CF_UNICODETEXT);
+        }
+        catch
+        {
+            // 理论上不会抛（LibraryImport 的封送是 blittable 的），兜底按“不可用”处理，
+            // 与旧实现 catch 后置 false 的行为一致。
+            return false;
+        }
+    }
+
+    [LibraryImport("user32.dll", EntryPoint = "IsClipboardFormatAvailable", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool IsClipboardFormatAvailable(uint format);
+}
+
+#if DEBUG
+/// <summary>
+/// 顶栏性能探针（只在 Debug 编进去）：每秒打一行 renders/s + ticks/s。
+///
+/// <para>验证目标：标题几何补间改成"直写原生属性"之后，补间期间 <c>renders/s</c> 应该
+/// 掉到 0~2（换字那几帧别的一次性渲染），而 <c>ticks/s</c> 仍是 ~60。改之前两者会一起
+/// 往上走（每帧一次 reconcile）。验证完直接删掉这个类与两处调用即可。</para>
+/// </summary>
+internal static class TopBarRenderProbe
+{
+    private static long _renders;
+    private static long _ticks;
+    private static long _lastLogTick;
+
+    public static void OnRender()
+    {
+        Interlocked.Increment(ref _renders);
+        Pump();
+    }
+
+    public static void OnTick()
+    {
+        Interlocked.Increment(ref _ticks);
+        Pump();
+    }
+
+    private static void Pump()
+    {
+        long now = Environment.TickCount64;
+        long last = Interlocked.Read(ref _lastLogTick);
+        if (now - last < 1000)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _lastLogTick, now, last) != last)
+        {
+            return;
+        }
+
+        long renders = Interlocked.Exchange(ref _renders, 0);
+        long ticks = Interlocked.Exchange(ref _ticks, 0);
+        System.Diagnostics.Debug.WriteLine($"[TopBarProbe] renders/s={renders} ticks/s={ticks}");
+    }
+}
+#endif

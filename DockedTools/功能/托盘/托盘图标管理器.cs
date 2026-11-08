@@ -15,6 +15,8 @@ using DockedTools.Features.Localization;
 using DockedTools.Features.Hotkey;
 // 引入主窗口工厂类
 using DockedTools.Features.MainWindow.Entry;
+// 引入统一日志服务
+using DockedTools.Features.UnifiedCalls.Logging;
 // 引入统一托盘菜单服务
 using DockedTools.功能.统一调用.托盘右键菜单;
 
@@ -40,7 +42,9 @@ namespace DockedTools.Features.Tray
         // 退出应用程序时的回调函数，可为空
         private readonly Action? _exitAction;
         // 全局快捷键管理器，负责处理快捷键注册和监听
-        private readonly GlobalHotkeyManager? _hotkeyManager;
+        // ⚠️ 不是 readonly：它必须在托盘独立 UI 线程上构造（宿主窗口跟着构造线程走），
+        //      而构造动作发生在 Initialize() 里，构造函数的线程不是那条线程。
+        private GlobalHotkeyManager? _hotkeyManager;
         // 缓存的托盘菜单（鼠标模式），避免每次右键都重新创建
         private MenuFlyout? _mouseMenu;
         // 缓存的托盘菜单（触摸模式），避免每次右键都重新创建
@@ -55,6 +59,13 @@ namespace DockedTools.Features.Tray
         private TrayUIThreadHost? _trayHost;
         // 主 UI 线程的 DispatcherQueue，用于把菜单点击切回主线程
         private readonly Microsoft.UI.Dispatching.DispatcherQueue? _mainDispatcher;
+
+        // 主 UI 线程的托管线程 id，只为一件事：取证。
+        // WM_HOTKEY 落在谁的队列由「调用 RegisterHotKey 的那条线程」决定
+        //（官方："placed at the top of the message queue associated with the thread
+        //  that registered the hot key"），而这条线程就是注册时所在的宿主线程。
+        // 「宿主 tid ≠ 主线程 tid」是这条迁移唯一能落盘的证据。
+        private readonly int _mainThreadId;
 
         /// <summary>
         /// 托盘是否运行在独立 UI 线程上（false 表示已降级到主线程，卡死时会跟着一起死）
@@ -78,10 +89,14 @@ namespace DockedTools.Features.Tray
 
             // 缓存主线程 DispatcherQueue：托盘线程的菜单点击要切回这里操作主窗口
             _mainDispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+            // 记下这条线程的 id，供热键取证日志对比（构造函数跑在主 UI 线程）
+            _mainThreadId = Environment.CurrentManagedThreadId;
 
-            // 创建全局快捷键管理器，使用 lambda 避免方法引用绑定实例
-            // 热键回调不一定落在主线程，所以统一走 RunOnMainThread
-            _hotkeyManager = new GlobalHotkeyManager(() => RunOnMainThread(ShowMainWindow));
+            // 全局快捷键管理器**不在这里创建**。
+            // 注册只能落在宿主窗口所在的那条线程上，而 WM_HOTKEY 归「调用 RegisterHotKey
+            // 的那条线程」的队列；构造函数跑在主线程，等于把快捷键绑死在主窗口的消息泵上 ——
+            // 主窗口一卡死，托盘还能点、快捷键却静默失灵。
+            // 创建点挪到 InitializeHotkeyManager()，跟着托盘的线程模式走。
         }
 
         /// <summary>
@@ -162,9 +177,44 @@ namespace DockedTools.Features.Tray
             DockedTools.Features.Pages.Lab.LabPage.HideTrayRateButtonSettingsChanged += OnHideTrayRateButtonSettingsChanged;
 
             // 初始化全局快捷键（在托盘图标创建之后）
+            // ⚠️ 独立线程模式下必须投给托盘线程：快捷键的宿主窗口是在「首次触碰
+            // HotkeyManager.Current 的那条线程」上建的，注册也只能在那条线程上做，
+            // 而 WM_HOTKEY 就落在「调用 RegisterHotKey 的那条线程」的队首
+            //（官方口径见 功能/快捷键/全局快捷键管理器.cs 的 _ownerQueue 注释）。
+            // 留在主线程创建，就等于把快捷键重新绑回主窗口的消息泵 ——
+            // 上面花力气把托盘搬到独立线程的意义会被这条抵消掉。
+            if (_trayHost == null || !_trayHost.TryEnqueue(InitializeHotkeyManager))
+            {
+                // 降级模式（托盘本来在主线程），以及托盘线程已经在收摊、投递失败的情况。
+                // 后者退回主线程而不是放弃注册：快捷键和主窗口共命运，也总比压根不生效强。
+                InitializeHotkeyManager();
+            }
+        }
+
+        /// <summary>
+        /// 在调用方所在线程上创建并初始化全局快捷键管理器
+        ///
+        /// 【调用约定】独立线程模式下由 TrayUIThreadHost 在托盘 UI 线程上回调；
+        /// 降级模式下由 Initialize() 直接在主线程调用。
+        /// 谁调用这条线程，快捷键的宿主窗口就建在谁身上，之后所有注册/注销/重试
+        /// 都由 GlobalHotkeyManager 内部切回这条线程，调用方不必再管。
+        /// </summary>
+        private void InitializeHotkeyManager()
+        {
             try
             {
-                _hotkeyManager?.Initialize();
+                // 先落证据再注册：这两个 tid 不相等，才说明热键真的脱离了主线程的消息泵。
+                // 没有这一行，事后从日志里分不清走的是托盘线程还是降级路径 ——
+                // 而「主窗口卡死时热键还活不活」正是这次迁移买到的东西。
+                LogService.Info(
+                    "全局快捷键",
+                    $"宿主线程 tid={Environment.CurrentManagedThreadId}，主 UI 线程 tid={_mainThreadId}" +
+                    "（不等＝热键不跟主窗口的消息泵共生死）");
+
+                // 使用 lambda 避免方法引用绑定实例。
+                // 回调落在托盘线程，而显示/隐藏主窗口只能在主线程做，所以包一层切回。
+                _hotkeyManager = new GlobalHotkeyManager(() => RunOnMainThread(ShowMainWindow));
+                _hotkeyManager.Initialize();
                 System.Diagnostics.Debug.WriteLine("[TrayIconManager] Global hotkey initialized successfully.");
             }
             catch (Exception ex)
@@ -631,6 +681,13 @@ namespace DockedTools.Features.Tray
                 DockedTools.Features.Pages.Lab.LabPage.HideTrayRateButtonSettingsChanged -= OnHideTrayRateButtonSettingsChanged;
 
                 // 释放快捷键管理器资源
+                // ⚠️ 这条必须排在下面 _trayHost.Shutdown() 之前：快捷键现在住在托盘线程上，
+                // Dispose 内部是往那条队列投递注销动作的，官方口径保证它先于退出指令跑到：
+                // "The queue will invoke callback serially"，而 EnqueueEventLoopExit 本身
+                // 也是 enqueue 进去的一条消息，只能排在后面。
+                // 队列一旦开始收摊就投不进去了（官方："Once ShutdownQueueAsync() has been
+                // called, the queue will not queue new tasks and this method will return false"），
+                // 那时热键只能等线程随进程消失后由系统回收，交接期间会多占一会儿组合键。
                 _hotkeyManager?.Dispose();
 
                 // 注意：菜单缓存不在这里清。

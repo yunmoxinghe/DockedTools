@@ -1,11 +1,14 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Runtime.InteropServices.WindowsRuntime;
 using Windows.Storage.Streams;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using DockedTools.Features.Pages.WebApp.Shared;
 using DockedTools.Features.Pages.WebApp.Browser;
@@ -18,7 +21,6 @@ using DockedTools.Features.Pages.Settings;
 using SymbolIcon = Microsoft.UI.Xaml.Controls.SymbolIcon;
 using Symbol = Microsoft.UI.Xaml.Controls.Symbol;
 using Visibility = Microsoft.UI.Xaml.Visibility;
-using HorizontalAlignment = Microsoft.UI.Xaml.HorizontalAlignment;
 using ImageIcon = Microsoft.UI.Xaml.Controls.ImageIcon;
 using SettingsCard = CommunityToolkit.WinUI.Controls.SettingsCard;
 
@@ -34,6 +36,69 @@ namespace DockedTools.Features.Pages.Home
         private double _lastAppliedMargin = -1;
         private double _lastMeasuredWidth = -1;
 
+        // ==================== 入口列表：真虚拟化 ====================
+        //
+        // 【跟上一版的区别】
+        // 上一版是「首屏 4 条 + 后台每批 6 条往 StackPanel.Children 里塞」，虽然把补批和滚动
+        // 解耦了，但元素还是全量上树：120 条就是 120 个 SettingsCard + 120 张图，滚动时
+        // 每一帧都在拖着一整棵与视口无关的树。
+        //
+        // 现在交给 ListView：ItemsSource 一次性给全量（ExtentHeight 首帧就按全量估算，
+        // 滚动条行程稳定），实际元素只有视口附近那十几个，滚出视口的容器被回收复用。
+        //
+        // ⚠️ 【补批 / 解码仍然不能挂在 ScrollViewer.ViewChanged 上】
+        //    旧版「滚到距底 240px 才补」的教训：拖到底 → 触发补批 → ExtentHeight 变大 →
+        //    滑块被顶回去，实测连续四次「拖到底」只到 23.5% → 51.9% → 65.1% → 77.8%。
+        //    这里数据一次性给全，图标解码完全在后台跑，跟滚动位置无关。
+        //
+        // 【图标与容器复用】
+        // 每个数据项自己是「图标的所有者」（HomeShortcutItem.Icon），模板用 x:Bind 单向绑定。
+        // 容器被回收给另一项时，x:Bind 跟着新数据项重新求值，旧项的解码结果只会写回旧项，
+        // 不会串到当前显示这一项上；也不存在「闭包捕获旧项」的处理器泄漏。
+        //
+        // 【首屏可交互】
+        // 先把首屏那一屏的图标解码完，再把 ItemsSource 交给 ListView —— 首帧就是「带图标的卡片」，
+        // 不会重现"卡片先到、图标最后才亮"。剩下的图标后台按批解码，只写回各自的数据项。
+
+        /// <summary>首屏先解码多少张图标（解码完才把列表交给 ListView）</summary>
+        private const int FirstScreenIconCount = 8;
+
+        /// <summary>后台每批解码多少张图标</summary>
+        private const int IconBatchSize = 6;
+
+        /// <summary>本轮列表用的图标注色主题（换主题会重建整列，那时才变）</summary>
+        private ElementTheme _listIconTheme = ElementTheme.Default;
+
+        /// <summary>列表世代：每次重建 +1，用来作废旧世代还在飞的解码 / 补抓</summary>
+        private int _listGeneration;
+
+        /// <summary>当前绑定到 ListView 的数据项</summary>
+        private ObservableCollection<HomeShortcutItem> _items = new();
+
+        /// <summary>appId → 数据项，图标更新 / 删除时按 Id 找项，不用遍历视口</summary>
+        private Dictionary<string, HomeShortcutItem> _itemById = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// 已解码的图标源（appId → ImageSource）。只在 UI 线程读写。
+        /// 解码结果缓存在这里，容器被复用 / 再次滚回视口时能立刻拿到图，不用重复解码。
+        /// </summary>
+        private readonly Dictionary<string, ImageSource?> _iconCache = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// 正在解码的 (appId, 世代)。同一个应用同时只解一次，避免首屏预热和后台批次重复解码。
+        /// 带上世代是为了让「重建前发出的解码」不会挡住「重建后同一应用」的解码。
+        /// </summary>
+        private readonly HashSet<(string Id, int Generation)> _iconRequests = new();
+
+        /// <summary>ListView 内部那个 ScrollViewer（顶栏智能标题要挂它的 ViewChanged）</summary>
+        private ScrollViewer? _homeScrollViewer;
+
+        /// <summary>正在播放的删除淡出动画（容器会被复用，收尾时必须把 Opacity 还原）</summary>
+        private Microsoft.UI.Xaml.Media.Animation.Storyboard? _deletionStoryboard;
+
+        /// <summary>正在淡出的卡片（删除完成后还原它的 Opacity）</summary>
+        private SettingsCard? _deletionCard;
+
         /// <summary>
         /// 事件订阅是不是还挂着。
         ///
@@ -47,6 +112,7 @@ namespace DockedTools.Features.Pages.Home
         public HomePage()
         {
             InitializeComponent();
+            HomeList.ItemsSource = _items;
             Loaded += OnLoaded;
             Unloaded += OnUnloaded;
             SizeChanged += OnSizeChanged;
@@ -104,12 +170,34 @@ namespace DockedTools.Features.Pages.Home
         public void ReleaseOnClose()
         {
             UnsubscribeEvents();
+            ResetDeletionAnimation();
+            _listGeneration++;
         }
 
         protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
         {
             base.OnNavigatedTo(e);
-            _智能标题.Setup(this, HomeScrollViewer, PageTitleBlock);
+
+            // ListView 的 ScrollViewer 在它的模板里，不在页面命名空间里。
+            // 先 ApplyTemplate 把模板实例化出来；万一这拍还没有（极端情况），退到 Loaded 再挂一次。
+            if (GetHomeScrollViewer() is { } scrollViewer)
+            {
+                _智能标题.Setup(this, scrollViewer, PageTitleBlock);
+            }
+            else
+            {
+                HomeList.Loaded += OnHomeListLoadedForTitle;
+            }
+        }
+
+        private void OnHomeListLoadedForTitle(object sender, RoutedEventArgs e)
+        {
+            HomeList.Loaded -= OnHomeListLoadedForTitle;
+
+            if (GetHomeScrollViewer() is { } scrollViewer)
+            {
+                _智能标题.Setup(this, scrollViewer, PageTitleBlock);
+            }
         }
 
         protected override void OnNavigatedFrom(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
@@ -128,6 +216,44 @@ namespace DockedTools.Features.Pages.Home
         private void OnUnloaded(object sender, RoutedEventArgs e)
         {
             UnsubscribeEvents();
+
+            // 出树就把世代作废：还在飞的解码 / 补抓回来时不该再往已经离屏的列表里写。
+            ResetDeletionAnimation();
+            HomeList.Loaded -= OnHomeListLoadedForTitle;
+            _listGeneration++;
+        }
+
+        /// <summary>找到 ListView 模板里的那个 ScrollViewer（顶栏标题的滚动联动要用）</summary>
+        private ScrollViewer? GetHomeScrollViewer()
+        {
+            if (_homeScrollViewer is not null)
+            {
+                return _homeScrollViewer;
+            }
+
+            HomeList.ApplyTemplate();
+            _homeScrollViewer = FindDescendant<ScrollViewer>(HomeList);
+            return _homeScrollViewer;
+        }
+
+        private static T? FindDescendant<T>(DependencyObject root) where T : DependencyObject
+        {
+            int count = VisualTreeHelper.GetChildrenCount(root);
+            for (int i = 0; i < count; i++)
+            {
+                DependencyObject child = VisualTreeHelper.GetChild(root, i);
+                if (child is T match)
+                {
+                    return match;
+                }
+
+                if (FindDescendant<T>(child) is { } found)
+                {
+                    return found;
+                }
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -148,7 +274,7 @@ namespace DockedTools.Features.Pages.Home
                 "IconUpdated");
         }
 
-        /// <summary>重新取这一个应用的图标并换到它的卡片上；卡片不在列表里就什么都不做</summary>
+        /// <summary>重新取这一个应用的图标并换到它的数据项上；这一项不在列表里就什么都不做</summary>
         private async Task RefreshCardIconAsync(string appId)
         {
             var shortcuts = await WebAppShortcutStore.LoadAsync();
@@ -158,28 +284,30 @@ namespace DockedTools.Features.Pages.Home
                 return;
             }
 
-            foreach (var child in WebAppsList.Children)
+            byte[]? bytes = updated.IconBytes is { Length: > 0 } b ? b : null;
+
+            // 落盘一份（顶栏 / 侧边栏也按路径取图），卡片自己走内存解码
+            if (bytes is not null)
             {
-                if (child is SettingsCard card &&
-                    card.Tag is WebAppShortcut existing &&
-                    string.Equals(existing.Id, appId, StringComparison.Ordinal))
-                {
-                    card.Tag = updated;
+                await WebAppIconCache.SaveAsync(updated.Id, bytes, ActualTheme);
+            }
 
-                    byte[]? bytes = updated.IconBytes is { Length: > 0 } b ? b : null;
+            // ⭐ 读【本页主题那一版】，别直接解码 IconBytes ——
+            //    那份是没染过色的原始字节，深色主题下会是黑图标。
+            ImageSource? source = await WebAppIconCache.DecodeAsync(
+                WebAppIconCache.TryReadCachedBytes(updated.Id, ActualTheme) ?? bytes);
 
-                    // 落盘一份（顶栏 / 侧边栏也按路径取图），卡片自己走内存解码
-                    if (bytes is not null)
-                    {
-                        await WebAppIconCache.SaveAsync(updated.Id, bytes, ActualTheme);
-                    }
+            if (!_itemById.TryGetValue(appId, out HomeShortcutItem? item))
+            {
+                return;
+            }
 
-                    // ⭐ 读【本页主题那一版】，别直接解码 IconBytes ——
-                    //    那份是没染过色的原始字节，深色主题下会是黑图标。
-                    ApplyCardIcon(card, await WebAppIconCache.DecodeAsync(
-                        WebAppIconCache.TryReadCachedBytes(updated.Id, ActualTheme) ?? bytes));
-                    return;
-                }
+            item.Shortcut = updated;
+
+            if (source is not null)
+            {
+                _iconCache[appId] = source;
+                item.Icon = new ImageIcon { Source = source };
             }
         }
 
@@ -210,7 +338,16 @@ namespace DockedTools.Features.Pages.Home
 
             if (Math.Abs(horizontalMargin - _lastAppliedMargin) > 0.01)
             {
-                PageContentPanel.Margin = new Thickness(horizontalMargin, 0, horizontalMargin, 0);
+                // ⚠️ 左右留白必须套在【视口内部】（ListView.Padding），不能套在 ListView.Margin 上。
+                //    ListView 的滚动条属于它内部那个 ScrollViewer，滚动条是贴在 ScrollViewer 视口的
+                //    右边缘"覆盖"显示的（官方文档：可见时覆盖内容 16px）。给 ListView 加 Margin
+                //    会把整个视口一起缩窄，滚动条也就跟着离窗口右边缘越来越远 —— 实测 36 DIP 的
+                //    Margin 让滚动条右边缘比内容区右边缘内缩了 54px（150% DPI）。
+                //    Padding 只缩内容区，ScrollViewer 仍然铺满，滚动条才会贴在右边缘。
+                //    注意：实测 ListView.Padding 同时作用于 Header / Footer（标题左边缘和卡片
+                //    左边缘本来就对齐），所以这里不要再给 Header / Footer 加 Margin，否则二次内缩。
+                HomeList.Padding = new Thickness(horizontalMargin, 0, horizontalMargin, 0);
+
                 _lastAppliedMargin = horizontalMargin;
             }
             _lastMeasuredWidth = width;
@@ -245,76 +382,176 @@ namespace DockedTools.Features.Pages.Home
 
         private async Task LoadWebAppsAsync()
         {
+            int generation = ++_listGeneration;
             _iconProbe.Restart();
+
             var shortcuts = await WebAppShortcutStore.LoadAsync();
+
+            // 期间又触发了一轮重建（连点新建 / 换主题 / 刷新）：这一轮作废，别去动新列表
+            if (generation != _listGeneration)
+            {
+                return;
+            }
+
+            _listIconTheme = ActualTheme;
+            _iconCache.Clear();
+            _iconRequests.Clear();
 
             if (shortcuts.Count == 0)
             {
-                WebAppsList.Children.Clear();
+                _itemById = new Dictionary<string, HomeShortcutItem>(StringComparer.Ordinal);
+                _items = new ObservableCollection<HomeShortcutItem>();
+                HomeList.ItemsSource = _items;
                 EmptyText.Visibility = Visibility.Visible;
                 return;
             }
 
             EmptyText.Visibility = Visibility.Collapsed;
-            System.Diagnostics.Debug.WriteLine($"[HomeIcon] +{_iconProbe.ElapsedMilliseconds}ms 列表数据到手 {shortcuts.Count} 条");
 
-            // ⭐ 图标【全部并发解码完】再一次性建整列 —— 这是 git 里 6c51d5a 那一版的路子
-            //    （InMemoryRandomAccessStream 内存解码），只是在此基础上补了 SVG 与磁盘缓存。
-            //
-            //    踩过的坑一：await 写在构建循环里 ⇒ 每取到一张就 Add 一张，第一张孤零零先蹦。
-            //    踩过的坑二：改成 Task.WhenAll 落盘 + Uri 解码 ⇒ 它必须等最慢那张，
-            //    而且 SaveAsync 命中「按主题重画」时还要扛当时那套 WebView2 光栅内核的冷启动（实测 1.4s+）。
-            //    踩过的坑三：两阶段（先出整列、后台逐张重画）⇒ 被重画的那张就是换得最晚的那张。
-            //    踩过的坑四：只读磁盘缓存 + 每张自己走 Uri 异步解码 ⇒ 整列 Add 完 +114ms，
-            //    最后一张就绪 +865ms —— 中间 750ms 卡片全是空图标位，然后一张张亮起来，
-            //    观感依旧是「某个图标最后一个蹦出来」（实测日志 dt-debug15）。
-            //
-            //    所以：解码是并发的（不排队），但上树是一次性的（不逐个亮）。
-            //    整列出现那一刻，所有图标已经在内存里了。
-            var decoding = new Task<Microsoft.UI.Xaml.Media.ImageSource?>[shortcuts.Count];
-
-            // 主题按本页实际生效的取（不是顶栏那份）—— 见 DecodeIconAsync 的说明
-            Microsoft.UI.Xaml.ElementTheme theme = ActualTheme;
-
-            for (int i = 0; i < shortcuts.Count; i++)
+            var items = new List<HomeShortcutItem>(shortcuts.Count);
+            foreach (WebAppShortcut shortcut in shortcuts)
             {
-                decoding[i] = DecodeIconAsync(shortcuts[i], theme);
+                items.Add(new HomeShortcutItem(shortcut));
             }
 
-            Microsoft.UI.Xaml.Media.ImageSource?[] icons = await Task.WhenAll(decoding);
-            System.Diagnostics.Debug.WriteLine($"[HomeIcon] +{_iconProbe.ElapsedMilliseconds}ms 图标全部解码完");
+            // ⭐ 首屏图标先解码完，再把 ItemsSource 交出去 —— 首帧就是「带图标的卡片」，
+            //    不会出现卡片先到、图标后亮。解码数量控制在一屏左右，进页面的等待跟以前的首批相当。
+            int warm = Math.Min(FirstScreenIconCount, items.Count);
+            await Task.WhenAll(items.Take(warm).Select(item => PrimeIconAsync(item, generation)));
 
-            // ⭐ 整列换血时先摘掉增删动画：那套淡入 + 重排是给单条增删用的，
-            //    整列重建时它会把「清空 → 重填」完整演一遍，抖得比闪还明显。
-            Microsoft.UI.Xaml.Media.Animation.TransitionCollection? transitions = WebAppsList.ChildrenTransitions;
-            WebAppsList.ChildrenTransitions = null;
-            WebAppsList.Children.Clear();
-
-            for (int i = 0; i < shortcuts.Count; i++)
+            if (generation != _listGeneration)
             {
-                WebAppShortcut shortcut = shortcuts[i];
+                return;
+            }
 
-                var card = new SettingsCard
+            System.Diagnostics.Debug.WriteLine(
+                $"[HomeIcon] +{_iconProbe.ElapsedMilliseconds}ms 首屏 {warm} 张图标就绪，{items.Count} 条交给虚拟化列表");
+
+            var lookup = new Dictionary<string, HomeShortcutItem>(items.Count, StringComparer.Ordinal);
+            foreach (HomeShortcutItem item in items)
+            {
+                lookup[item.Shortcut.Id] = item;
+            }
+
+            _itemById = lookup;
+            _items = new ObservableCollection<HomeShortcutItem>(items);
+
+            // ⭐ 一次性给全量：ExtentHeight 首帧就按全量估算，滚动条的可拖行程固定，
+            //    不会像「边滚边补」那样越拖越长、滑块被顶回去。
+            HomeList.ItemsSource = _items;
+
+            // 首屏这批的缺图补抓 / 卡片档升级
+            var warmItems = items.GetRange(0, warm);
+            BackfillMissingIcons(warmItems.Select(item => item.Shortcut).ToList());
+            _ = UpgradeCardIconsAsync(warmItems, generation);
+
+            // 剩下的图标后台按批解码，跟滚动位置无关
+            _ = DecodeRemainingIconsAsync(items, warm, generation);
+        }
+
+        /// <summary>
+        /// 后台把剩余图标按批解码到各自的数据项上。
+        ///
+        /// 【为什么不挂在滚动上】见文件头那段：跟着滚动触发会让 ExtentHeight 一直变长。
+        /// 这里一次性把全量图标解完，只写数据项、不碰视口；容器滚回来时直接命中缓存。
+        /// </summary>
+        private async Task DecodeRemainingIconsAsync(
+            IReadOnlyList<HomeShortcutItem> items, int start, int generation)
+        {
+            try
+            {
+                for (int index = start; index < items.Count; )
                 {
-                    HorizontalAlignment = HorizontalAlignment.Stretch,
-                    Header = shortcut.Name,
-                    Description = shortcut.Url,
-                    IsClickEnabled = true,
-                    Tag = shortcut // ⭐ 添加 Tag 用于删除时识别
-                };
+                    if (generation != _listGeneration)
+                    {
+                        return;
+                    }
 
-                card.Click += (sender, e) => OnCardClick(shortcut);
+                    int end = Math.Min(items.Count, index + IconBatchSize);
+                    var decoding = new Task[end - index];
+                    for (int i = index; i < end; i++)
+                    {
+                        decoding[i - index] = PrimeIconAsync(items[i], generation);
+                    }
 
-                ApplyCardIcon(card, icons[i]);
+                    await Task.WhenAll(decoding);
 
-                WebAppsList.Children.Add(card);
+                    var batch = new List<HomeShortcutItem>(end - index);
+                    var shortcuts = new List<WebAppShortcut>(end - index);
+                    for (int i = index; i < end; i++)
+                    {
+                        batch.Add(items[i]);
+                        shortcuts.Add(items[i].Shortcut);
+                    }
+
+                    BackfillMissingIcons(shortcuts);
+                    _ = UpgradeCardIconsAsync(batch, generation);
+
+                    index = end;
+                    await Task.Yield();
+                }
+
+                System.Diagnostics.Debug.WriteLine(
+                    $"[HomeIcon] +{_iconProbe.ElapsedMilliseconds}ms 全部图标就绪 {items.Count} 条");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[HomePage] 后台解码图标失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 解一张图标并挂到【它自己的数据项】上（不落任何容器）。
+        ///
+        /// 容器复用安全的关键在这里：结果只写 item.Icon，由 x:Bind 决定它此刻显不显示。
+        /// 即使这一项已经被滚出视口、容器被复用给别的项，这里也不会摸到别人的界面。
+        /// </summary>
+        private async Task PrimeIconAsync(HomeShortcutItem item, int generation)
+        {
+            string appId = item.Shortcut.Id;
+
+            if (_iconCache.TryGetValue(appId, out ImageSource? cached))
+            {
+                if (cached is not null)
+                {
+                    item.Icon = new ImageIcon { Source = cached };
+                }
+                return;
             }
 
-            WebAppsList.ChildrenTransitions = transitions;
-            System.Diagnostics.Debug.WriteLine($"[HomeIcon] +{_iconProbe.ElapsedMilliseconds}ms 整列 Add 完");
+            (string Id, int Generation) request = (appId, generation);
+            if (!_iconRequests.Add(request))
+            {
+                return;
+            }
 
-            BackfillMissingIcons(shortcuts);
-            _ = UpgradeCardIconsAsync(shortcuts, theme);
+            try
+            {
+                ImageSource? source = await DecodeIconAsync(item.Shortcut, _listIconTheme);
+
+                // 解码期间换了主题 / 刷新了列表：这份结果属于旧世代，丢掉
+                if (generation != _listGeneration)
+                {
+                    return;
+                }
+
+                _iconCache[appId] = source;
+
+                if (source is null)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[HomeIcon] +{_iconProbe.ElapsedMilliseconds}ms 地球 {item.Shortcut.Name}");
+                    return;
+                }
+
+                System.Diagnostics.Debug.WriteLine(
+                    $"[HomeIcon] +{_iconProbe.ElapsedMilliseconds}ms 挂上(已解码) {item.Shortcut.Name}");
+                item.Icon = new ImageIcon { Source = source };
+            }
+            finally
+            {
+                _iconRequests.Remove(request);
+            }
         }
 
         /// <summary>
@@ -343,62 +580,78 @@ namespace DockedTools.Features.Pages.Home
         ///
         /// 卡片档到位后换上去只是「变清楚」，不是「从无到有」——
         /// 列表早就用通用档完整显示着了，这里不会重现「某张最后蹦出来」。
+        ///
+        /// ⚠️ 【探测那一段必须显式 Task.Run】位图源走到 EnsureCardAsync 里就是
+        ///    「读一次原件 + 清一次旧卡片档 + 返回 null」，全程没有真正的异步步骤 ——
+        ///    这样的任务 await 下去不会挂起，调用线程一路把整批跑完。而里面每一步
+        ///    TryGetCardPath / DeleteCardFiles 都是一次 web-icons 全目录枚举，
+        ///    压在 UI 线程上就是"进主页整页无响应"。解码那一步相反，必须留在 UI 线程
+        ///    （BitmapImage / SvgImageSource 有线程亲和），所以只把磁盘那半段挪走。
         /// </summary>
         private async Task UpgradeCardIconsAsync(
-            IReadOnlyList<WebAppShortcut> shortcuts, Microsoft.UI.Xaml.ElementTheme theme)
+            IReadOnlyList<HomeShortcutItem> items, int generation)
         {
-            foreach (WebAppShortcut shortcut in shortcuts)
+            foreach (HomeShortcutItem item in items)
             {
+                // 列表已经重建（换主题 / 刷新 / 新建）：这一轮画的都是旧主题，别接着往下跑
+                if (generation != _listGeneration)
+                {
+                    return;
+                }
+
+                WebAppShortcut shortcut = item.Shortcut;
                 if (shortcut.IconBytes is not { Length: > 0 } iconBytes)
                 {
                     continue;
                 }
 
                 string appId = shortcut.Id;
+                Microsoft.UI.Xaml.ElementTheme theme = _listIconTheme;
 
-                string? before = WebAppIconCache.TryGetCardPath(appId, theme);
+                (bool Changed, string? After, byte[]? Bytes) probe = await Task.Run(async () =>
+                {
+                    string? before = WebAppIconCache.TryGetCardPath(appId, theme);
 
-                // 顺带做两件事：矢量源 ⇒ 画一张 48px 的卡片档；位图源 ⇒ 返回 null，
-                // 并把位图时代留下的旧卡片档清掉（见 WebAppIconCache.EnsureCardAsync）。
-                _ = await WebAppIconCache.EnsureCardAsync(appId, iconBytes, theme);
+                    // 顺带做两件事：矢量源 ⇒ 画一张 48px 的卡片档；位图源 ⇒ 返回 null，
+                    // 并把位图时代留下的旧卡片档清掉（见 WebAppIconCache.EnsureCardAsync）。
+                    _ = await WebAppIconCache.EnsureCardAsync(appId, iconBytes, theme);
 
-                string? after = WebAppIconCache.TryGetCardPath(appId, theme);
+                    string? after = WebAppIconCache.TryGetCardPath(appId, theme);
 
-                // 只有卡片档「从无到有」或「从有到无」时才需要换图：
-                //   前者 = 矢量源刚画好，换上去变清楚；
-                //   后者 = 旧档被作废，界面上挂的那张已经没了，必须换回通用档。
-                // 两边都没变说明卡片上挂的已经是对的，不动它（省一次解码 + 一次重挂）。
-                if (string.Equals(before, after, StringComparison.OrdinalIgnoreCase))
+                    // 只有卡片档「从无到有」或「从有到无」时才需要换图：
+                    //   前者 = 矢量源刚画好，换上去变清楚；
+                    //   后者 = 旧档被作废，界面上挂的那张已经没了，必须换回通用档。
+                    // 两边都没变说明卡片上挂的已经是对的，不动它（省一次解码 + 一次重挂）。
+                    if (string.Equals(before, after, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return (false, after, (byte[]?)null);
+                    }
+
+                    byte[]? bytes = after is not null
+                        ? WebAppIconCache.TryReadCardBytes(appId, theme)
+                        : WebAppIconCache.TryReadCachedBytes(appId, theme);
+
+                    return (true, after, bytes);
+                });
+
+                if (!probe.Changed || generation != _listGeneration)
                 {
                     continue;
                 }
 
-                Microsoft.UI.Xaml.Media.ImageSource? source =
-                    await WebAppIconCache.DecodeAsync(
-                        after is not null
-                            ? WebAppIconCache.TryReadCardBytes(appId, theme)
-                            : WebAppIconCache.TryReadCachedBytes(appId, theme));
+                ImageSource? source = await WebAppIconCache.DecodeAsync(probe.Bytes);
                 if (source is null)
                 {
                     continue;
                 }
 
                 System.Diagnostics.Debug.WriteLine(
-                    $"[HomeIcon] 卡片档{(after is not null ? "就绪" : "已作废，退回通用档")} {shortcut.Name}");
+                    $"[HomeIcon] 卡片档{(probe.After is not null ? "就绪" : "已作废，退回通用档")} {shortcut.Name}");
 
-                DispatcherQueue.TryEnqueue(() =>
-                {
-                    foreach (var child in WebAppsList.Children)
-                    {
-                        if (child is SettingsCard card &&
-                            card.Tag is WebAppShortcut tagged &&
-                            string.Equals(tagged.Id, appId, StringComparison.Ordinal))
-                        {
-                            ApplyCardIcon(card, source);
-                            return;
-                        }
-                    }
-                });
+                // 和首屏解码走同一条路：写回缓存 + 写回【这一项自己】。
+                // 不用去找容器 —— 容器此刻显示的是不是这一项，由 x:Bind 保证。
+                _iconCache[appId] = source;
+                item.Icon = new ImageIcon { Source = source };
             }
         }
 
@@ -487,7 +740,8 @@ namespace DockedTools.Features.Pages.Home
             }
 
             // 落盘一份（顶栏 / 侧边栏也按路径取图）
-            WebAppIconCache.Save(appId, bytes, ActualTheme);
+            // 必须 await：下面 UpdateAsync 之后别处会按路径取图，写没完成就是空图标。
+            await WebAppIconCache.SaveToDiskAsync(appId, bytes, ActualTheme);
 
             // 字节写回快捷方式，下次进主页不用再抓
             await WebAppShortcutStore.UpdateAsync(items =>
@@ -512,25 +766,19 @@ namespace DockedTools.Features.Pages.Home
                 return changed ? next : null;
             });
 
-            Microsoft.UI.Xaml.Media.ImageSource? source = await WebAppIconCache.DecodeAsync(bytes);
+            ImageSource? source = await WebAppIconCache.DecodeAsync(bytes);
             if (source is null)
             {
                 return;
             }
 
-            DispatcherQueue.TryEnqueue(() =>
+            _iconCache[appId] = source;
+
+            // 只写回数据项自己 —— 它现在在不在视口里、容器有没有被复用，都与这里无关
+            if (_itemById.TryGetValue(appId, out HomeShortcutItem? item))
             {
-                foreach (var child in WebAppsList.Children)
-                {
-                    if (child is SettingsCard card &&
-                        card.Tag is WebAppShortcut tagged &&
-                        string.Equals(tagged.Id, appId, StringComparison.Ordinal))
-                    {
-                        ApplyCardIcon(card, source);
-                        return;
-                    }
-                }
-            });
+                item.Icon = new ImageIcon { Source = source };
+            }
         }
 
         /// <summary>
@@ -547,41 +795,44 @@ namespace DockedTools.Features.Pages.Home
             // ⭐ 卡片档优先：主页 SettingsCard 的图标位被 Viewbox 卡在 20×20，
             //    高 DPI 下得用更大那套才不发虚（尺寸依据见 WebAppIconCache.CardIconSize）。
             //    顶栏 / 侧边栏那套是给 16~20px 用的，拿过来放大就是「糊」。
-            byte[]? bytes = WebAppIconCache.TryReadCardBytes(shortcut.Id, theme)
-                            ?? WebAppIconCache.TryReadCachedBytes(shortcut.Id, theme);
+            //
+            // ⚠️ 这两个 TryRead 名字看着像内存读，其实各带一次 web-icons 全目录枚举
+            //    （TryGetCardPath / TryGetCachedPath）。原先它们在批循环里于 UI 线程上
+            //    同步跑完 —— 一批 12 条就是 24 次目录扫描，磁盘停顿 / 杀软扫描没有上限。
+            //    挪进 Task.Run 后一批的探测既离开了 UI 线程，彼此也真的并发。
+            string appId = shortcut.Id;
+
+            byte[]? bytes = await Task.Run(() =>
+                WebAppIconCache.TryReadCardBytes(appId, theme)
+                ?? WebAppIconCache.TryReadCachedBytes(appId, theme));
 
             if (bytes is null && shortcut.IconBytes is { Length: > 0 } iconBytes)
             {
-                // 缓存缺失才落一次盘（同步、纯磁盘写，毫秒级），别处（顶栏 / 侧边栏）也要用
-                WebAppIconCache.Save(shortcut.Id, iconBytes, theme);
+                // 缓存缺失才落一次盘。原先这里是同步写（注释还写着「毫秒级」），
+                // 可磁盘停顿 / 杀软扫描 / MSIX 容器重定向写入都没有上限，而它坐在 UI 线程上 ——
+                // 主页出列表正好是它最忙的时候。改成 await，落盘挪到线程池。
+                await WebAppIconCache.SaveToDiskAsync(appId, iconBytes, theme);
 
                 // ⭐ 落盘那一步会把单色图标按主题染色，所以这里要读【染过色的那一版】，
                 //    而不是直接用 IconBytes —— 那份是原色，深色主题下会是黑图标。
-                bytes = WebAppIconCache.TryReadCachedBytes(shortcut.Id, theme) ?? iconBytes;
+                bytes = await Task.Run(() => WebAppIconCache.TryReadCachedBytes(appId, theme)) ?? iconBytes;
             }
 
             return await WebAppIconCache.DecodeAsync(bytes);
         }
 
         /// <summary>
-        /// 把图标挂到卡片上；拿不到 / 解不出来一律用地球图标占位。
+        /// 卡片点击：数据项从 DataContext 取。
         ///
-        /// 传进来的是【已经解码完】的源 —— 解码在 DecodeAsync 里做完了，
-        /// 解不出来就直接是 null，所以这里不会再出现「挂上去了但图还没解码完」的空图标位。
+        /// 不用闭包捕获项（旧写法 card.Click += (s, e) => OnCardClick(shortcut)）——
+        /// 容器会被复用，闭包会把旧项钉在事件上，既串项又泄漏。
         /// </summary>
-        private void ApplyCardIcon(SettingsCard card, Microsoft.UI.Xaml.Media.ImageSource? source)
+        private void OnHomeCardClick(object sender, RoutedEventArgs e)
         {
-            string name = card.Header as string ?? "?";
-
-            if (source is not null)
+            if (sender is SettingsCard { DataContext: HomeShortcutItem item })
             {
-                System.Diagnostics.Debug.WriteLine($"[HomeIcon] +{_iconProbe.ElapsedMilliseconds}ms 挂上(已解码) {name}");
-                card.HeaderIcon = new ImageIcon { Source = source };
-                return;
+                OnCardClick(item.Shortcut);
             }
-
-            System.Diagnostics.Debug.WriteLine($"[HomeIcon] +{_iconProbe.ElapsedMilliseconds}ms 地球 {name}");
-            card.HeaderIcon = new SymbolIcon(Symbol.Globe);
         }
 
         private void OnCardClick(WebAppShortcut shortcut)
@@ -623,54 +874,105 @@ namespace DockedTools.Features.Pages.Home
 
         private void OnDeletionStarting(object? sender, string appId)
         {
-            // 找到要删除的卡片并播放淡出动画
-            foreach (var child in WebAppsList.Children)
-            {
-                if (child is SettingsCard card && 
-                    card.Tag is WebAppShortcut shortcut && 
-                    shortcut.Id == appId)
-                {
-                    // 播放淡出动画
-                    var fadeOutAnimation = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation
-                    {
-                        From = 1.0,
-                        To = 0.0,
-                        Duration = new Duration(TimeSpan.FromMilliseconds(250))
-                    };
+            // 上一次删除的动画如果还没收尾，先还原（容器是复用的，Opacity 不能留在 0）
+            ResetDeletionAnimation();
 
-                    var storyboard = new Microsoft.UI.Xaml.Media.Animation.Storyboard();
-                    storyboard.Children.Add(fadeOutAnimation);
-                    Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(fadeOutAnimation, card);
-                    Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(fadeOutAnimation, "Opacity");
-                    storyboard.Begin();
-                    break;
-                }
+            if (!_itemById.TryGetValue(appId, out HomeShortcutItem? item))
+            {
+                return;
             }
+
+            // 只有这一项当前被实现（在视口内）才有卡片可淡出；不在视口里就等删除完成后直接移除
+            if (HomeList.ContainerFromItem(item) is not ListViewItem container ||
+                container.ContentTemplateRoot is not SettingsCard card)
+            {
+                return;
+            }
+
+            var fadeOutAnimation = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation
+            {
+                From = 1.0,
+                To = 0.0,
+                Duration = new Duration(TimeSpan.FromMilliseconds(250))
+            };
+
+            var storyboard = new Microsoft.UI.Xaml.Media.Animation.Storyboard();
+            storyboard.Children.Add(fadeOutAnimation);
+            Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(fadeOutAnimation, card);
+            Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(fadeOutAnimation, "Opacity");
+
+            _deletionStoryboard = storyboard;
+            _deletionCard = card;
+            storyboard.Begin();
         }
 
         private void OnDeletionCompleted(object? sender, string appId)
         {
-            // 找到卡片并移除
-            SettingsCard? cardToRemove = null;
-            foreach (var child in WebAppsList.Children)
+            // ⚠️ 必须先还原淡出：卡片所属的容器马上会被回收给别的项，
+            //    Opacity 停在 0 的话，下一项会「有卡片但看不见」。
+            ResetDeletionAnimation();
+
+            if (_itemById.Remove(appId, out HomeShortcutItem? item))
             {
-                if (child is SettingsCard card && 
-                    card.Tag is WebAppShortcut shortcut && 
-                    shortcut.Id == appId)
-                {
-                    cardToRemove = card;
-                    break;
-                }
+                _items.Remove(item);
             }
 
-            if (cardToRemove != null)
-            {
-                // 移除元素（触发补位动画）
-                WebAppsList.Children.Remove(cardToRemove);
+            EmptyText.Visibility = _items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
 
-                // 更新空状态显示
-                EmptyText.Visibility = WebAppsList.Children.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        private void ResetDeletionAnimation()
+        {
+            _deletionStoryboard?.Stop();
+            _deletionStoryboard = null;
+
+            if (_deletionCard is not null)
+            {
+                _deletionCard.Opacity = 1;
+                _deletionCard = null;
             }
         }
+    }
+
+    /// <summary>
+    /// 主页列表的数据项：把「图标」放在数据项自己身上，而不是放在会被复用的容器上。
+    ///
+    /// 这样容器复用后不存在「串图」：
+    ///   · 容器滚出视口再回来、或被复用给另一项，x:Bind 跟着 DataContext 重新求值；
+    ///   · 异步解码完成时只写回它自己的 item.Icon，不会摸到当前容器上显示的别项。
+    /// </summary>
+    public sealed class HomeShortcutItem : INotifyPropertyChanged
+    {
+        private IconElement _icon = new SymbolIcon(Symbol.Globe);
+
+        public HomeShortcutItem(WebAppShortcut shortcut)
+        {
+            Shortcut = shortcut;
+            Name = shortcut.Name;
+            Url = shortcut.Url;
+        }
+
+        public WebAppShortcut Shortcut { get; set; }
+
+        public string Name { get; }
+
+        public string Url { get; }
+
+        /// <summary>卡片图标；没解出来之前是地球占位</summary>
+        public IconElement Icon
+        {
+            get => _icon;
+            set
+            {
+                if (ReferenceEquals(_icon, value))
+                {
+                    return;
+                }
+
+                _icon = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Icon)));
+            }
+        }
+
+        public event PropertyChangedEventHandler? PropertyChanged;
     }
 }

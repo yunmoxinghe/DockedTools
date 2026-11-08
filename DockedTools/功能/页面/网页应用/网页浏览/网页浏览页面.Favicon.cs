@@ -810,7 +810,8 @@ namespace DockedTools.Features.Pages.WebApp.Browser
                 {
                     // ⭐ 光栅化产物的颜色是「抓图这一刻的主题」算出来的，换主题要拿原件重画 ——
                     //    没有原件的话那张 PNG 就永远定死在这个颜色上了。留一份在磁盘上。
-                    WebAppIconCache.SaveIconSource(appId, svgBytes);
+                    //    落盘挪到线程池：这里跑在 UI 线程的抓图链路上，同步写没有超时上限。
+                    await WebAppIconCache.SaveIconSourceToDiskAsync(appId, svgBytes);
                     return (raster, SvgRasterSize);
                 }
 

@@ -33,7 +33,14 @@ namespace DockedTools.Features.UnifiedCalls.Logging
     /// 写盘线程最多 5 秒后生效；文件或内容不合法时按 Info。
     /// 之所以用文件而不是应用内设置：用户出问题时报错往往在设置页能打开之前，
     /// 而 CLI / 记事本改一个文件就能让下一次复现带上完整细节。
-    /// Debug 档默认只在 Debug 编译下走控制台；开了这个开关才会落盘。
+    /// Debug 档默认只在 Debug 编译下走控制台；开了这个开关才会进日志链路。
+    ///
+    /// 【Debug 档的内存缓冲】
+    /// 开了 Debug 档也不等于逐条落盘：Debug 先进内存环形缓冲，**只有 Error 来了才把
+    /// 缓冲吐到磁盘**，并排在那条 Error 前面 —— 现场保住，平时的盘和 IO 都不付。
+    /// 这是官方 .NET log buffering 的同一套取舍。吐完之后 30 秒内 Debug 恢复直写。
+    /// 想退回「Debug 逐条落盘」的旧行为（例如要实时 tail），往 logs\buffer.txt 写 off。
+    /// Info / Warning / Error 不参与缓冲，行为与改造前一致。
     ///
     /// 【为什么全程只有一条写线程】
     /// 旧实现是 File.AppendAllText + 全局 lock，直接在调用线程上同步落盘。
@@ -89,6 +96,35 @@ namespace DockedTools.Features.UnifiedCalls.Logging
         // 完整堆栈 + 内部异常，又保证连着 20 条才够滚一次，历史档不会被单条吃掉。
         private const int MaxLogBytesPerEntry = 256 * 1024;
 
+        // ── Debug 档的内存缓冲 ──────────────────────────────────────────
+        // 官方口径把这个矛盾明说了：排查时想要详细日志，又不想为「从没看过的日志」
+        // 付存储代价。解法不是砍掉详细档，而是先进内存环形缓冲、出错时再落盘。
+        //
+        // 【为什么只缓冲 Debug】本机实测过一轮：Release 的 app.log 里 98% 是
+        // AotSafeSettings 的逐次读盘流水账，全是 Debug 档；Info/Warning 一次启动
+        // 才几十条，把它们也压进缓冲只会让 tail 看不到进展。
+        //
+        // 【为什么按字符数记账、不算 UTF-8 真实字节】记账发生在调用线程上，
+        // 逐条 Encoding.UTF8.GetByteCount 等于给每条日志多扫一遍字符串 ——
+        // 而这正是这次要省的开销。两个量都要说清，别混成一谈：
+        //   内存这边 .NET 字符串是 UTF-16，2M 字符就是约 4MB，这是缓冲的常驻上限；
+        //   落盘那边 UTF-8 最坏 3 字节一码点，所以同一批内容真写出来最多约 6MB，
+        //   仍低于 app.log 单档上限（5MB）× 滚动保留数，不会把历史档顶穿。
+        private const int MaxBufferedEntryChars = 8000;
+        private const int MaxBufferedChars = 2_000_000;
+        private const int MaxBufferedEntries = 2048;
+
+        // Error 把缓冲吐完之后，这段时间内 Debug 改为直接落盘。
+        // 出错的那一刻人多半正在盯现场，这时再把细节藏回缓冲，
+        // 等于在最要紧的半分钟里什么都看不见。
+        private const long AutoFlushQuietMs = 30000;
+
+        // 运行期缓冲开关，和 level.txt 同目录、同一轮询周期。
+        // 为什么还要多一个文件而不是复用 level.txt：读取日志.ps1 的 -SetLevel Debug
+        // 走的是「开了就能立刻 tail」的既有习惯，缓冲一开这条习惯就断了；
+        // 真需要实时细节时写一个 off 就退回旧行为，不用重新打包。
+        private const string BufferFileName = "buffer.txt";
+
         // 运行期级别开关所在的文件名（放在日志目录里，和日志一起被导出）。
         private const string LevelFileName = "level.txt";
 
@@ -123,6 +159,21 @@ namespace DockedTools.Features.UnifiedCalls.Logging
         // 让既有排查习惯突然少日志。低于该级别的调用连字符串都不拼。
         // 用 int + Volatile 读写：调用线程与写线程都要碰，不能上锁。
         private static int _minimumLevel = (int)LogLevel.Info;
+
+        // ── Debug 缓冲的运行时状态 ──────────────────────────────────────
+        // 多线程读写（各条调用线程 + 唯一的写线程），一把只保护内存的小锁。
+        // 铁律和 Enqueue 一样：锁里绝不碰磁盘，也不做任何可能等待的事。
+        private static readonly object _bufferLock = new();
+        private static readonly Queue<string> _buffer = new();
+
+        /// <summary>缓冲内已计账的字符总数（与 _buffer 同步，只在 _bufferLock 内读写）</summary>
+        private static int _bufferChars;
+
+        /// <summary>缓冲总开关（1 = 开，buffer.txt 写 off 关掉）。默认开。</summary>
+        private static int _bufferEnabled = 1;
+
+        /// <summary>Error 吐完缓冲之后的「直写期」截止 tick（Volatile，长读长写都要原子）</summary>
+        private static long _quietUntilTick;
 
         // ── 只在写线程上访问，除了 Flush ──────────────────────────────
         // Flush 想替写线程把缓冲压下去，必须和它抢同一把锁（TryEnter，等不起就放弃）。
@@ -320,9 +371,11 @@ namespace DockedTools.Features.UnifiedCalls.Logging
         /// 记录调试信息。
         ///
         /// 控制台：Debug 编译下始终输出，保持原来的开发习惯（Release 里近乎无开销）。
-        /// 落盘：只有把 logs\level.txt 设成 Debug 才会写文件 —— 官方口径里
+        /// 落盘：只有把 logs\level.txt 设成 Debug 才会进入日志链路 —— 官方口径里
         /// Trace 级别不进生产环境，Debug 也是「量大、只给复现现场用」的档，
         /// 默认落盘等于把用户的盘拿来存开发噪音。
+        /// 而且进了链路也不等于立刻写盘：默认先进内存缓冲，
+        /// 等有 Error 时再整段吐到 app.log（要实时 tail 就往 buffer.txt 写 off）。
         /// </summary>
         public static void Debug(
             string module,
@@ -360,7 +413,8 @@ namespace DockedTools.Features.UnifiedCalls.Logging
 
             if (toFile)
             {
-                Enqueue(LogLevel.Debug, logMessage, "app.log", requiresImmediateFlush: false);
+                // 进内存缓冲，不等 Error；真要立刻看见细节时 buffer.txt 写 off 退回直写
+                BufferOrEnqueueDebug(logMessage);
             }
         }
 
@@ -421,7 +475,101 @@ namespace DockedTools.Features.UnifiedCalls.Logging
             // 总是输出到调试控制台（Release 下等价于近乎无开销）
             System.Diagnostics.Debug.WriteLine(message);
 
+            // Error 是「出事了」的唯一信号：先把 Debug 缓冲吐进队列，排在它前面，
+            // 这条 Error 才有前因可查。顺序天然正确 —— 同一条队列、同一条写线程，
+            // 而且 app.log 与 error.log 本来就是两个文件，不存在互相插队的问题。
+            if (level == LogLevel.Error)
+            {
+                FlushBufferToQueue();
+            }
+
             Enqueue(level, message, fileName, requiresImmediateFlush);
+        }
+
+        /// <summary>
+        /// Debug 档这一条到底怎么走：进内存缓冲，还是直接排队落盘。
+        /// 只在调用线程上做内存操作，任何情况下不碰磁盘 —— 和 Enqueue 同一条纪律。
+        /// </summary>
+        private static void BufferOrEnqueueDebug(string message)
+        {
+            // 两种情况直写：开关被关掉；或刚被 Error 触发过一次吐盘、还在静默期内
+            bool directWrite = Volatile.Read(ref _bufferEnabled) == 0 ||
+                Environment.TickCount64 < Volatile.Read(ref _quietUntilTick);
+
+            if (directWrite)
+            {
+                Enqueue(LogLevel.Debug, message, "app.log", requiresImmediateFlush: false);
+                return;
+            }
+
+            // 单条过长不进缓冲（官方口径：过大的记录照常 emit）。
+            // 超长的那条多半是带正文回显的流水账，直写让它至少留在盘上，
+            // 也避免它一条就把字符预算吃光、把真正有用的上下文挤掉。
+            if (message.Length > MaxBufferedEntryChars)
+            {
+                Enqueue(LogLevel.Debug, message, "app.log", requiresImmediateFlush: false);
+                return;
+            }
+
+            lock (_bufferLock)
+            {
+                _buffer.Enqueue(message);
+                _bufferChars += message.Length;
+
+                // 环形语义：超预算就从最旧的一端丢，保住的一定是「离事故最近的那段」。
+                // 至少留 1 条，避免记账和条数两个上限互相顶出死循环。
+                while ((_bufferChars > MaxBufferedChars || _buffer.Count > MaxBufferedEntries) &&
+                    _buffer.Count > 1)
+                {
+                    if (_buffer.TryDequeue(out string? stale))
+                    {
+                        _bufferChars -= stale.Length;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// 把 Debug 缓冲吐进落盘队列，排在即将入队的那条 Error 前面。
+        ///
+        /// 【为什么敢在调用线程上做】这里只把内存里的字符串搬到队列，
+        /// 磁盘 IO 仍然全部由唯一的写线程串行完成；Enqueue 用的是非阻塞 TryAdd，
+        /// 队列满就丢缓冲条目并计入 _droppedEntries，绝不把调用方（通常是 UI 线程）按住。
+        /// 【为什么要留一条说明】缓冲是「按需落盘」的，盘上会突然出现一大段 Debug。
+        /// 不写清是谁触发的、上限多少，事后读日志的人只会疑惑这些哪来的。
+        /// </summary>
+        private static void FlushBufferToQueue()
+        {
+            string[] snapshot;
+
+            lock (_bufferLock)
+            {
+                if (_buffer.Count == 0)
+                {
+                    return;
+                }
+
+                snapshot = _buffer.ToArray();
+                _buffer.Clear();
+                _bufferChars = 0;
+            }
+
+            Volatile.Write(ref _quietUntilTick, Environment.TickCount64 + AutoFlushQuietMs);
+
+            // 出锁再入队：Enqueue 会碰队列自己的锁，不能和 _bufferLock 套在一起。
+            foreach (var message in snapshot)
+            {
+                Enqueue(LogLevel.Debug, message, "app.log", requiresImmediateFlush: false);
+            }
+
+            Enqueue(
+                LogLevel.Debug,
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [Debug] [LogService] " +
+                $"以上是出错前排入内存缓冲的 {snapshot.Length} 条 Debug 现场" +
+                $"（缓冲上限 {MaxBufferedEntries} 条 / 约 {MaxBufferedChars / 1000000}M 字符），" +
+                $"此后 {AutoFlushQuietMs / 1000} 秒内的 Debug 直接落盘",
+                "app.log",
+                requiresImmediateFlush: false);
         }
 
         /// <summary>
@@ -586,6 +734,7 @@ namespace DockedTools.Features.UnifiedCalls.Logging
                         {
                             ReportDroppedEntries();
                             PollLevelFile();
+                            PollBufferFile();
                             RunPendingCleanup();
                             nextMaintenanceAt = Environment.TickCount64 + TakeTimeoutMs;
                         }
@@ -997,6 +1146,80 @@ namespace DockedTools.Features.UnifiedCalls.Logging
         }
 
         /// <summary>
+        /// 读 logs\buffer.txt，更新 Debug 缓冲开关。只在写线程上调用，和 level.txt 同一轮。
+        ///
+        /// 文件不存在 / 读不了 ⇒ 回到默认（开缓冲）。这个开关是「出问题时的逃生口」，
+        /// 不能因为自己读不到就悄悄切成更吵的那一路 —— 那样日志目录反而会被流水账撑爆。
+        /// </summary>
+        private static void PollBufferFile()
+        {
+            try
+            {
+                EnsureLogDirectory();
+
+                if (_logDirectory == null)
+                {
+                    return;
+                }
+
+                var path = Path.Combine(_logDirectory, BufferFileName);
+                if (!File.Exists(path))
+                {
+                    ApplyBufferText(null);
+                    return;
+                }
+
+                string text;
+                // FileShare.ReadWrite：记事本正开着也能读到已经落下的部分
+                using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (var reader = new StreamReader(stream))
+                {
+                    text = reader.ReadToEnd();
+                }
+
+                ApplyBufferText(text);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[LogService] 读取 {BufferFileName} 失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>解析缓冲开关文本：off / false / 0 / 关闭 = 退回直写，其它一律按默认（开）</summary>
+        private static void ApplyBufferText(string? text)
+        {
+            bool enabled = true;
+
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                var trimmed = text.Trim().TrimStart('\uFEFF').Trim();
+
+                if (trimmed.Equals("off", StringComparison.OrdinalIgnoreCase) ||
+                    trimmed.Equals("false", StringComparison.OrdinalIgnoreCase) ||
+                    trimmed == "0" ||
+                    trimmed == "关闭")
+                {
+                    enabled = false;
+                }
+            }
+
+            int target = enabled ? 1 : 0;
+            int previous = Interlocked.Exchange(ref _bufferEnabled, target);
+            if (previous != target)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[LogService] Debug 缓冲已{(enabled ? "开启（只有 Error 才落盘）" : "关闭（Debug 逐条落盘）")}");
+            }
+        }
+
+        /// <summary>缓冲开关文件的完整路径，便于诊断信息和 CLI 提示</summary>
+        public static string? GetBufferFilePath()
+        {
+            var directory = GetLogDirectory();
+            return directory == null ? null : Path.Combine(directory, BufferFileName);
+        }
+
+        /// <summary>
         /// 清理历史日志（保留最近 N 天）。
         ///
         /// 【为什么不能按「所有 *.log 都按时间删」】
@@ -1075,7 +1298,10 @@ namespace DockedTools.Features.UnifiedCalls.Logging
         /// <summary>这个文件是不是「可以按年龄删掉的历史档」</summary>
         private static bool IsRemovableHistoryFile(string fileName)
         {
-            if (string.Equals(fileName, LevelFileName, StringComparison.OrdinalIgnoreCase))
+            // 两个运行期开关文件都不是「历史档」：它们的 LastWriteTime 天然会一直变旧
+            // （用户设好就不再碰），按年龄清理会把排查设置一起清没。
+            if (string.Equals(fileName, LevelFileName, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(fileName, BufferFileName, StringComparison.OrdinalIgnoreCase))
             {
                 return false;
             }

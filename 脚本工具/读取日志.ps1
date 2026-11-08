@@ -7,6 +7,9 @@
       app.log    —— Debug / Info / Warning（滚动档 app.log.1 … app.log.4）
       error.log  —— Error（逐条刷盘，崩溃现场优先看这个）
       level.txt  —— 运行期级别开关，写 Debug / Info / Warning / Error 之一
+      buffer.txt —— 运行期 Debug 缓冲开关，写 on / off 之一；不存在 = on（默认缓冲）
+                     Debug 档先进内存环形缓冲，只有出现 Error 时才整段吐进 app.log；
+                     写 off 退回「Debug 逐条落盘」，-Follow 实时 tail 就用它。
 
     为什么要这个脚本：MSIX 容器路径不好记、Release 包没有控制台、
     而且出问题的时候应用可能根本打不开设置页 —— 一条命令能看日志、
@@ -56,6 +59,10 @@
 .PARAMETER ShowLevel
     显示当前落盘级别与 level.txt 路径。
 
+.PARAMETER SetBuffer
+    写 buffer.txt 切换 Debug 档的落盘方式：on = 进内存缓冲、出错才吐盘（默认）；
+    off = 逐条落盘，配合 -Follow 实时看细节。最多 5 秒后生效，不用重启应用。
+
 .PARAMETER Package
     读哪个包的日志：auto（默认，取最近写入的那个）/ release / debug / all。
 
@@ -95,6 +102,7 @@ param(
     [string]$Export,
     [ValidateSet('Debug', 'Info', 'Warning', 'Error')]$SetLevel,
     [switch]$ShowLevel,
+    [ValidateSet('on', 'off')]$SetBuffer,
     [ValidateSet('auto', 'release', 'debug', 'all')]$Package = 'auto',
     [string]$PathOverride,
     [switch]$BuildLog
@@ -355,7 +363,25 @@ function Write-CurrentLevel {
         if ($text) { $level = $text }
     }
     Write-Host ("当前落盘级别: {0}   ({1})" -f $level, $levelPath) -ForegroundColor Cyan
-    Write-Host 'Debug 档默认不落盘，需要时：读取日志.ps1 -SetLevel Debug' -ForegroundColor DarkGray
+
+    # Debug 档现在默认走内存缓冲（LogService 里的 buffer.txt），不写出来会让人以为
+    # 「开了 Debug 却看不到 Debug 行」是应用坏了 —— 其实是它在等一条 Error 才吐盘。
+    $bufferPath = Join-Path $Directory 'buffer.txt'
+    $buffer = 'on'
+    if (Test-Path -LiteralPath $bufferPath) {
+        $reader = Open-SharedTextReader -Path $bufferPath
+        try { $bufferText = $reader.ReadToEnd().Trim() } finally { $reader.Dispose() }
+        if ($bufferText) { $buffer = $bufferText }
+    }
+    Write-Host ("Debug 缓冲: {0}   ({1})" -f $buffer, $bufferPath) -ForegroundColor Cyan
+
+    if ($buffer -eq 'off') {
+        Write-Host 'Debug 正在逐条落盘（实时 tail 状态）；排查完 -SetBuffer on 关回缓冲。' -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host 'Debug 先进内存缓冲，只有出现 Error 时才整段吐到 app.log。' -ForegroundColor DarkGray
+        Write-Host '要实时逐条看 Debug：读取日志.ps1 -SetBuffer off；只要细节别刷屏：-SetLevel Debug 并保持缓冲开着。' -ForegroundColor DarkGray
+    }
 }
 
 # ── 构建日志分支（和运行时日志是两回事，单独走）──────────────────────
@@ -384,6 +410,23 @@ if ($SetLevel) {
     [System.IO.File]::WriteAllText($levelPath, $SetLevel, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host ("已写入 {0} -> {1}" -f $levelPath, $SetLevel) -ForegroundColor Green
     Write-Host '写线程最多 5 秒后生效，不用重启应用；排查完记得 -SetLevel Info 关回去。' -ForegroundColor DarkGray
+    return
+}
+
+if ($SetBuffer) {
+    $bufferPath = Join-Path $firstDirectory 'buffer.txt'
+    # UTF8 无 BOM：和 level.txt 同一条纪律（应用侧虽然会 trim BOM，但别处不一定）
+    [System.IO.File]::WriteAllText($bufferPath, $SetBuffer, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host ("已写入 {0} -> {1}" -f $bufferPath, $SetBuffer) -ForegroundColor Green
+
+    if ($SetBuffer -eq 'off') {
+        Write-Host 'Debug 改为逐条落盘，可以 -Follow 实时看了；排查完记得 -SetBuffer on 关回缓冲。' -ForegroundColor DarkGray
+        Write-Host '否则 app.log 会被设置读取的流水账刷满 —— 本机实测那种噪音占过整份日志的 98%。' -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host 'Debug 回到内存缓冲：平时不落盘，出现 Error 时把出错前那段现场整段吐进 app.log。' -ForegroundColor DarkGray
+    }
+    Write-Host '写线程最多 5 秒后生效，不用重启应用。' -ForegroundColor DarkGray
     return
 }
 

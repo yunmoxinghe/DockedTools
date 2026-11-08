@@ -2,6 +2,7 @@
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using DockedTools.Features.Debug;
 using DockedTools.Features.UnifiedCalls.Logging;
 
 namespace DockedTools.Features.Tray
@@ -413,6 +414,11 @@ namespace DockedTools.Features.Tray
         [return: MarshalAs(UnmanagedType.Bool)]
         private static partial bool IsHungAppWindow(IntPtr hWnd);
 
+        // 冻结现场要点名主 UI 线程，而本类手里只有窗口句柄 —— 句柄 → 线程 id 就靠这一步。
+        // 第二个参数传 IntPtr.Zero（不取进程 id）是 Win32 允许的用法。
+        [LibraryImport("user32.dll", EntryPoint = "GetWindowThreadProcessId")]
+        private static partial uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr lpdwProcessId);
+
         [LibraryImport("kernel32.dll", EntryPoint = "SetLastError")]
         private static partial void SetLastError(uint dwErr);
 
@@ -653,7 +659,46 @@ namespace DockedTools.Features.Tray
                 $"（探测超时 {ProbeTimeoutMs}ms，连续 {FrozenStreakThreshold} 轮无响应，" +
                 $"探测句柄 0x{_mainWindowHandle.ToInt64():X}，" +
                 $"系统口径未响应={_lastProbeSystemReportsHung}，Win32 错误={_lastProbeWin32Error}）。" +
-                "不自动重启；托盘运行在独立 UI 线程，此时仍可操作。");
+                "不自动重启；托盘运行在独立 UI 线程，此时仍可操作。" +
+                $"\n{CaptureThreadSnapshot()}");
+        }
+
+        /// <summary>
+        /// 冻结现场补一段线程快照 + 调试器状态。
+        ///
+        /// 【为什么要补】只有「冻结了 N 秒」这一句，事后根本分不出是哪一类阻塞 ——
+        /// 而这条 Error 是自愈拿掉之后**唯一的线索**。现在把整进程的线程清单附上：
+        /// 主 UI 线程是 Wait 在 Executive / LpcReceive（等内核、等跨进程往返）还是
+        /// UserRequest（等消息）；有没有别的线程占着 CPU；线程数涨没涨。
+        /// 顺带记下调试器是否附加 —— 被调试器挂住和代码真堵住，是两件完全不同的事，
+        /// 以前只能猜。
+        ///
+        /// 【为什么这里可以干这种活】本方法只在「判定冻结之后」被调用一次，
+        /// 跑在探测线程上（Task.Run），读的又是 ProcessThread 的公共属性：
+        /// 不碰磁盘、不碰任何 UI 线程亲和对象，也不会去等任何句柄。
+        /// 托管栈拿不到（本机实测：打包 + AOT 进程连 dotnet-stack 都 attach 不动），
+        /// 但 WaitReason 这一层不需要调试权限。
+        /// </summary>
+        private string CaptureThreadSnapshot()
+        {
+            try
+            {
+                int uiThreadId = 0;
+
+                if (_mainWindowHandle != IntPtr.Zero)
+                {
+                    uiThreadId = (int)GetWindowThreadProcessId(_mainWindowHandle, IntPtr.Zero);
+                }
+
+                string snapshot = ThreadDeadlockDetector.CaptureFreezeSnapshot(uiThreadId);
+
+                return $"调试器附加={System.Diagnostics.Debugger.IsAttached}；线程快照：\n{snapshot}";
+            }
+            catch (Exception ex)
+            {
+                // 取证代码绝不能反过来影响记录本身 —— 但要说清是没取到，不是没发生
+                return $"线程快照采集失败: {ex.GetType().Name}: {ex.Message}";
+            }
         }
 
         public void Dispose()

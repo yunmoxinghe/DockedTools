@@ -65,6 +65,44 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         /// </summary>
         public static string? Save(string appId, byte[]? bytes) => Save(appId, bytes, null);
 
+        /// <summary>
+        /// 把落盘那一步挪出调用线程，语义与 <see cref="Save"/> 完全一致。
+        ///
+        /// 【为什么必须挪】Save 里是建目录 + <c>File.WriteAllBytes</c> + 枚举目录删旧档，
+        /// 原先主页两处和 <see cref="SaveAsync"/> 的尾巴都在 UI 线程上直接调它。
+        /// 磁盘停顿、杀软扫描、MSIX 容器里的重定向写入，任何一条都能把 UI 线程按住，
+        /// 而且<b>没有任何超时上限</b> —— 这正是「软件为什么老是无响应」里唯一量不出上限的那一类。
+        ///
+        /// 【为什么可以挪】Save 内部不碰 UI 线程亲和的对象：染色和哈希是纯计算，
+        /// <c>KnownPaths</c> 自己有锁，落盘走的是已经取好的 LocalState 路径字符串。
+        ///
+        /// 【为什么主题要在切换线程之前解析完】<see cref="ResolveTheme"/> 在没显式传主题时
+        /// 要去问顶栏服务的系统亮暗，那是有线程亲和风险的一步；先在调用线程算成确定值，
+        /// 后台只做「按这个主题写字节」。解析结果本身是幂等的（Dark/Light 原样返回）。
+        ///
+        /// 【调用方必须 await 到底】主页那处「落盘之后立刻按主题读回染好色的那一版」
+        /// 依赖写已经完成的，异步化不等于发出去不管。
+        /// </summary>
+        public static Task<string?> SaveToDiskAsync(string appId, byte[]? bytes, ElementTheme? theme)
+        {
+            ElementTheme resolvedTheme = ResolveTheme(theme);
+
+            return Task.Run(() => Save(appId, bytes, resolvedTheme));
+        }
+
+        /// <summary><see cref="SaveToDiskAsync"/> 的两参重载：主题按系统当前亮暗解析。</summary>
+        public static Task<string?> SaveToDiskAsync(string appId, byte[]? bytes) =>
+            SaveToDiskAsync(appId, bytes, null);
+
+        /// <summary>
+        /// 把 SVG 原件旁路落盘挪出调用线程，语义与 <see cref="SaveIconSource"/> 一致。
+        /// 抓图标那条链路（网页浏览页面.Favicon.cs 的 SalvageSvgAsync）原本在 UI 线程上同步写原件文件。
+        /// </summary>
+        public static Task SaveIconSourceToDiskAsync(string? appId, byte[]? svgBytes)
+        {
+            return Task.Run(() => SaveIconSource(appId, svgBytes));
+        }
+
         /// <summary>按指定主题落盘；不指定就跟顶栏那份一致</summary>
         public static string? Save(string appId, byte[]? bytes, ElementTheme? theme)
         {
@@ -384,6 +422,17 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         /// </summary>
         public static string? SaveCard(string appId, byte[]? bytes) => SaveCard(appId, bytes, null);
 
+        /// <summary>
+        /// 把卡片档的落盘挪出调用线程，语义与 <see cref="SaveCard(string, byte[], ElementTheme?)"/> 一致。
+        /// 理由和 <see cref="SaveToDiskAsync"/> 同一条：里面是建目录 + WriteAllBytes，没有超时上限。
+        /// </summary>
+        public static Task<string?> SaveCardToDiskAsync(string appId, byte[]? bytes, ElementTheme? theme)
+        {
+            ElementTheme resolvedTheme = ResolveTheme(theme);
+
+            return Task.Run(() => SaveCard(appId, bytes, resolvedTheme));
+        }
+
         /// <summary>按指定主题存卡片档；不指定就跟顶栏那份一致</summary>
         public static string? SaveCard(string appId, byte[]? bytes, ElementTheme? theme)
         {
@@ -428,7 +477,8 @@ namespace DockedTools.Features.Pages.WebApp.Shared
         ///    主页却优先用卡片档那张 32×32 PNG —— 主页反而比侧边栏糊。
         ///    现在卡片档只服务「矢量 → 48px 高清位图」这一件事，位图源直接复用通用档。
         ///
-        /// ⚠️ 只在后台调用：Svg.Skia 在调用线程上同步画，成批刷新别压在 UI 线程。
+        /// ⚠️ 本方法自己不做线程调度，但里面那次 RasterizeSvgAsync 已经落到线程池
+        ///    （见 网页应用图标渲染器.cs 的 Task.Run），所以 UI 线程 await 它是安全的。
         /// </summary>
         public static async Task<string?> EnsureCardAsync(string appId, byte[]? fallbackBytes) =>
             await EnsureCardAsync(appId, fallbackBytes, null);
@@ -472,7 +522,10 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                 return null;
             }
 
-            return card is { Length: > 0 } ? SaveCard(appId, card, theme) : null;
+            // 落盘与光栅化现在都不在调用线程上：
+            //   RasterizeSvgAsync 内部已经改成 Task.Run（见 网页应用图标渲染器.cs），
+            //   SaveCardToDiskAsync 也一样 —— 所以主页可以放心 await，不再拖 UI 线程。
+            return card is { Length: > 0 } ? await SaveCardToDiskAsync(appId, card, theme) : null;
         }
 
         /// <summary>
@@ -953,7 +1006,10 @@ namespace DockedTools.Features.Pages.WebApp.Shared
                 System.Diagnostics.Debug.WriteLine($"[WebAppIconCache] 按主题重画失败，用现有图: {appId}, {ex.Message}");
             }
 
-            return Save(appId, bytes, theme);
+            // 尾巴这一步原先是同步 Save —— 也就是说「SaveAsync」只把渲染器挪走了，
+            // 写字节仍然压在调用线程（= UI 线程）上。这里换成异步壳才算真的离开。
+            // 传 resolvedTheme：上面已经解析过一次，别在后台线程再解析第二遍。
+            return await SaveToDiskAsync(appId, bytes, resolvedTheme);
         }
 
         /// <summary>位图图标在「当前主题的缓存槽」里该走哪条路</summary>
